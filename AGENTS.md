@@ -20,7 +20,7 @@
 MVP 已确认包含：
 
 - 通过正金额 `+` 记录收入，通过负金额 `-` 记录支出
-- 每条记录至少包含金额，并可附加文字或一张/多张截图作为凭证
+- 每条记录包含金额，且文字或截图至少提供一项；每笔最多附加一张截图作为凭证
 - 截图仅在本机保存；MVP 不包含 OCR 自动识别
 - 设置记录时间，分类与备注作为后续可选增强，不得阻碍极速记录
 - 查看、编辑和删除记录
@@ -47,7 +47,8 @@ MVP 已确认包含：
 - 账目文字、金额、初始余额和截图都只保存在本机；截图以 Blob 形式存入 IndexedDB，不依赖远程对象存储。
 - “多端”指跨手机、平板和桌面的响应式体验，不表示不同设备间同步数据。
 - 项目应支持部署到 GitHub Pages、Cloudflare Pages 等静态托管平台。
-- 在技术栈正式确定后，将具体命令和目录结构补充到本文件。
+- 技术栈为 Vite、React、TypeScript、Tailwind CSS、Dexie、Vitest 与 Playwright。
+- 本地开发使用 `npm run dev`，提交前运行 `npm run typecheck`、`npm run lint`、`npm test`、`npm run build` 与 `npm run test:e2e`。
 
 ## 开发约定
 
