@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      VITE_BASE_PATH: /jiyibi/
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

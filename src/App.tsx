@@ -1,8 +1,11 @@
 import {
   CircleAlert,
   CheckCircle2,
+  Cloud,
+  CloudAlert,
   CloudOff,
   HardDrive,
+  LoaderCircle,
   ReceiptText,
   RefreshCw,
   Settings,
@@ -25,7 +28,9 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { UndoToasts, type PendingDeletion } from "./components/UndoToasts";
 import { useLedger } from "./hooks/useLedger";
+import { useCloudSync } from "./hooks/useCloudSync";
 import { usePwa } from "./hooks/usePwa";
+import type { CloudSyncPhase } from "./components/CloudSyncSection";
 
 interface Notice {
   kind: "success" | "error";
@@ -57,9 +62,22 @@ function mutationError(reason: unknown, fallback: string): Error {
   return new Error(fallback);
 }
 
+function CloudStatusIcon({ phase }: { phase: CloudSyncPhase }) {
+  if (phase === "unavailable") return <HardDrive aria-hidden="true" />;
+  if (phase === "offline") return <CloudOff aria-hidden="true" />;
+  if (phase === "checking" || phase === "linking" || phase === "syncing") {
+    return <LoaderCircle className="spin" aria-hidden="true" />;
+  }
+  if (phase === "error" || phase === "conflict" || phase === "account-mismatch") {
+    return <CloudAlert aria-hidden="true" />;
+  }
+  return <Cloud aria-hidden="true" />;
+}
+
 export default function App() {
   const ledger = useLedger();
   const pwa = usePwa();
+  const cloud = useCloudSync();
   const [editingEntry, setEditingEntry] = useState<LedgerEntry>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState<PendingDeletion[]>([]);
@@ -87,6 +105,7 @@ export default function App() {
   const create = async (draft: EntryDraft) => {
     try {
       await createEntry(draft);
+      cloud.requestSync();
     } catch (reason) {
       throw mutationError(reason, "没有保存成功，请检查本机存储后重试");
     }
@@ -95,6 +114,7 @@ export default function App() {
   const saveEdit = async (id: string, draft: EntryDraft) => {
     try {
       await updateEntry(id, draft);
+      cloud.requestSync();
       showNotice({ kind: "success", message: "记录已更新，余额已重算" });
     } catch (reason) {
       throw mutationError(reason, "修改没有保存，请重试");
@@ -105,6 +125,7 @@ export default function App() {
     if (deletionTimers.current.has(entry.id)) return;
     try {
       await softDeleteEntry(entry.id);
+      cloud.requestSync();
       setPendingDeletes((current) => [
         ...current,
         { id: entry.id, label: entry.note || "截图记录" },
@@ -115,7 +136,7 @@ export default function App() {
         setPendingDeletes((current) => current.filter((item) => item.id !== entry.id));
         void purgeDeletedEntry(entry.id).catch(() => {
           showNotice({ kind: "error", message: "记录已隐藏，但附件清理失败" });
-        });
+        }).finally(cloud.requestSync);
       }, 8_000);
       deletionTimers.current.set(entry.id, timer);
     } catch {
@@ -129,6 +150,7 @@ export default function App() {
     deletionTimers.current.delete(id);
     try {
       await undoDeleteEntry(id);
+      cloud.requestSync();
       setPendingDeletes((current) => current.filter((item) => item.id !== id));
       showNotice({ kind: "success", message: "记录已恢复" });
       window.requestAnimationFrame(() => document.getElementById("records-title")?.focus());
@@ -156,10 +178,16 @@ export default function App() {
           </div>
         </div>
         <div className="header-actions">
-          <span className={`local-status ${pwa.online ? "" : "is-offline"}`} aria-live="polite">
-            {pwa.online ? <HardDrive aria-hidden="true" /> : <CloudOff aria-hidden="true" />}
-            <span>{pwa.online ? "只存本机" : "离线可用"}</span>
-          </span>
+          <button
+            type="button"
+            className={`local-status sync-status-button ${cloud.phase === "offline" ? "is-offline" : ""} ${["error", "conflict", "account-mismatch"].includes(cloud.phase) ? "has-error" : ""}`}
+            onClick={() => setSettingsOpen(true)}
+            aria-label={`查看云同步详情：${cloud.headerLabel}`}
+            title={`${cloud.headerLabel}，查看同步详情`}
+          >
+            <CloudStatusIcon phase={cloud.phase} />
+            <span>{cloud.headerLabel}</span>
+          </button>
           <button type="button" className="icon-button header-settings" onClick={() => setSettingsOpen(true)} aria-label="打开设置" title="设置">
             <Settings aria-hidden="true" />
           </button>
@@ -168,7 +196,7 @@ export default function App() {
 
       {!pwa.online ? (
         <div className="network-banner" role="status">
-          <CloudOff aria-hidden="true" /> 当前离线，仍可查看和记录本机账目。
+          <CloudOff aria-hidden="true" /> 当前离线，仍可查看和记录本机账目{cloud.linked ? "；联网后会继续同步。" : "。"}
         </div>
       ) : null}
 
@@ -186,7 +214,10 @@ export default function App() {
         <div className="workspace-grid">
           <EntryComposer
             onCreate={create}
-            onSaved={() => showNotice({ kind: "success", message: "已保存，余额已更新" })}
+            onSaved={() => showNotice({
+              kind: "success",
+              message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
+            })}
           />
           <SummaryPanel
             summary={ledger.summary}
@@ -205,6 +236,7 @@ export default function App() {
           <RecordList
             entries={ledger.entries}
             loading={ledger.loading}
+            loadAttachment={cloud.loadAttachment}
             onEdit={setEditingEntry}
             onDelete={(entry) => void deleteEntry(entry)}
             onStartEntry={focusComposer}
@@ -213,12 +245,13 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <span><HardDrive aria-hidden="true" /> 数据仅保存在这台设备</span>
+        <span><HardDrive aria-hidden="true" /> {cloud.linked ? "本机保存，登录后同步" : "数据保存在这台设备"}</span>
         <span>{pwa.online ? <Wifi aria-hidden="true" /> : <CloudOff aria-hidden="true" />}{pwa.online ? "在线" : "离线"}</span>
       </footer>
 
       <EditEntryDialog
         entry={editingEntry}
+        loadAttachment={cloud.loadAttachment}
         onClose={() => setEditingEntry(undefined)}
         onSave={saveEdit}
       />
@@ -226,8 +259,12 @@ export default function App() {
         open={settingsOpen}
         settings={ledger.settings}
         pwa={pwa}
+        cloudSync={cloud.settingsProps}
         onClose={() => setSettingsOpen(false)}
-        onDataChanged={() => showNotice({ kind: "success", message: "本机数据已更新" })}
+        onDataChanged={() => {
+          cloud.requestSync();
+          showNotice({ kind: "success", message: cloud.linked ? "本机数据已更新，正在同步" : "本机数据已更新" });
+        }}
       />
 
       <UndoToasts items={pendingDeletes} onUndo={(id) => void undoDelete(id)} />

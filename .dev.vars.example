@@ -1,0 +1,14 @@
+# Local Pages Functions authentication compatibility path. Never use these values in production.
+ENVIRONMENT="development"
+LOCAL_AUTH_EMAIL="developer@example.com"
+
+# Production GitHub OAuth is configured in Cloudflare Pages, not this file.
+# All three values are required in production. GITHUB_ALLOWED_USER_ID is the
+# account's numeric GitHub User ID, not its username.
+# GITHUB_CLIENT_ID="your-github-oauth-app-client-id"
+# GITHUB_CLIENT_SECRET="set-this-as-a-cloudflare-secret"
+# GITHUB_ALLOWED_USER_ID="12345678"
+
+# Optional Cloudflare Access compatibility path. GitHub OAuth does not require it.
+# TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
+# POLICY_AUD="your-access-application-aud-tag"

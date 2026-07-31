@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "jiyibi",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-07-29",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jiyibi",
+      "database_id": "07b64fa8-b444-459b-b32d-2485fb0c0bc3",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "ATTACHMENTS",
+      "id": "4b2a4dee48de42b7ae323e6b18e0f584"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "GITHUB_ALLOWED_USER_ID": "98072271"
+  }
+}

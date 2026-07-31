@@ -33,6 +33,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "npm run build && npm run preview -- --host 127.0.0.1 --port 4198 --strictPort",
+    env: { VITE_BASE_PATH: "/jiyibi/" },
     url: "http://127.0.0.1:4198/jiyibi/",
     reuseExistingServer: false,
     timeout: 120_000

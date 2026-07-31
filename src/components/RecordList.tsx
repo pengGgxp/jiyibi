@@ -20,6 +20,7 @@ import { useObjectUrl } from "../hooks/useObjectUrl";
 interface RecordListProps {
   entries: LedgerEntry[];
   loading: boolean;
+  loadAttachment?(attachmentId: string): Promise<Attachment | undefined>;
   onEdit(entry: LedgerEntry): void;
   onDelete(entry: LedgerEntry): void;
   onStartEntry(): void;
@@ -54,7 +55,13 @@ function signedAmount(entry: LedgerEntry): string {
   return `${entry.amountMinor < 0 ? "−" : "+"}${absolute}`;
 }
 
-function AttachmentThumbnail({ entry }: { entry: LedgerEntry }) {
+function AttachmentThumbnail({
+  entry,
+  loadAttachment,
+}: {
+  entry: LedgerEntry;
+  loadAttachment(attachmentId: string): Promise<Attachment | undefined>;
+}) {
   const [attachment, setAttachment] = useState<Attachment>();
   const [loadAttachmentId, setLoadAttachmentId] = useState<string>();
   const [failed, setFailed] = useState(false);
@@ -89,7 +96,7 @@ function AttachmentThumbnail({ entry }: { entry: LedgerEntry }) {
   useEffect(() => {
     let active = true;
     if (!entry.attachmentId || loadAttachmentId !== entry.attachmentId) return undefined;
-    void getAttachment(entry.attachmentId)
+    void loadAttachment(entry.attachmentId)
       .then((result) => {
         if (active) {
           setAttachment(result);
@@ -102,7 +109,7 @@ function AttachmentThumbnail({ entry }: { entry: LedgerEntry }) {
     return () => {
       active = false;
     };
-  }, [entry.attachmentId, loadAttachmentId]);
+  }, [entry.attachmentId, loadAttachmentId, loadAttachment]);
 
   if (!entry.attachmentId) {
     const isExpense = entry.amountMinor < 0;
@@ -129,7 +136,14 @@ function AttachmentThumbnail({ entry }: { entry: LedgerEntry }) {
   );
 }
 
-export function RecordList({ entries, loading, onEdit, onDelete, onStartEntry }: RecordListProps) {
+export function RecordList({
+  entries,
+  loading,
+  loadAttachment = getAttachment,
+  onEdit,
+  onDelete,
+  onStartEntry,
+}: RecordListProps) {
   const groups = useMemo(() => {
     const next = new Map<string, LedgerEntry[]>();
     for (const entry of entries) {
@@ -177,7 +191,7 @@ export function RecordList({ entries, loading, onEdit, onDelete, onStartEntry }:
                   return (
                     <li key={entry.id}>
                       <article className="record-row">
-                        <AttachmentThumbnail entry={entry} />
+                        <AttachmentThumbnail entry={entry} loadAttachment={loadAttachment} />
                         <div className="record-copy">
                           <p>{entry.note || "截图记录"}</p>
                           <span>{entryTime(entry)} · {isExpense ? "支出" : "收入"}</span>

@@ -21,7 +21,7 @@ MVP 已确认包含：
 
 - 通过正金额 `+` 记录收入，通过负金额 `-` 记录支出
 - 每条记录包含金额，且文字或截图至少提供一项；每笔最多附加一张截图作为凭证
-- 截图仅在本机保存；MVP 不包含 OCR 自动识别
+- 截图默认仅在本机保存；用户明确开启云同步后可上传压缩 JPEG 云副本；MVP 不包含 OCR 自动识别
 - 设置记录时间，分类与备注作为后续可选增强，不得阻碍极速记录
 - 查看、编辑和删除记录
 - 按时间展示账目列表
@@ -33,8 +33,7 @@ MVP 已确认包含：
 
 在需求明确前，以下内容不属于 MVP：
 
-- 多用户与复杂账号体系
-- 登录、云同步与多设备数据同步
+- 公开注册、多租户管理与复杂账号体系
 - 银行卡或支付平台自动同步
 - 复杂预算、投资和资产管理
 - 完整的会计或企业财务报表
@@ -44,9 +43,15 @@ MVP 已确认包含：
 - 采用适合静态部署的单页 Web 应用架构。
 - 使用 Web App Manifest 和 Service Worker 提供 PWA 能力。
 - 账目优先存储在 IndexedDB；轻量偏好设置可使用 localStorage。
-- 账目文字、金额、初始余额和截图都只保存在本机；截图以 Blob 形式存入 IndexedDB，不依赖远程对象存储。
-- “多端”指跨手机、平板和桌面的响应式体验，不表示不同设备间同步数据。
+- 账目文字、金额、初始余额和截图先写入本机 IndexedDB；用户启用云同步后，账目与同步元数据的云副本写入 D1，压缩 JPEG 截图云副本写入绑定名为 `ATTACHMENTS` 的 Workers KV。
+- “多端”首先指跨手机、平板和桌面的响应式体验；登录并明确开启同步后，同一账号可在不同设备间同步数据。
+- 用户已批准增加可选的登录与在线同步：本机 IndexedDB 仍是即时写入点，默认生产认证使用只允许指定数字 GitHub User ID 的 GitHub OAuth，Cloudflare Access 与本地身份仅作为兼容路径；D1 保存认证哈希、账目与同步元数据，Workers KV 保存截图云副本，该方案不依赖 R2 或银行卡。
+- GitHub OAuth state 必须与 HttpOnly nonce cookie 绑定并在 D1 中只保存哈希；应用会话使用随机令牌和 `HttpOnly`、`Secure`、`SameSite=Lax` cookie，D1 只保存 SHA-256 令牌哈希。
+- 云同步不得阻塞本机保存；登录前必须明确说明上传范围，多设备冲突不得用客户端时间戳静默覆盖。
+- Workers KV 是最终一致存储；刚上传的截图在另一设备上可能短暂不可见，客户端应允许重试且不得影响本机 IndexedDB 保存。
+- Workers KV 写入必须持有当前账号代次的短期上传租约；账号删除在活动租约结束前不得报告完成，异常中断的租约需有明确过期机制，并通过 cursor 完整扫描当前账号代次前缀下的 KV key。最后一个租约释放且扫描为空后，必须经过至少 60 秒传播静默窗口并再次全扫描才可完成删除。
 - 项目应支持部署到 GitHub Pages、Cloudflare Pages 等静态托管平台。
+- GitHub Pages 不提供 Pages Functions、GitHub OAuth 回调、D1 或 Workers KV bindings，因此其部署只支持本机账本，不提供登录与在线同步。
 - 技术栈为 Vite、React、TypeScript、Tailwind CSS、Dexie、Vitest 与 Playwright。
 - 本地开发使用 `npm run dev`，提交前运行 `npm run typecheck`、`npm run lint`、`npm test`、`npm run build` 与 `npm run test:e2e`。
 

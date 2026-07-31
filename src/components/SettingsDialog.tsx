@@ -24,12 +24,14 @@ import {
 import { formatCny, parseSignedAmountToMinor, type AppSettings } from "../domain";
 import type { PwaState } from "../hooks/usePwa";
 import { useStorageEstimate } from "../hooks/useStorageEstimate";
+import { CloudSyncSection, type CloudSyncSectionProps } from "./CloudSyncSection";
 import { Modal } from "./Modal";
 
 interface SettingsDialogProps {
   open: boolean;
   settings?: AppSettings;
   pwa: PwaState;
+  cloudSync: CloudSyncSectionProps;
   onClose(): void;
   onDataChanged(): void;
 }
@@ -66,7 +68,14 @@ function backupErrorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : "操作失败，请重试";
 }
 
-export function SettingsDialog({ open, settings, pwa, onClose, onDataChanged }: SettingsDialogProps) {
+export function SettingsDialog({
+  open,
+  settings,
+  pwa,
+  cloudSync,
+  onClose,
+  onDataChanged,
+}: SettingsDialogProps) {
   const [initialBalance, setInitialBalanceInput] = useState("0.00");
   const [balanceError, setBalanceError] = useState<string>();
   const [balanceStatus, setBalanceStatus] = useState<string>();
@@ -196,7 +205,7 @@ export function SettingsDialog({ open, settings, pwa, onClose, onDataChanged }: 
   };
 
   return (
-    <Modal open={open} title="设置" description="管理这台设备上的账目和备份。" size="wide" onClose={onClose}>
+    <Modal open={open} title="设置" description="管理本机账本、云同步和备份。" size="wide" onClose={onClose}>
       <div className="settings-stack">
         <section className="settings-section" aria-labelledby="balance-setting-title">
           <div className="settings-section-heading">
@@ -233,6 +242,8 @@ export function SettingsDialog({ open, settings, pwa, onClose, onDataChanged }: 
           </form>
           {balanceStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {balanceStatus}</p> : null}
         </section>
+
+        <CloudSyncSection {...cloudSync} />
 
         <section className="settings-section" aria-labelledby="device-setting-title">
           <div className="settings-section-heading">
@@ -299,43 +310,59 @@ export function SettingsDialog({ open, settings, pwa, onClose, onDataChanged }: 
             </form>
           </details>
 
-          <details className="settings-disclosure">
-            <summary><span><Upload aria-hidden="true" /> 恢复备份</span></summary>
-            <form className="backup-form" onSubmit={(event) => void inspectRestore(event)} noValidate>
-              <div className="field-group compact-field">
-                <label htmlFor="restore-file">备份文件</label>
-                <input id="restore-file" className="file-input" type="file" accept=".jiyibi,application/vnd.jiyibi.backup+json,application/json" onChange={(event) => { setRestoreFile(event.target.files?.[0]); setPrepared(undefined); setRestoreStatus(undefined); }} />
-              </div>
-              <div className="field-group compact-field">
-                <label htmlFor="restore-password">备份密码</label>
-                <div className="password-input"><KeyRound aria-hidden="true" /><input id="restore-password" type="password" autoComplete="current-password" value={restorePassword} onChange={(event) => setRestorePassword(event.target.value)} /></div>
-              </div>
-              <button type="submit" className="secondary-button" disabled={restoring}>
-                {restoring ? <LoaderCircle className="spin" aria-hidden="true" /> : <ArchiveRestore aria-hidden="true" />}
-                {restoring ? "正在检查" : "检查备份"}
+          {cloudSync.linked ? (
+            <div className="settings-disclosure settings-disclosure--disabled">
+              <button
+                type="button"
+                className="settings-disclosure-disabled-trigger"
+                aria-describedby="restore-unavailable-reason"
+                disabled
+              >
+                <span><Upload aria-hidden="true" /> 恢复备份</span>
               </button>
-            </form>
-
-            {prepared ? (
-              <div className="restore-preview" role="region" aria-labelledby="restore-preview-title">
-                <div>
-                  <h4 id="restore-preview-title">确认恢复</h4>
-                  <p>{new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(prepared.preview.exportedAt))} 导出的备份</p>
+              <p id="restore-unavailable-reason" className="settings-disclosure-disabled-copy">
+                当前账本已连接云同步，暂不能恢复备份，以免覆盖云端数据。你仍可导出备份；需要恢复时，请使用尚未连接云同步的浏览器。
+              </p>
+            </div>
+          ) : (
+            <details className="settings-disclosure">
+              <summary><span><Upload aria-hidden="true" /> 恢复备份</span></summary>
+              <form className="backup-form" onSubmit={(event) => void inspectRestore(event)} noValidate>
+                <div className="field-group compact-field">
+                  <label htmlFor="restore-file">备份文件</label>
+                  <input id="restore-file" className="file-input" type="file" accept=".jiyibi,application/vnd.jiyibi.backup+json,application/json" onChange={(event) => { setRestoreFile(event.target.files?.[0]); setPrepared(undefined); setRestoreStatus(undefined); }} />
                 </div>
-                <dl>
-                  <div><dt>记录</dt><dd>{prepared.preview.entryCount} 笔</dd></div>
-                  <div><dt>截图</dt><dd>{prepared.preview.attachmentCount} 张</dd></div>
-                  <div><dt>初始余额</dt><dd>{formatCny(prepared.preview.initialBalanceMinor)}</dd></div>
-                </dl>
-                <p className="restore-warning">恢复会整体替换当前设备上的账目，且不能撤销。</p>
-                <button type="button" className="destructive-button" disabled={restoring} onClick={() => void confirmRestore()}>
+                <div className="field-group compact-field">
+                  <label htmlFor="restore-password">备份密码</label>
+                  <div className="password-input"><KeyRound aria-hidden="true" /><input id="restore-password" type="password" autoComplete="current-password" value={restorePassword} onChange={(event) => setRestorePassword(event.target.value)} /></div>
+                </div>
+                <button type="submit" className="secondary-button" disabled={restoring}>
                   {restoring ? <LoaderCircle className="spin" aria-hidden="true" /> : <ArchiveRestore aria-hidden="true" />}
-                  确认覆盖并恢复
+                  {restoring ? "正在检查" : "检查备份"}
                 </button>
-              </div>
-            ) : null}
-            {restoreStatus ? <p className="inline-message" role="status">{restoreStatus}</p> : null}
-          </details>
+              </form>
+
+              {prepared ? (
+                <div className="restore-preview" role="region" aria-labelledby="restore-preview-title">
+                  <div>
+                    <h4 id="restore-preview-title">确认恢复</h4>
+                    <p>{new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(prepared.preview.exportedAt))} 导出的备份</p>
+                  </div>
+                  <dl>
+                    <div><dt>记录</dt><dd>{prepared.preview.entryCount} 笔</dd></div>
+                    <div><dt>截图</dt><dd>{prepared.preview.attachmentCount} 张</dd></div>
+                    <div><dt>初始余额</dt><dd>{formatCny(prepared.preview.initialBalanceMinor)}</dd></div>
+                  </dl>
+                  <p className="restore-warning">恢复会整体替换当前设备上的账目，且不能撤销。</p>
+                  <button type="button" className="destructive-button" disabled={restoring} onClick={() => void confirmRestore()}>
+                    {restoring ? <LoaderCircle className="spin" aria-hidden="true" /> : <ArchiveRestore aria-hidden="true" />}
+                    确认覆盖并恢复
+                  </button>
+                </div>
+              ) : null}
+              {restoreStatus ? <p className="inline-message" role="status">{restoreStatus}</p> : null}
+            </details>
+          )}
         </section>
       </div>
     </Modal>

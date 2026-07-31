@@ -3,10 +3,13 @@ dist/
 playwright-report/
 test-results/
 coverage/
+.wrangler/
 *.local
 *.jiyibi
 .env
 .env.*
 !.env.example
+.dev.vars
+!.dev.vars.example
 .DS_Store
 Thumbs.db

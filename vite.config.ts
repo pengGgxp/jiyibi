@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
-  base: "/jiyibi/",
+  base: process.env.VITE_BASE_PATH ?? "/",
   plugins: [
     react(),
     tailwindcss(),
@@ -15,7 +15,7 @@ export default defineConfig({
       manifest: {
         name: "记一笔",
         short_name: "记一笔",
-        description: "只存在本机的极速收支记录工具",
+        description: "本地优先、可选云同步的极速收支记录工具",
         lang: "zh-CN",
         start_url: ".",
         scope: ".",
@@ -46,7 +46,23 @@ export default defineConfig({
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
         cleanupOutdatedCaches: true,
-        clientsClaim: true
+        clientsClaim: true,
+        navigateFallbackDenylist: [
+          /^\/api(?:\/|$)/,
+          /^\/cdn-cgi\/access(?:\/|$)/,
+        ],
+        runtimeCaching: [
+          {
+            urlPattern: /\/api(?:\/|$)/,
+            handler: "NetworkOnly",
+            method: "GET"
+          },
+          {
+            urlPattern: /\/cdn-cgi\/access(?:\/|$)/,
+            handler: "NetworkOnly",
+            method: "GET"
+          }
+        ]
       },
       devOptions: {
         enabled: true,
@@ -57,6 +73,6 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
-    include: ["src/**/*.test.{ts,tsx}"]
+    include: ["src/**/*.test.{ts,tsx}", "functions/**/*.test.ts"]
   }
 });

@@ -18,6 +18,7 @@ import { Modal } from "./Modal";
 
 interface EditEntryDialogProps {
   entry?: LedgerEntry;
+  loadAttachment?(attachmentId: string): Promise<Attachment | undefined>;
   onClose(): void;
   onSave(id: string, draft: EntryDraft): Promise<void>;
 }
@@ -36,7 +37,12 @@ function fieldError(reason: unknown): EntryFieldErrors {
   return { form: reason instanceof Error ? reason.message : "保存失败，请重试" };
 }
 
-export function EditEntryDialog({ entry, onClose, onSave }: EditEntryDialogProps) {
+export function EditEntryDialog({
+  entry,
+  loadAttachment = getAttachment,
+  onClose,
+  onSave,
+}: EditEntryDialogProps) {
   const [kind, setKind] = useState<EntryKind>("expense");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -61,7 +67,7 @@ export function EditEntryDialog({ entry, onClose, onSave }: EditEntryDialogProps
     }
     let active = true;
     setAttachmentLoading(true);
-    void getAttachment(entry.attachmentId)
+    void loadAttachment(entry.attachmentId)
       .then((result) => {
         if (!active) return;
         setAttachment(result);
@@ -76,7 +82,7 @@ export function EditEntryDialog({ entry, onClose, onSave }: EditEntryDialogProps
     return () => {
       active = false;
     };
-  }, [entry]);
+  }, [entry, loadAttachment]);
 
   if (!entry) return null;
 
