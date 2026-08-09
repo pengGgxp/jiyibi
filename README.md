@@ -113,6 +113,16 @@ npx wrangler d1 migrations apply DB --remote
 
 迁移不会由前端构建自动执行。应先确认迁移成功，再发布依赖新表结构的版本。
 
+如果 Wrangler 在包含 `CREATE TRIGGER ... BEGIN ... END` 的迁移上报 `incomplete input`，先确认该次迁移已回滚，再用 D1 的文件执行接口应用对应文件，并补记迁移记录。例如 `0004`：
+
+```bash
+npx wrangler d1 execute DB --remote --file=migrations/0004_month_end_balance_goal.sql
+npx wrangler d1 execute DB --remote --command "INSERT INTO d1_migrations (name) SELECT '0004_month_end_balance_goal.sql' WHERE NOT EXISTS (SELECT 1 FROM d1_migrations WHERE name = '0004_month_end_balance_goal.sql')"
+npx wrangler d1 migrations list DB --remote
+```
+
+只有在第一条命令完整成功后才能补记迁移；最后一条命令应显示没有待执行迁移。若文件执行失败，不要写入 `d1_migrations`，应先检查远端表结构和触发器状态。
+
 ### 3. 配置 GitHub OAuth
 
 在 GitHub 的 Developer settings 中创建 OAuth App：
