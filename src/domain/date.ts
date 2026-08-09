@@ -69,3 +69,7 @@ export function entryToLocalDateTimeInput(occurredAt: string, timezoneOffsetMinu
 export function currentLocalMonthKey(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
 }
+
+export function currentLocalDateKey(now = new Date()): string {
+  return `${currentLocalMonthKey(now)}-${pad(now.getDate())}`;
+}

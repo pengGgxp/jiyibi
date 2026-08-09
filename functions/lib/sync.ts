@@ -5,7 +5,9 @@ import type {
   LedgerEntryPayload,
   MutationResult,
   RemoteChange,
+  SettingsMutationPayload,
   SyncMutation,
+  SyncProtocolVersion,
   SyncRequestBody,
   Env,
 } from "./types";
@@ -26,9 +28,16 @@ interface VersionRow {
   version: number;
 }
 
-function payloadFromRow(row: ChangeRow): LedgerEntryPayload | AppSettingsPayload {
+function payloadFromRow(
+  row: ChangeRow,
+  protocolVersion: SyncProtocolVersion,
+): LedgerEntryPayload | AppSettingsPayload {
   try {
-    return JSON.parse(row.payload_json) as LedgerEntryPayload | AppSettingsPayload;
+    const payload = JSON.parse(row.payload_json) as LedgerEntryPayload | AppSettingsPayload;
+    if (protocolVersion === 1 && row.entity_type === "settings") {
+      delete (payload as AppSettingsPayload).monthEndBalanceGoalMinor;
+    }
+    return payload;
   } catch {
     throw new Error("Stored sync payload is invalid");
   }
@@ -63,7 +72,10 @@ async function mutationMatchesRow(mutation: SyncMutation, row: ChangeRow): Promi
     await syncMutationHash(mutation) === row.mutation_hash;
 }
 
-function changeFromRow(row: ChangeRow): RemoteChange {
+function changeFromRow(
+  row: ChangeRow,
+  protocolVersion: SyncProtocolVersion,
+): RemoteChange {
   if (row.entity_type !== "entry" && row.entity_type !== "settings") {
     throw new Error("Stored sync entity type is invalid");
   }
@@ -72,7 +84,7 @@ function changeFromRow(row: ChangeRow): RemoteChange {
     entityType: row.entity_type,
     entityId: row.entity_id,
     version: row.entity_version,
-    payload: payloadFromRow(row),
+    payload: payloadFromRow(row, protocolVersion),
   };
 }
 
@@ -99,6 +111,7 @@ async function latestRemoteChange(
   userId: string,
   generation: number,
   mutation: SyncMutation,
+  protocolVersion: SyncProtocolVersion,
 ): Promise<RemoteChange> {
   const row = await db
     .prepare(
@@ -115,7 +128,7 @@ async function latestRemoteChange(
   if (!row) {
     throw new ApiError(409, "remote_entity_missing", "Remote entity no longer exists");
   }
-  return changeFromRow(row);
+  return changeFromRow(row, protocolVersion);
 }
 
 export async function assertMutationIdsReusable(
@@ -286,18 +299,22 @@ async function writeSettings(
   userId: string,
   generation: number,
   mutation: SyncMutation,
+  protocolVersion: SyncProtocolVersion,
 ): Promise<VersionRow | null> {
-  const settings = mutation.payload as AppSettingsPayload;
+  const settings = mutation.payload as SettingsMutationPayload;
   const now = new Date().toISOString();
   const mutationHash = await syncMutationHash(mutation);
+  const writesGoal = protocolVersion === 2 &&
+    Object.prototype.hasOwnProperty.call(settings, "monthEndBalanceGoalMinor");
   if (mutation.baseVersion === 0) {
     return db
       .prepare(
-         `INSERT INTO ledger_settings (
-           user_id, account_generation, id, currency, initial_balance_minor, schema_version,
-           updated_at, version, last_mutation_id, last_mutation_hash,
+        `INSERT INTO ledger_settings (
+           user_id, account_generation, id, currency, initial_balance_minor,
+           month_end_balance_goal_minor, schema_version, updated_at, version,
+           last_mutation_id, last_mutation_hash,
            server_updated_at
-         ) VALUES (?, ?, 'primary', 'CNY', ?, 1, ?, 1, ?, ?, ?)
+         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, 1, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id) DO NOTHING
          RETURNING version`,
       )
@@ -305,6 +322,7 @@ async function writeSettings(
         userId,
         generation,
         settings.initialBalanceMinor,
+        writesGoal ? settings.monthEndBalanceGoalMinor ?? null : null,
         settings.updatedAt,
         mutation.id,
         mutationHash,
@@ -315,8 +333,10 @@ async function writeSettings(
   return db
     .prepare(
       `UPDATE ledger_settings SET
-         currency = 'CNY', initial_balance_minor = ?, schema_version = 1,
-         updated_at = ?, version = version + 1, last_mutation_id = ?,
+         currency = 'CNY', initial_balance_minor = ?,
+         month_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
+           ELSE month_end_balance_goal_minor END,
+         schema_version = 1, updated_at = ?, version = version + 1, last_mutation_id = ?,
          last_mutation_hash = ?, server_updated_at = ?
        WHERE user_id = ? AND account_generation = ?
          AND version = ? AND last_mutation_id <> ?
@@ -324,6 +344,8 @@ async function writeSettings(
     )
     .bind(
       settings.initialBalanceMinor,
+      writesGoal ? 1 : 0,
+      settings.monthEndBalanceGoalMinor ?? null,
       settings.updatedAt,
       mutation.id,
       mutationHash,
@@ -341,6 +363,7 @@ export async function applyMutation(
   userId: string,
   generation: number,
   mutation: SyncMutation,
+  protocolVersion: SyncProtocolVersion = 1,
 ): Promise<MutationResult> {
   const prior = await findMutation(db, userId, generation, mutation.id);
   if (prior) {
@@ -362,7 +385,7 @@ export async function applyMutation(
   try {
     written = mutation.entityType === "entry"
       ? await writeEntry(db, userId, generation, mutation)
-      : await writeSettings(db, userId, generation, mutation);
+      : await writeSettings(db, userId, generation, mutation, protocolVersion);
   } catch (error) {
     const raced = await findMutation(db, userId, generation, mutation.id);
     if (raced && await mutationMatchesRow(mutation, raced)) {
@@ -406,7 +429,13 @@ export async function applyMutation(
   return {
     id: mutation.id,
     status: "conflict",
-    remote: await latestRemoteChange(db, userId, generation, mutation),
+    remote: await latestRemoteChange(
+      db,
+      userId,
+      generation,
+      mutation,
+      protocolVersion,
+    ),
   };
 }
 
@@ -415,6 +444,7 @@ export async function pullChanges(
   userId: string,
   generation: number,
   cursor: string,
+  protocolVersion: SyncProtocolVersion = 1,
 ): Promise<{ changes: RemoteChange[]; nextCursor: string; hasMore: boolean }> {
   const result = await db
     .prepare(
@@ -446,7 +476,7 @@ export async function pullChanges(
   const hasMore = result.results.length > CHANGE_PAGE_SIZE;
   const page = result.results.slice(0, CHANGE_PAGE_SIZE);
   return {
-    changes: page.map(changeFromRow),
+    changes: page.map((row) => changeFromRow(row, protocolVersion)),
     nextCursor: page.at(-1)?.cursor ?? cursor,
     hasMore,
   };
@@ -483,7 +513,7 @@ export async function synchronize(
   generation: number,
   request: SyncRequestBody,
 ): Promise<{
-  schemaVersion: 1;
+  schemaVersion: SyncProtocolVersion;
   results: MutationResult[];
   changes: RemoteChange[];
   nextCursor: string;
@@ -503,10 +533,22 @@ export async function synchronize(
   );
   const results: MutationResult[] = [];
   for (const mutation of request.mutations) {
-    results.push(await applyMutation(env.DB, userId, generation, mutation));
+    results.push(await applyMutation(
+      env.DB,
+      userId,
+      generation,
+      mutation,
+      request.schemaVersion,
+    ));
   }
   await compactSupersededChanges(env.DB, userId, generation);
   await cleanupPendingAttachments(env, userId, generation);
-  const pulled = await pullChanges(env.DB, userId, generation, request.cursor);
-  return { schemaVersion: 1, results, ...pulled };
+  const pulled = await pullChanges(
+    env.DB,
+    userId,
+    generation,
+    request.cursor,
+    request.schemaVersion,
+  );
+  return { schemaVersion: request.schemaVersion, results, ...pulled };
 }

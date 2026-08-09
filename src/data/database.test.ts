@@ -1,7 +1,11 @@
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
-import { SYNC_SCHEMA_VERSION, type SessionResponse, type SyncChange } from "../sync/contracts";
+import {
+  API_SCHEMA_VERSION,
+  type SessionResponse,
+  type SyncChange,
+} from "../sync/contracts";
 import {
   DATABASE_SCHEMA_VERSION,
   INDEXED_DB_VERSION,
@@ -20,6 +24,7 @@ import {
   replaceLedgerData,
   resolveSyncConflict,
   setInitialBalance,
+  setMonthEndBalanceGoal,
   softDeleteEntry,
   undoDeleteEntry,
   updateEntry,
@@ -42,7 +47,7 @@ function image(contents = "image"): ProcessedImage {
 
 function session(overrides: Partial<SessionResponse["cloud"]> = {}): SessionResponse {
   return {
-    schemaVersion: SYNC_SCHEMA_VERSION,
+    schemaVersion: API_SCHEMA_VERSION,
     user: { id: "account-1", email: "owner@example.test" },
     cloud: {
       syncStatus: "enabled",
@@ -81,13 +86,60 @@ describe("LedgerDatabase", () => {
   });
 
   it("creates the initial CNY/zero settings", async () => {
-    await expect(getSettings(database)).resolves.toMatchObject({
+    const settings = await getSettings(database);
+    expect(settings).toMatchObject({
       id: "primary",
       currency: "CNY",
       initialBalanceMinor: 0,
       schemaVersion: 1,
     });
+    expect(settings).not.toHaveProperty("monthEndBalanceGoalMinor");
   });
+
+  it("saves and clears the month-end goal without overwriting the initial balance", async () => {
+    await setInitialBalance(1_234, database, new Date("2026-08-10T01:00:00.000Z"));
+
+    await expect(
+      setMonthEndBalanceGoal(50_000, database, new Date("2026-08-10T02:00:00.000Z")),
+    ).resolves.toMatchObject({
+      initialBalanceMinor: 1_234,
+      monthEndBalanceGoalMinor: 50_000,
+      updatedAt: "2026-08-10T02:00:00.000Z",
+    });
+
+    await expect(
+      setInitialBalance(-2_500, database, new Date("2026-08-10T03:00:00.000Z")),
+    ).resolves.toMatchObject({
+      initialBalanceMinor: -2_500,
+      monthEndBalanceGoalMinor: 50_000,
+    });
+
+    const cleared = await setMonthEndBalanceGoal(
+      undefined,
+      database,
+      new Date("2026-08-10T04:00:00.000Z"),
+    );
+    expect(cleared).toMatchObject({
+      initialBalanceMinor: -2_500,
+      updatedAt: "2026-08-10T04:00:00.000Z",
+    });
+    expect(cleared).not.toHaveProperty("monthEndBalanceGoalMinor");
+    expect(await getSettings(database)).not.toHaveProperty("monthEndBalanceGoalMinor");
+  });
+
+  it.each([1.5, Number.NaN, Number.POSITIVE_INFINITY, 9_000_000_000_000_001])(
+    "rejects an invalid month-end goal without changing settings: %s",
+    async (invalidGoal) => {
+      await setInitialBalance(1_234, database);
+      await setMonthEndBalanceGoal(-5_000, database);
+      const before = await getSettings(database);
+
+      await expect(
+        setMonthEndBalanceGoal(invalidGoal, database),
+      ).rejects.toMatchObject({ code: "invalid-settings" });
+      await expect(getSettings(database)).resolves.toEqual(before);
+    },
+  );
 
   it("creates, edits and summarizes signed entries", async () => {
     const created = await createEntry(draft(), database);
@@ -243,6 +295,27 @@ describe("LedgerDatabase", () => {
     await expect(createEntry(draft({ note: "must roll back" }), database)).rejects.toThrow("quota");
     expect(await database.entries.count()).toBe(1);
     put.mockRestore();
+  });
+
+  it("keeps an explicit goal-clear intent while coalescing settings edits", async () => {
+    await linkSyncAccount(session(), true, database);
+    expect((await database.syncState.get("primary"))?.syncProtocolVersion).toBe(2);
+
+    await setMonthEndBalanceGoal(50_000, database);
+    expect(await database.syncOutbox.get("settings:primary")).not.toHaveProperty(
+      "clearMonthEndBalanceGoal",
+    );
+
+    await setMonthEndBalanceGoal(undefined, database);
+    await setInitialBalance(1_234, database);
+    const cleared = await database.syncOutbox.get("settings:primary");
+    expect(cleared?.clearMonthEndBalanceGoal).toBe(true);
+    expect(cleared?.payload).not.toHaveProperty("monthEndBalanceGoalMinor");
+
+    await setMonthEndBalanceGoal(-25_000, database);
+    const reset = await database.syncOutbox.get("settings:primary");
+    expect(reset).not.toHaveProperty("clearMonthEndBalanceGoal");
+    expect(reset?.payload).toHaveProperty("monthEndBalanceGoalMinor", -25_000);
   });
 
   it("keeps a durable deletion outbox after the local entry and attachment are purged", async () => {

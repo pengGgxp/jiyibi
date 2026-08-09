@@ -2,6 +2,7 @@ import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import type { AppSettings, Attachment, LedgerEntry } from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
+  API_SCHEMA_VERSION,
   SYNC_SCHEMA_VERSION,
   type CloudAccountDeletionResponse,
   type SessionResponse,
@@ -173,17 +174,18 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
 function isAppSettings(value: unknown): value is AppSettings {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      "id",
-      "currency",
-      "initialBalanceMinor",
-      "schemaVersion",
-      "updatedAt",
-    ]) &&
+    hasExactKeys(
+      value,
+      ["id", "currency", "initialBalanceMinor", "schemaVersion", "updatedAt"],
+      ["monthEndBalanceGoalMinor"],
+    ) &&
     value.id === "primary" &&
     value.currency === "CNY" &&
     Number.isSafeInteger(value.initialBalanceMinor) &&
     Math.abs(Number(value.initialBalanceMinor)) <= MAX_AMOUNT_MINOR &&
+    (value.monthEndBalanceGoalMinor === undefined ||
+      (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
+        Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
     value.schemaVersion === 1 &&
     isIsoDate(value.updatedAt)
   );
@@ -230,7 +232,7 @@ function isSessionResponse(value: unknown): value is SessionResponse {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["schemaVersion", "user", "cloud"]) ||
-    value.schemaVersion !== SYNC_SCHEMA_VERSION ||
+    value.schemaVersion !== API_SCHEMA_VERSION ||
     !isRecord(value.user) ||
     !hasExactKeys(value.user, ["id", "email"]) ||
     !isNonEmptyString(value.user.id) ||
@@ -268,14 +270,14 @@ function isSessionResponse(value: unknown): value is SessionResponse {
 }
 
 function isEnableCloudSyncResponse(value: unknown): value is {
-  schemaVersion: typeof SYNC_SCHEMA_VERSION;
+  schemaVersion: typeof API_SCHEMA_VERSION;
   syncStatus: "enabled";
   generation: number;
 } {
   return (
     isRecord(value) &&
     hasExactKeys(value, ["schemaVersion", "syncStatus", "generation"]) &&
-    value.schemaVersion === SYNC_SCHEMA_VERSION &&
+    value.schemaVersion === API_SCHEMA_VERSION &&
     value.syncStatus === "enabled" &&
     isCloudGeneration(value.generation, false)
   );
@@ -292,7 +294,7 @@ function isCloudAccountDeletionResponse(
       "deletedObjects",
       "remainingObjects",
     ]) &&
-    value.schemaVersion === SYNC_SCHEMA_VERSION &&
+    value.schemaVersion === API_SCHEMA_VERSION &&
     typeof value.complete === "boolean" &&
     Number.isSafeInteger(value.deletedObjects) &&
     Number(value.deletedObjects) >= 0 &&
@@ -344,7 +346,7 @@ function validateSyncResponseForRequest(
 }
 
 interface AttachmentUploadResponse {
-  schemaVersion: typeof SYNC_SCHEMA_VERSION;
+  schemaVersion: typeof API_SCHEMA_VERSION;
   attachment: {
     id: string;
     entryId: string;
@@ -360,7 +362,7 @@ function isAttachmentUploadResponse(value: unknown): value is AttachmentUploadRe
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["schemaVersion", "attachment"]) ||
-    value.schemaVersion !== SYNC_SCHEMA_VERSION ||
+    value.schemaVersion !== API_SCHEMA_VERSION ||
     !isRecord(value.attachment) ||
     !hasExactKeys(value.attachment, [
       "id",

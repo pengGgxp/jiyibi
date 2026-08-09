@@ -81,7 +81,18 @@ const cnyFormatter = new Intl.NumberFormat("zh-CN", {
   maximumFractionDigits: 2,
 });
 
-export function formatCny(amountMinor: number): string {
+const cnyWholeFormatter = new Intl.NumberFormat("zh-CN", {
+  maximumFractionDigits: 0,
+});
+
+export function formatCny(amountMinor: number | bigint): string {
+  if (typeof amountMinor === "bigint") {
+    const negative = amountMinor < 0n;
+    const absolute = negative ? -amountMinor : amountMinor;
+    const whole = cnyWholeFormatter.format(absolute / 100n);
+    const fraction = String(absolute % 100n).padStart(2, "0");
+    return `${negative ? "-" : ""}¥${whole}.${fraction}`;
+  }
   if (!Number.isSafeInteger(amountMinor)) {
     throw new AmountError("金额必须是整数分", "invalid");
   }

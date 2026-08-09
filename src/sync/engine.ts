@@ -4,6 +4,7 @@ import {
   commitSyncBatch,
   getSyncOverview,
   ledgerDb,
+  syncEntityKey,
   type LedgerDatabase,
   type SyncOutboxRecord,
   type SyncOverview,
@@ -11,6 +12,7 @@ import {
 import { createSyncApiClient, type DownloadedAttachment, type SyncApiClient } from "./api";
 import {
   SYNC_SCHEMA_VERSION,
+  type SettingsSyncPayload,
   type SyncChange,
   type SyncMutation,
 } from "./contracts";
@@ -64,6 +66,50 @@ function withSyncLock<T>(database: LedgerDatabase, callback: () => Promise<T>): 
   return withFallbackLock(name, callback);
 }
 
+async function prepareSyncProtocolRefresh(
+  database: LedgerDatabase,
+  expectedGeneration: number,
+): Promise<boolean> {
+  return database.transaction(
+    "rw",
+    database.syncState,
+    database.entitySyncState,
+    async () => {
+      const state = await database.syncState.get("primary");
+      if (!state || state.generation !== expectedGeneration) {
+        throw new SyncGenerationChangedError();
+      }
+      if (state.syncProtocolVersion === SYNC_SCHEMA_VERSION) return false;
+      if (state.syncProtocolRefreshPending) return true;
+      await database.syncState.put({
+        ...state,
+        cursor: "0",
+        syncProtocolRefreshPending: true,
+      });
+      await database.entitySyncState.delete(syncEntityKey("settings", "primary"));
+      return true;
+    },
+  );
+}
+
+async function completeSyncProtocolRefresh(
+  database: LedgerDatabase,
+  expectedGeneration: number,
+): Promise<void> {
+  await database.transaction("rw", database.syncState, async () => {
+    const state = await database.syncState.get("primary");
+    if (!state || state.generation !== expectedGeneration) {
+      throw new SyncGenerationChangedError();
+    }
+    const next = {
+      ...state,
+      syncProtocolVersion: SYNC_SCHEMA_VERSION,
+    };
+    delete next.syncProtocolRefreshPending;
+    await database.syncState.put(next);
+  });
+}
+
 async function listPushableMutations(
   database: LedgerDatabase,
   expectedGeneration: number,
@@ -98,12 +144,14 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
       payload: record.payload as LedgerEntry,
     };
   }
+  const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload;
+  if (record.clearMonthEndBalanceGoal) payload.monthEndBalanceGoalMinor = null;
   return {
     id: record.id,
     entityType: "settings",
     entityId: record.entityId,
     baseVersion: record.baseVersion,
-    payload: record.payload as AppSettings,
+    payload,
   };
 }
 
@@ -197,6 +245,7 @@ async function runSync(database: LedgerDatabase, api: SyncApiClient): Promise<Sy
   ) {
     throw new SyncGenerationChangedError();
   }
+  let protocolRefreshing = await prepareSyncProtocolRefresh(database, generation);
   let completed = false;
 
   for (let round = 0; round < MAX_SYNC_ROUNDS; round += 1) {
@@ -206,7 +255,9 @@ async function runSync(database: LedgerDatabase, api: SyncApiClient): Promise<Sy
       break;
     }
     if (state.generation !== generation) throw new SyncGenerationChangedError();
-    const outbox = await listPushableMutations(database, generation);
+    const outbox = protocolRefreshing
+      ? []
+      : await listPushableMutations(database, generation);
     await uploadReferencedAttachments(outbox, database, api, generation);
     const response = await api.sync({
       schemaVersion: SYNC_SCHEMA_VERSION,
@@ -235,8 +286,14 @@ async function runSync(database: LedgerDatabase, api: SyncApiClient): Promise<Sy
       database,
     );
 
+    if (protocolRefreshing && !response.hasMore) {
+      await completeSyncProtocolRefresh(database, generation);
+      protocolRefreshing = false;
+    }
+
     if (
       !response.hasMore &&
+      !protocolRefreshing &&
       (await listPushableMutations(database, generation)).length === 0
     ) {
       completed = true;

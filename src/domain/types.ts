@@ -29,6 +29,7 @@ export interface AppSettings {
   id: "primary";
   currency: "CNY";
   initialBalanceMinor: number;
+  monthEndBalanceGoalMinor?: number;
   schemaVersion: 1;
   updatedAt: string;
 }
@@ -54,6 +55,14 @@ export interface LedgerSummary {
   balanceMinor: number;
   monthIncomeMinor: number;
   monthExpenseMinor: number;
+}
+
+export interface MonthEndBalanceGoalStatus {
+  targetMinor: number;
+  differenceMinor: bigint;
+  isOnTrack: boolean;
+  daysRemaining: number;
+  localMonthKey: string;
 }
 
 export interface ValidatedEntryDraft {

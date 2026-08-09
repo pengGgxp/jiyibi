@@ -2,7 +2,12 @@ import { webcrypto } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { LedgerEntry } from "../domain/types";
 import { SyncApiError, createSyncApiClient, type SyncFetch } from "./api";
-import { SYNC_SCHEMA_VERSION, type SessionResponse, type SyncResponse } from "./contracts";
+import {
+  API_SCHEMA_VERSION,
+  SYNC_SCHEMA_VERSION,
+  type SessionResponse,
+  type SyncResponse,
+} from "./contracts";
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -28,7 +33,7 @@ function entry(overrides: Partial<LedgerEntry> = {}): LedgerEntry {
 
 function session(overrides: Partial<SessionResponse["cloud"]> = {}): SessionResponse {
   return {
-    schemaVersion: SYNC_SCHEMA_VERSION,
+    schemaVersion: API_SCHEMA_VERSION,
     user: { id: "user-1", email: "owner@example.test" },
     cloud: {
       syncStatus: "enabled",
@@ -63,6 +68,7 @@ function syncResponse(): SyncResponse {
           id: "primary",
           currency: "CNY",
           initialBalanceMinor: 500,
+          monthEndBalanceGoalMinor: 25_000,
           schemaVersion: 1,
           updatedAt: "2026-07-30T05:00:00.000Z",
         },
@@ -96,7 +102,7 @@ describe("sync API client", () => {
 
   it("enables cloud sync only through the explicit account endpoint", async () => {
     const fetcher = mockFetch(jsonResponse({
-      schemaVersion: SYNC_SCHEMA_VERSION,
+      schemaVersion: API_SCHEMA_VERSION,
       syncStatus: "enabled",
       generation: 4,
     }));
@@ -115,7 +121,7 @@ describe("sync API client", () => {
 
   it("rejects an enable response for an unrelated generation", async () => {
     const fetcher = mockFetch(jsonResponse({
-      schemaVersion: SYNC_SCHEMA_VERSION,
+      schemaVersion: API_SCHEMA_VERSION,
       syncStatus: "enabled",
       generation: 9,
     }));
@@ -130,13 +136,13 @@ describe("sync API client", () => {
     const wait = vi.fn(async () => undefined);
     fetcher
       .mockResolvedValueOnce(jsonResponse({
-        schemaVersion: SYNC_SCHEMA_VERSION,
+        schemaVersion: API_SCHEMA_VERSION,
         complete: false,
         deletedObjects: 50,
         remainingObjects: 2,
       }, { status: 202, headers: { "Retry-After": "1" } }))
       .mockResolvedValueOnce(jsonResponse({
-        schemaVersion: SYNC_SCHEMA_VERSION,
+        schemaVersion: API_SCHEMA_VERSION,
         complete: true,
         deletedObjects: 2,
         remainingObjects: 0,
@@ -161,13 +167,13 @@ describe("sync API client", () => {
     const wait = vi.fn(async () => undefined);
     fetcher
       .mockResolvedValueOnce(jsonResponse({
-        schemaVersion: SYNC_SCHEMA_VERSION,
+        schemaVersion: API_SCHEMA_VERSION,
         complete: false,
         deletedObjects: 0,
         remainingObjects: 1,
       }, { status: 202, headers: { "Retry-After": "2" } }))
       .mockResolvedValueOnce(jsonResponse({
-        schemaVersion: SYNC_SCHEMA_VERSION,
+        schemaVersion: API_SCHEMA_VERSION,
         complete: true,
         deletedObjects: 0,
         remainingObjects: 0,
@@ -284,6 +290,68 @@ describe("sync API client", () => {
     });
   });
 
+  it("accepts legacy settings changes without a monthly goal", async () => {
+    const response = syncResponse();
+    response.results = [];
+    const settings = response.changes[1];
+    if (settings.entityType !== "settings") throw new Error("Expected settings change");
+    delete settings.payload.monthEndBalanceGoalMinor;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).resolves.toEqual(response);
+  });
+
+  it("sends and receives a settings goal without changing its integer value", async () => {
+    const settingsChange = syncResponse().changes[1];
+    if (settingsChange.entityType !== "settings") throw new Error("Expected settings change");
+    const request = {
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "7",
+      mutations: [{
+        id: "mutation-settings-goal",
+        entityType: "settings" as const,
+        entityId: "primary",
+        baseVersion: 0,
+        payload: settingsChange.payload,
+      }],
+    };
+    const response: SyncResponse = {
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      results: [{ id: "mutation-settings-goal", status: "applied", version: 1 }],
+      changes: [settingsChange],
+      nextCursor: "8",
+      hasMore: false,
+    };
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync(request, 3)).resolves.toEqual(response);
+    const init = fetcher.mock.calls[0][1];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      mutations: [{ payload: { monthEndBalanceGoalMinor: 25_000 } }],
+    });
+  });
+
+  it.each([null, 1.5, 9_000_000_000_000_001])(
+    "rejects an invalid monthly goal in a settings change: %s",
+    async (goal) => {
+      const response = syncResponse() as unknown as Record<string, unknown>;
+      const changes = response.changes as Array<Record<string, unknown>>;
+      const settings = changes[1].payload as Record<string, unknown>;
+      settings.monthEndBalanceGoalMinor = goal;
+      const fetcher = mockFetch(jsonResponse(response));
+
+      await expect(createSyncApiClient(fetcher).sync({
+        schemaVersion: SYNC_SCHEMA_VERSION,
+        cursor: "0",
+        mutations: [],
+      }, 3)).rejects.toMatchObject({ code: "invalid-response" });
+    },
+  );
+
   it("rejects invalid nested changes instead of trusting a type assertion", async () => {
     const mismatchedEntity = syncResponse() as unknown as Record<string, unknown>;
     const changes = mismatchedEntity.changes as Array<Record<string, unknown>>;
@@ -352,7 +420,7 @@ describe("sync API client", () => {
     const fetcher = mockFetch(
       jsonResponse(
         {
-          schemaVersion: SYNC_SCHEMA_VERSION,
+          schemaVersion: API_SCHEMA_VERSION,
           attachment: {
             id: attachment.id,
             entryId: attachment.entryId,

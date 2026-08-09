@@ -5,9 +5,11 @@ import {
   createEntry,
   linkSyncAccount,
   resolveSyncConflict,
+  setMonthEndBalanceGoal,
 } from "../data/database";
 import type { SyncApiClient } from "./api";
 import {
+  API_SCHEMA_VERSION,
   SYNC_SCHEMA_VERSION,
   type SessionResponse,
   type SyncResponse,
@@ -20,7 +22,7 @@ import {
 
 function session(accountId = "account-1", generation = 1): SessionResponse {
   return {
-    schemaVersion: SYNC_SCHEMA_VERSION,
+    schemaVersion: API_SCHEMA_VERSION,
     user: { id: accountId, email: `${accountId}@example.test` },
     cloud: {
       syncStatus: "enabled",
@@ -176,6 +178,73 @@ describe("sync engine", () => {
     expect(requests[0].mutations[0].id).toBe(queued.id);
     expect(requests[1].mutations[0].id).toBe(queued.id);
     expect(await database.syncOutbox.get(`entry:${entry.id}`)).toBeUndefined();
+  });
+
+  it("sends an explicit null only when the user clears the monthly goal", async () => {
+    await linkSyncAccount(session(), true, database);
+    await setMonthEndBalanceGoal(50_000, database);
+    await setMonthEndBalanceGoal(undefined, database);
+    const queued = (await database.syncOutbox.get("settings:primary"))!;
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 2,
+      mutations: [expect.objectContaining({
+        entityType: "settings",
+        payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
+      })],
+    }), 1);
+  });
+
+  it("refreshes settings once when a linked database upgrades from sync v1", async () => {
+    await linkSyncAccount(session(), false, database);
+    const legacyState = (await database.syncState.get("primary"))!;
+    delete legacyState.syncProtocolVersion;
+    legacyState.cursor = "9";
+    await database.syncState.put(legacyState);
+    await database.entitySyncState.put({
+      id: "settings:primary",
+      entityType: "settings",
+      entityId: "primary",
+      serverVersion: 1,
+      status: "clean",
+      updatedAt: "2026-08-10T00:00:00.000Z",
+    });
+    const remoteSettings = {
+      ...(await database.settings.get("primary"))!,
+      monthEndBalanceGoalMinor: 25_000,
+      updatedAt: "2026-08-10T01:00:00.000Z",
+    };
+    const api = apiClient(emptyResponse({
+      changes: [{
+        seq: "9",
+        entityType: "settings",
+        entityId: "primary",
+        version: 1,
+        payload: remoteSettings,
+      }],
+      nextCursor: "9",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 2,
+      cursor: "0",
+      mutations: [],
+    }), 1);
+    expect((await database.settings.get("primary"))?.monthEndBalanceGoalMinor).toBe(25_000);
+    expect(await database.syncState.get("primary")).toMatchObject({
+      cursor: "9",
+      syncProtocolVersion: 2,
+    });
+    expect(await database.syncState.get("primary")).not.toHaveProperty(
+      "syncProtocolRefreshPending",
+    );
   });
 
   it("caches a conflicting cloud screenshot so using the cloud version is complete", async () => {

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getSettings, listActiveEntries } from "../data";
 import {
   calculateLedgerSummary,
-  currentLocalMonthKey,
+  currentLocalDateKey,
   type AppSettings,
   type LedgerEntry,
   type LedgerSummary,
@@ -25,6 +25,7 @@ export interface LedgerState {
 export function useLedger(): LedgerState {
   const [snapshot, setSnapshot] = useState<LedgerSnapshot>();
   const [error, setError] = useState<Error>();
+  const [localDateKey, setLocalDateKey] = useState(() => currentLocalDateKey());
 
   useEffect(() => {
     const subscription = liveQuery(async () => {
@@ -43,14 +44,48 @@ export function useLedger(): LedgerState {
     return () => subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
+    let midnightTimer: number | undefined;
+    const refreshDate = () => setLocalDateKey(currentLocalDateKey());
+    const scheduleMidnightRefresh = () => {
+      window.clearTimeout(midnightTimer);
+      const now = new Date();
+      const nextMidnight = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        0,
+        0,
+        1_000,
+      );
+      midnightTimer = window.setTimeout(() => {
+        refreshDate();
+        scheduleMidnightRefresh();
+      }, nextMidnight.getTime() - now.getTime());
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refreshDate();
+        scheduleMidnightRefresh();
+      }
+    };
+
+    scheduleMidnightRefresh();
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearTimeout(midnightTimer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
+
   const summary = useMemo(() => {
     if (!snapshot) return undefined;
     return calculateLedgerSummary(
       snapshot.entries,
       snapshot.settings,
-      currentLocalMonthKey(),
+      localDateKey.slice(0, 7),
     );
-  }, [snapshot]);
+  }, [localDateKey, snapshot]);
 
   return {
     entries: snapshot?.entries ?? [],

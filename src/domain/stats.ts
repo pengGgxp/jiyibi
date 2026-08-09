@@ -1,4 +1,10 @@
-import type { AppSettings, LedgerEntry, LedgerSummary } from "./types";
+import { currentLocalMonthKey } from "./date";
+import type {
+  AppSettings,
+  LedgerEntry,
+  LedgerSummary,
+  MonthEndBalanceGoalStatus,
+} from "./types";
 
 function safeAdd(left: number, right: number): number {
   const result = left + right;
@@ -29,4 +35,27 @@ export function calculateLedgerSummary(
   }
 
   return { balanceMinor, monthIncomeMinor, monthExpenseMinor };
+}
+
+export function calculateMonthEndBalanceGoalStatus(
+  balanceMinor: number,
+  targetMinor: number,
+  now = new Date(),
+): MonthEndBalanceGoalStatus {
+  if (!Number.isSafeInteger(balanceMinor) || !Number.isSafeInteger(targetMinor)) {
+    throw new RangeError("余额目标必须使用整数分");
+  }
+  if (!Number.isFinite(now.getTime())) {
+    throw new RangeError("目标周期日期无效");
+  }
+
+  const differenceMinor = BigInt(balanceMinor) - BigInt(targetMinor);
+  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  return {
+    targetMinor,
+    differenceMinor,
+    isOnTrack: differenceMinor >= 0n,
+    daysRemaining: lastDayOfMonth - now.getDate(),
+    localMonthKey: currentLocalMonthKey(now),
+  };
 }

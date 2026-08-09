@@ -12,11 +12,12 @@ import type {
 } from "../domain/types";
 import { validateEntryDraft } from "../domain/validation";
 import { createId } from "../lib/id";
-import type {
-  SessionResponse,
-  SyncChange,
-  SyncEntityType,
-  SyncResult,
+import {
+  SYNC_SCHEMA_VERSION,
+  type SessionResponse,
+  type SyncChange,
+  type SyncEntityType,
+  type SyncResult,
 } from "../sync/contracts";
 
 export const DATABASE_NAME = "jiyibi";
@@ -31,6 +32,8 @@ export interface SyncState {
   accountEmail: string;
   generation: number;
   cursor: string;
+  syncProtocolVersion?: typeof SYNC_SCHEMA_VERSION;
+  syncProtocolRefreshPending?: true;
   uploadApproved: boolean;
   linkedAt: string;
   lastSyncedAt?: string;
@@ -55,6 +58,7 @@ export interface SyncOutboxRecord {
   entityId: string;
   baseVersion: number;
   payload: LedgerEntry | AppSettings;
+  clearMonthEndBalanceGoal?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -155,7 +159,8 @@ function isDefaultSettings(settings: AppSettings): boolean {
     settings.id === "primary" &&
     settings.currency === "CNY" &&
     settings.schemaVersion === DATABASE_SCHEMA_VERSION &&
-    settings.initialBalanceMinor === 0
+    settings.initialBalanceMinor === 0 &&
+    settings.monthEndBalanceGoalMinor === undefined
   );
 }
 
@@ -176,6 +181,7 @@ async function queueSyncMutation(
   payload: LedgerEntry | AppSettings,
   database: LedgerDatabase,
   nowIso: string,
+  options: { clearMonthEndBalanceGoal?: boolean } = {},
 ): Promise<SyncOutboxRecord | undefined> {
   const link = await database.syncState.get("primary");
   if (!link?.uploadApproved) return undefined;
@@ -186,6 +192,9 @@ async function queueSyncMutation(
     database.entitySyncState.get(entityKey),
     database.syncConflicts.get(entityKey),
   ]);
+  const clearsMonthEndBalanceGoal = entityType === "settings" &&
+    !Object.prototype.hasOwnProperty.call(payload, "monthEndBalanceGoalMinor") &&
+    (options.clearMonthEndBalanceGoal || existing?.clearMonthEndBalanceGoal);
   const outbox: SyncOutboxRecord = {
     entityKey,
     id: createId("mutation"),
@@ -193,6 +202,7 @@ async function queueSyncMutation(
     entityId,
     baseVersion: existing?.baseVersion ?? entityState?.serverVersion ?? 0,
     payload: syncPayloadFor(entityType, payload),
+    ...(clearsMonthEndBalanceGoal ? { clearMonthEndBalanceGoal: true } : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
   };
@@ -313,6 +323,7 @@ export async function linkSyncAccount(
         accountEmail: session.user.email,
         generation: session.cloud.generation,
         cursor: existing?.cursor ?? "0",
+        ...(!existing ? { syncProtocolVersion: SYNC_SCHEMA_VERSION } : {}),
         uploadApproved,
         linkedAt: existing?.linkedAt ?? nowIso,
         lastSyncedAt: existing?.lastSyncedAt,
@@ -391,6 +402,46 @@ export async function setInitialBalance(
       };
       await database.settings.put(next);
       await queueSyncMutation("settings", next.id, next, database, nowIso);
+      return next;
+    },
+  );
+}
+
+export async function setMonthEndBalanceGoal(
+  monthEndBalanceGoalMinor: number | undefined,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (
+    monthEndBalanceGoalMinor !== undefined &&
+    (!Number.isSafeInteger(monthEndBalanceGoalMinor) ||
+      Math.abs(monthEndBalanceGoalMinor) > MAX_AMOUNT_MINOR)
+  ) {
+    throw new LedgerDataError("月末余额底线必须是有效的整数分", "invalid-settings");
+  }
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const nowIso = now.toISOString();
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      const next: AppSettings = {
+        ...current,
+        updatedAt: nowIso,
+      };
+      if (monthEndBalanceGoalMinor === undefined) {
+        delete next.monthEndBalanceGoalMinor;
+      } else {
+        next.monthEndBalanceGoalMinor = monthEndBalanceGoalMinor;
+      }
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso, {
+        clearMonthEndBalanceGoal: monthEndBalanceGoalMinor === undefined,
+      });
       return next;
     },
   );
@@ -1095,6 +1146,10 @@ export async function resolveSyncConflict(
         entityId,
         baseVersion: conflict.remoteVersion,
         payload: syncPayloadFor(entityType, localPayload),
+        ...(entityType === "settings" &&
+          !Object.prototype.hasOwnProperty.call(localPayload, "monthEndBalanceGoalMinor")
+          ? { clearMonthEndBalanceGoal: true as const }
+          : {}),
         createdAt: existingOutbox?.createdAt ?? nowIso,
         updatedAt: nowIso,
       });

@@ -43,22 +43,31 @@ export interface AppSettingsPayload {
   id: "primary";
   currency: "CNY";
   initialBalanceMinor: number;
+  monthEndBalanceGoalMinor?: number;
   schemaVersion: 1;
   updatedAt: string;
 }
 
-export type SyncEntityType = "entry" | "settings";
-
-export interface SyncMutation {
-  id: string;
-  entityType: SyncEntityType;
-  entityId: string;
-  baseVersion: number;
-  payload: LedgerEntryPayload | AppSettingsPayload;
+export interface SettingsMutationPayload
+  extends Omit<AppSettingsPayload, "monthEndBalanceGoalMinor"> {
+  monthEndBalanceGoalMinor?: number | null;
 }
 
+export type SyncEntityType = "entry" | "settings";
+export type SyncProtocolVersion = 1 | 2;
+
+interface SyncMutationBase {
+  id: string;
+  entityId: string;
+  baseVersion: number;
+}
+
+export type SyncMutation =
+  | SyncMutationBase & { entityType: "entry"; payload: LedgerEntryPayload }
+  | SyncMutationBase & { entityType: "settings"; payload: SettingsMutationPayload };
+
 export interface SyncRequestBody {
-  schemaVersion: 1;
+  schemaVersion: SyncProtocolVersion;
   cursor: string;
   mutations: SyncMutation[];
 }

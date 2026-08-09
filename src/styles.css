@@ -778,10 +778,97 @@ input::placeholder {
   font-size: 0.75rem;
 }
 
+.balance-goal {
+  margin-top: 1.1rem;
+  padding-block: 0.9rem;
+  border-block: 1px solid rgb(232 243 237 / 0.17);
+}
+
+.balance-goal-heading,
+.balance-goal-heading span,
+.balance-goal-status,
+.balance-goal-setup {
+  display: flex;
+  align-items: center;
+}
+
+.balance-goal-heading {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.balance-goal-heading span {
+  gap: 0.4rem;
+  color: #c9d8d1;
+  font-size: 0.72rem;
+  font-weight: 730;
+}
+
+.balance-goal-heading svg,
+.balance-goal-setup svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.balance-goal-heading strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #f4f9f6;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.balance-goal-status {
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+  font-size: 0.78rem;
+  font-weight: 720;
+}
+
+.balance-goal-status > svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 1.05rem;
+}
+
+.balance-goal-status span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.balance-goal-status small {
+  display: block;
+  margin-top: 0.18rem;
+  color: #aebfb6;
+  font-size: 0.68rem;
+  font-weight: 520;
+}
+
+.balance-goal.is-on-track .balance-goal-status {
+  color: #a8e3c2;
+}
+
+.balance-goal.is-behind .balance-goal-status {
+  color: #ffc0ba;
+}
+
+.balance-goal-setup {
+  width: 100%;
+  min-height: 2.75rem;
+  justify-content: flex-start;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding: 0.25rem 0;
+  color: #dce8e2;
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
 .month-summary {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  margin-top: 1.5rem;
+  margin-top: 1.25rem;
   border-top: 1px solid rgb(232 243 237 / 0.17);
 }
 
@@ -1543,6 +1630,77 @@ input::placeholder {
   margin-top: 1rem;
 }
 
+.goal-setting-form {
+  margin-top: 1rem;
+}
+
+.setting-toggle {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 2.75rem;
+  cursor: pointer;
+}
+
+.setting-toggle > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.toggle-control {
+  display: flex;
+  width: 2.5rem;
+  height: 1.5rem;
+  align-items: center;
+  padding: 0.15rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+
+.toggle-control > span {
+  width: 1.05rem;
+  height: 1.05rem;
+  background: var(--surface);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgb(28 42 35 / 0.22);
+  transition: transform 150ms ease;
+}
+
+.setting-toggle > input:checked + .toggle-control {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.setting-toggle > input:checked + .toggle-control > span {
+  transform: translateX(1rem);
+}
+
+.setting-toggle > input:focus-visible + .toggle-control {
+  outline: 3px solid color-mix(in srgb, var(--focus) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.setting-toggle > span:last-child strong,
+.setting-toggle > span:last-child small {
+  display: block;
+}
+
+.setting-toggle > span:last-child strong {
+  font-size: 0.8rem;
+}
+
+.setting-toggle > span:last-child small {
+  margin-top: 0.12rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
 .compact-field label {
   display: block;
   margin-bottom: 0.35rem;
@@ -1771,7 +1929,7 @@ input::placeholder {
 
 .restore-preview dl {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
   margin: 0;
   overflow: hidden;

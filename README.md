@@ -6,7 +6,7 @@
 
 - 支出/收入切换与人民币金额输入
 - 文字或单张截图凭证，支持选择、拍摄与粘贴
-- 当前余额、初始余额与本月收支概览
+- 当前余额、初始余额、本月收支概览与可选的自然月月末余额底线
 - 记录编辑、软删除与 8 秒撤销
 - 密码加密的单文件备份与整体恢复
 - 可选的 GitHub OAuth 登录及多设备同步，冲突由用户选择保留本机或云端版本
@@ -76,7 +76,8 @@ npx wrangler pages dev dist
 - `GET /api/login` 启动 GitHub OAuth；GitHub OAuth App 的回调地址必须是部署来源下的 `/api/callback`。`GET /api/callback` 校验一次性 state、完成身份确认并建立应用会话；`GET /api/logout?returnTo=/` 删除当前应用会话并跳回经过校验的同源路径。
 - 会话 cookie 设置为 `HttpOnly`、`Secure`、`SameSite=Lax`，前端 JavaScript 无法读取。OAuth state 与会话令牌不会以明文写入 D1，D1 只保存其哈希、有效期及完成认证所需的最小元数据。
 - `GET /api/session` 始终可读取当前身份以及 `cloud.syncStatus` 和 `cloud.generation`；状态为 `disabled`、`enabled` 或 `deleting`。`generation` 是服务端单调递增的账号代次，客户端不得自行推测，也不得用后来读取的会话值静默覆盖本机保存的链接代次。
-- `POST /api/account/enable` 接收 `{"confirmation":"ENABLE","generation":0}`，其中 `generation` 必须来自刚读取的 Session。成功返回 `200` 与 `{"schemaVersion":1,"syncStatus":"enabled","generation":1}`，这是上传任何账目或截图前必须执行的明确授权。
+- `POST /api/account/enable` 接收 `{"confirmation":"ENABLE","generation":0}`，其中 `generation` 必须来自刚读取的 Session。成功返回 `200` 与 `{"schemaVersion":1,"syncStatus":"enabled","generation":1}`，这是上传任何账本数据前必须执行的明确授权。
+- `/api/sync` 的账本协议当前为 v2，并继续接受 v1 请求。v1 响应不返回月末余额底线；设置 mutation 缺少该字段时保留云端值，v2 只有显式发送整数或 `null` 才会设置或关闭底线。
 - `POST /api/sync` 以及附件 `GET/PUT` 必须携带 `X-Jiyibi-Sync-Generation`，值为本机明确连接时保存的非零代次。服务端和本机数据库都会拒绝跨代次读写。
 - 附件请求在写入 Workers KV 前会取得当前代次的短期上传租约，并在请求结束时释放。账号删除在活动租约释放前只返回 `202`；请求异常中断时租约最长 15 分钟后过期，随后删除重试会按代次前缀回收可能迟到的对象。
 - `DELETE /api/account` 接收 `{"confirmation":"DELETE","generation":1}`，每次最多清理 50 个 D1 跟踪对象或相应账号代次前缀下的 KV 对象。未完成时返回 `202`、`Retry-After: 5` 以及 `complete:false`；调用方应等待指定时间并使用同一代次重复请求。最后一个上传租约释放且完整 KV 扫描为空后，服务端还会等待至少 60 秒传播静默窗口，再次完成全扫描后才返回 `200` 与 `complete:true`。
@@ -153,4 +154,4 @@ GitHub Pages 只提供静态托管，没有本项目所需的 Pages Functions、
 
 ## 当前边界
 
-当前版本不提供公开注册、账号密码系统、OCR、分类、预算、多账本、银行接口或客户端时间戳自动覆盖冲突。
+当前版本不提供公开注册、账号密码系统、OCR、分类、完整预算与固定支出预测、多账本、银行接口或客户端时间戳自动覆盖冲突。

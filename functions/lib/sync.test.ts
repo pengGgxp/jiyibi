@@ -1,9 +1,17 @@
 import { webcrypto } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AppSettingsPayload, LedgerEntryPayload, SyncMutation } from "./types";
-import { minimizeDeletedEntry, synchronize, syncMutationHash } from "./sync";
+import {
+  applyMutation,
+  minimizeDeletedEntry,
+  pullChanges,
+  synchronize,
+  syncMutationHash,
+} from "./sync";
 
-function settingsMutation(overrides: Partial<SyncMutation> = {}): SyncMutation {
+type SettingsMutation = Extract<SyncMutation, { entityType: "settings" }>;
+
+function settingsMutation(overrides: Partial<SettingsMutation> = {}): SettingsMutation {
   return {
     id: "mutation_settings_1",
     entityType: "settings",
@@ -45,6 +53,180 @@ describe("sync mutation receipts", () => {
         initialBalanceMinor: 501,
       },
     }))).resolves.not.toBe(await syncMutationHash(original));
+    await expect(syncMutationHash(settingsMutation({
+      payload: {
+        ...(original.payload as AppSettingsPayload),
+        monthEndBalanceGoalMinor: 25_000,
+      },
+    }))).resolves.not.toBe(await syncMutationHash(original));
+  });
+
+  it.each([
+    ["version-one payload", undefined, 1],
+    ["version-two payload with a signed goal", -25_000, 2],
+  ] as const)("persists the monthly goal for a %s", async (_label, goal, version) => {
+    let insertQuery = "";
+    let insertBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("INSERT INTO ledger_settings")) {
+              insertQuery = query;
+              insertBindings = values;
+            }
+            return this;
+          },
+          async first() {
+            return query.includes("INSERT INTO ledger_settings") ? { version: 1 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const original = settingsMutation();
+    const mutation = settingsMutation({
+      payload: {
+        ...(original.payload as AppSettingsPayload),
+        ...(goal === undefined ? {} : { monthEndBalanceGoalMinor: goal }),
+      },
+    });
+
+    await expect(applyMutation(db, "user_1", 3, mutation, version)).resolves.toEqual({
+      id: mutation.id,
+      status: "applied",
+      version: 1,
+    });
+    expect(insertQuery).toContain("month_end_balance_goal_minor");
+    expect(insertBindings.slice(0, 5)).toEqual([
+      "user_1",
+      3,
+      500,
+      goal ?? null,
+      "2026-07-30T12:00:00.000Z",
+    ]);
+  });
+
+  it("preserves the goal when a version-one client updates settings", async () => {
+    let updateQuery = "";
+    let updateBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("UPDATE ledger_settings SET")) {
+              updateQuery = query;
+              updateBindings = values;
+            }
+            return this;
+          },
+          async first() {
+            return query.includes("UPDATE ledger_settings SET") ? { version: 2 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const mutation = settingsMutation({ baseVersion: 1 });
+
+    await expect(applyMutation(db, "user_1", 3, mutation)).resolves.toMatchObject({
+      status: "applied",
+      version: 2,
+    });
+    expect(updateQuery).toContain("CASE WHEN ? = 1");
+    expect(updateBindings.slice(0, 4)).toEqual([
+      500,
+      0,
+      null,
+      "2026-07-30T12:00:00.000Z",
+    ]);
+  });
+
+  it("preserves the goal for a legacy queued mutation retried with version two", async () => {
+    let updateBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("UPDATE ledger_settings SET")) updateBindings = values;
+            return this;
+          },
+          async first() {
+            return query.includes("UPDATE ledger_settings SET") ? { version: 2 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const mutation = settingsMutation({ baseVersion: 1 });
+
+    await applyMutation(db, "user_1", 3, mutation, 2);
+    expect(updateBindings.slice(0, 3)).toEqual([500, 0, null]);
+  });
+
+  it("clears the goal when a version-two client sends an explicit null", async () => {
+    let updateBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("UPDATE ledger_settings SET")) updateBindings = values;
+            return this;
+          },
+          async first() {
+            return query.includes("UPDATE ledger_settings SET") ? { version: 2 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const original = settingsMutation();
+    const mutation = settingsMutation({
+      baseVersion: 1,
+      payload: {
+        ...(original.payload as AppSettingsPayload),
+        monthEndBalanceGoalMinor: null,
+      },
+    });
+
+    await expect(applyMutation(db, "user_1", 3, mutation, 2)).resolves.toMatchObject({
+      status: "applied",
+      version: 2,
+    });
+    expect(updateBindings.slice(0, 4)).toEqual([
+      500,
+      1,
+      null,
+      "2026-07-30T12:00:00.000Z",
+    ]);
+  });
+
+  it("hides the version-two goal from version-one pull responses", async () => {
+    const row = {
+      cursor: "9",
+      mutation_id: "mutation_settings_1",
+      entity_type: "settings",
+      entity_id: "primary",
+      entity_version: 2,
+      mutation_hash: "hash",
+      payload_json: JSON.stringify({
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        monthEndBalanceGoalMinor: 25_000,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T12:00:00.000Z",
+      }),
+    };
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() { return { results: [row] }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    const legacy = await pullChanges(db, "user_1", 3, "0", 1);
+    const current = await pullChanges(db, "user_1", 3, "0", 2);
+    expect(legacy.changes[0].payload).not.toHaveProperty("monthEndBalanceGoalMinor");
+    expect(current.changes[0].payload).toHaveProperty("monthEndBalanceGoalMinor", 25_000);
   });
 });
 

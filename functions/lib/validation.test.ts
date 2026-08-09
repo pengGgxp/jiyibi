@@ -37,6 +37,94 @@ describe("validateSyncRequest", () => {
     });
   });
 
+  it("accepts version-two settings with or without a monthly ending balance goal", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 2;
+    const settingsPayload = {
+      id: "primary",
+      currency: "CNY",
+      initialBalanceMinor: 500,
+      schemaVersion: 1,
+      updatedAt: "2026-07-30T04:01:00.000Z",
+    } as const;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: settingsPayload,
+    }];
+
+    expect(validateSyncRequest(request).mutations[0].payload).toEqual(settingsPayload);
+
+    for (const goal of [-12_345, 0, 12_345]) {
+      const withGoal = structuredClone(request) as {
+        mutations: Array<{ payload: Record<string, unknown> }>;
+      };
+      withGoal.mutations[0].payload.monthEndBalanceGoalMinor = goal;
+      expect(validateSyncRequest(withGoal).mutations[0].payload).toMatchObject({
+        monthEndBalanceGoalMinor: goal,
+      });
+    }
+
+    const withoutGoal = structuredClone(request) as {
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    withoutGoal.mutations[0].payload.monthEndBalanceGoalMinor = null;
+    expect(validateSyncRequest(withoutGoal).mutations[0].payload).toMatchObject({
+      monthEndBalanceGoalMinor: null,
+    });
+  });
+
+  it.each([1.5, 9_000_000_000_000_001])(
+    "rejects an invalid monthly ending balance goal: %s",
+    (goal) => {
+      const request = validRequest() as {
+        schemaVersion: number;
+        mutations: Array<Record<string, unknown>>;
+      };
+      request.schemaVersion = 2;
+      request.mutations = [{
+        id: "mutation_settings_1",
+        entityType: "settings",
+        entityId: "primary",
+        baseVersion: 0,
+        payload: {
+          id: "primary",
+          currency: "CNY",
+          initialBalanceMinor: 500,
+          monthEndBalanceGoalMinor: goal,
+          schemaVersion: 1,
+          updatedAt: "2026-07-30T04:01:00.000Z",
+        },
+      }];
+
+      expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+    },
+  );
+
+  it("keeps version one strict and rejects the version-two settings field", () => {
+    const request = validRequest() as {
+      mutations: Array<Record<string, unknown>>;
+    };
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        monthEndBalanceGoalMinor: 12_345,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(() => validateSyncRequest(request)).toThrowError("invalid fields");
+  });
+
   it("rejects unknown fields", () => {
     const request = validRequest() as Record<string, unknown>;
     request.unexpected = true;

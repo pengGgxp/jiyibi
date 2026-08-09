@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   AmountError,
   amountMinorToInput,
+  formatCny,
   kindToSignedMinor,
   parseSignedAmountToMinor,
   parseUnsignedAmountToMinor,
 } from "./amount";
 import { entryToLocalDateTimeInput, parseLocalDateTime } from "./date";
-import { calculateLedgerSummary } from "./stats";
+import { calculateLedgerSummary, calculateMonthEndBalanceGoalStatus } from "./stats";
 import type { LedgerEntry } from "./types";
 import { EntryValidationError, validateEntryDraft } from "./validation";
 
@@ -78,6 +79,61 @@ describe("entry validation and statistics", () => {
       balanceMinor: 11_600,
       monthIncomeMinor: 10_000,
       monthExpenseMinor: 2_500,
+    });
+  });
+});
+
+describe("month-end balance goal", () => {
+  it.each([
+    { label: "below", balanceMinor: 9_000, targetMinor: 10_000, differenceMinor: -1_000, isOnTrack: false },
+    { label: "equal", balanceMinor: 10_000, targetMinor: 10_000, differenceMinor: 0, isOnTrack: true },
+    { label: "above", balanceMinor: 12_500, targetMinor: 10_000, differenceMinor: 2_500, isOnTrack: true },
+    { label: "negative target reached", balanceMinor: -3_000, targetMinor: -5_000, differenceMinor: 2_000, isOnTrack: true },
+    { label: "negative target missed", balanceMinor: -6_000, targetMinor: -5_000, differenceMinor: -1_000, isOnTrack: false },
+  ])("reports $label without forecasting future expenses", ({
+    balanceMinor,
+    targetMinor,
+    differenceMinor,
+    isOnTrack,
+  }) => {
+    expect(
+      calculateMonthEndBalanceGoalStatus(
+        balanceMinor,
+        targetMinor,
+        new Date(2026, 7, 9, 12, 0),
+      ),
+    ).toMatchObject({
+      targetMinor,
+      differenceMinor: BigInt(differenceMinor),
+      isOnTrack,
+      localMonthKey: "2026-08",
+    });
+  });
+
+  it("keeps an exact difference when two valid values exceed the safe range together", () => {
+    expect(
+      calculateMonthEndBalanceGoalStatus(
+        9_000_000_000_000_000,
+        -9_000_000_000_000_000,
+      ).differenceMinor,
+    ).toBe(18_000_000_000_000_000n);
+    expect(formatCny(18_000_000_000_000_000n)).toBe("¥180,000,000,000,000.00");
+  });
+
+  it.each([
+    { date: new Date(2026, 0, 1, 12, 0), monthKey: "2026-01", daysRemaining: 30 },
+    { date: new Date(2026, 1, 1, 12, 0), monthKey: "2026-02", daysRemaining: 27 },
+    { date: new Date(2028, 1, 1, 12, 0), monthKey: "2028-02", daysRemaining: 28 },
+    { date: new Date(2026, 3, 1, 12, 0), monthKey: "2026-04", daysRemaining: 29 },
+    { date: new Date(2026, 6, 31, 12, 0), monthKey: "2026-07", daysRemaining: 0 },
+  ])("uses the actual natural-month length for $monthKey", ({
+    date,
+    monthKey,
+    daysRemaining,
+  }) => {
+    expect(calculateMonthEndBalanceGoalStatus(0, 0, date)).toMatchObject({
+      localMonthKey: monthKey,
+      daysRemaining,
     });
   });
 });

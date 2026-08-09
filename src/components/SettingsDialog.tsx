@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  Target,
   Upload,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
@@ -19,6 +20,7 @@ import {
   decryptBackup,
   restorePreparedBackup,
   setInitialBalance,
+  setMonthEndBalanceGoal,
   type PreparedBackup,
 } from "../data";
 import { formatCny, parseSignedAmountToMinor, type AppSettings } from "../domain";
@@ -80,6 +82,11 @@ export function SettingsDialog({
   const [balanceError, setBalanceError] = useState<string>();
   const [balanceStatus, setBalanceStatus] = useState<string>();
   const [savingBalance, setSavingBalance] = useState(false);
+  const [goalEnabled, setGoalEnabled] = useState(false);
+  const [goalInput, setGoalInput] = useState("0.00");
+  const [goalError, setGoalError] = useState<string>();
+  const [goalStatus, setGoalStatus] = useState<string>();
+  const [savingGoal, setSavingGoal] = useState(false);
   const [exportPassword, setExportPassword] = useState("");
   const [exportConfirm, setExportConfirm] = useState("");
   const [exportStatus, setExportStatus] = useState<string>();
@@ -92,13 +99,18 @@ export function SettingsDialog({
   const { estimate, error: estimateError, refresh: refreshEstimate } = useStorageEstimate(open);
 
   useEffect(() => {
-    if (settings) setInitialBalanceInput(signedInput(settings.initialBalanceMinor));
-  }, [settings]);
+    if (!open || !settings) return;
+    setInitialBalanceInput(signedInput(settings.initialBalanceMinor));
+    setGoalEnabled(settings.monthEndBalanceGoalMinor !== undefined);
+    setGoalInput(signedInput(settings.monthEndBalanceGoalMinor ?? 0));
+  }, [open, settings]);
 
   useEffect(() => {
     if (!open) {
       setBalanceError(undefined);
       setBalanceStatus(undefined);
+      setGoalError(undefined);
+      setGoalStatus(undefined);
       setExportPassword("");
       setExportConfirm("");
       setExportStatus(undefined);
@@ -129,6 +141,31 @@ export function SettingsDialog({
       setBalanceError("初始余额没有保存，请重试");
     } finally {
       setSavingBalance(false);
+    }
+  };
+
+  const saveGoal = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    let minor: number | undefined;
+    if (goalEnabled) {
+      try {
+        minor = parseSignedAmountToMinor(goalInput);
+        setGoalError(undefined);
+      } catch {
+        setGoalError("请输入有效金额，最多保留两位小数");
+        return;
+      }
+    }
+    setSavingGoal(true);
+    setGoalStatus(undefined);
+    try {
+      await setMonthEndBalanceGoal(minor);
+      setGoalStatus(goalEnabled ? "月末余额底线已更新" : "月末余额底线已关闭");
+      onDataChanged();
+    } catch {
+      setGoalError("月末余额底线没有保存，请重试");
+    } finally {
+      setSavingGoal(false);
     }
   };
 
@@ -243,6 +280,62 @@ export function SettingsDialog({
           {balanceStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {balanceStatus}</p> : null}
         </section>
 
+        <section className="settings-section" aria-labelledby="goal-setting-title">
+          <div className="settings-section-heading">
+            <div className="settings-icon"><Target aria-hidden="true" /></div>
+            <div>
+              <h3 id="goal-setting-title">月末余额底线</h3>
+              <p>每个自然月结束时，希望余额不少于这个数；只比较实际余额。</p>
+            </div>
+          </div>
+          <form className="goal-setting-form" onSubmit={(event) => void saveGoal(event)} noValidate>
+            <label className="setting-toggle">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={goalEnabled}
+                onChange={(event) => {
+                  setGoalEnabled(event.target.checked);
+                  setGoalError(undefined);
+                  setGoalStatus(undefined);
+                }}
+              />
+              <span className="toggle-control" aria-hidden="true"><span /></span>
+              <span>
+                <strong>每月显示余额目标</strong>
+                <small>打开应用即可看到当前差额</small>
+              </span>
+            </label>
+            <div className="inline-setting-form">
+              <div className="field-group compact-field">
+                <label htmlFor="month-end-balance-goal">人民币金额</label>
+                <div className="signed-input">
+                  <span aria-hidden="true">¥</span>
+                  <input
+                    id="month-end-balance-goal"
+                    value={goalInput}
+                    inputMode="decimal"
+                    disabled={!goalEnabled}
+                    aria-invalid={Boolean(goalError)}
+                    aria-describedby={goalError ? "month-end-balance-goal-error" : undefined}
+                    onChange={(event) => {
+                      setGoalInput(event.target.value);
+                      setGoalError(undefined);
+                      setGoalStatus(undefined);
+                    }}
+                  />
+                </div>
+                {goalError ? <p id="month-end-balance-goal-error" className="field-error">{goalError}</p> : null}
+              </div>
+              <button type="submit" className="secondary-button" disabled={savingGoal}>
+                {savingGoal ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
+                保存目标
+              </button>
+            </div>
+          </form>
+          {goalStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {goalStatus}</p> : null}
+        </section>
+
         <CloudSyncSection {...cloudSync} />
 
         <section className="settings-section" aria-labelledby="device-setting-title">
@@ -352,6 +445,7 @@ export function SettingsDialog({
                     <div><dt>记录</dt><dd>{prepared.preview.entryCount} 笔</dd></div>
                     <div><dt>截图</dt><dd>{prepared.preview.attachmentCount} 张</dd></div>
                     <div><dt>初始余额</dt><dd>{formatCny(prepared.preview.initialBalanceMinor)}</dd></div>
+                    <div><dt>月末底线</dt><dd>{prepared.preview.monthEndBalanceGoalMinor === undefined ? "未设置" : formatCny(prepared.preview.monthEndBalanceGoalMinor)}</dd></div>
                   </dl>
                   <p className="restore-warning">恢复会整体替换当前设备上的账目，且不能撤销。</p>
                   <button type="button" className="destructive-button" disabled={restoring} onClick={() => void confirmRestore()}>

@@ -70,6 +70,7 @@ export interface BackupPreview {
   entryCount: number;
   attachmentCount: number;
   initialBalanceMinor: number;
+  monthEndBalanceGoalMinor?: number;
   currency: "CNY";
 }
 
@@ -280,6 +281,9 @@ function validateSettings(value: unknown): value is AppSettings {
     value.schemaVersion === DATABASE_SCHEMA_VERSION &&
     Number.isSafeInteger(value.initialBalanceMinor) &&
     Math.abs(Number(value.initialBalanceMinor)) <= MAX_AMOUNT_MINOR &&
+    (value.monthEndBalanceGoalMinor === undefined ||
+      (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
+        Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
     isIsoDate(value.updatedAt)
   );
 }
@@ -595,6 +599,7 @@ export async function decryptBackup(
       entryCount: payload.entries.length,
       attachmentCount: attachments.length,
       initialBalanceMinor: payload.settings.initialBalanceMinor,
+      monthEndBalanceGoalMinor: payload.settings.monthEndBalanceGoalMinor,
       currency: payload.settings.currency,
     },
     replacement: {

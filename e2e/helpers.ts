@@ -16,11 +16,15 @@ export async function addTextEntry(
   options: { amount: string; note: string; kind?: "expense" | "income" },
 ): Promise<void> {
   if (options.kind === "income") await page.getByLabel("收入").click();
-  await page.getByLabel("金额").fill(options.amount);
-  await page.getByLabel("这笔是什么").fill(options.note);
-  await page
-    .getByRole("button", { name: options.kind === "income" ? "保存收入" : "保存支出" })
-    .click();
+  const amountInput = page.getByLabel("金额");
+  const noteInput = page.getByLabel("这笔是什么");
+  const saveButton = page.locator(".save-entry-button");
+  await amountInput.fill(options.amount);
+  await noteInput.fill(options.note);
+  await saveButton.click();
+  await expect(amountInput).toHaveValue("");
+  await expect(noteInput).toHaveValue("");
+  await expect(saveButton).toBeEnabled();
   await expect(page.getByText(options.note, { exact: true })).toBeVisible();
 }
 

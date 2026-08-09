@@ -1,12 +1,13 @@
 import type { AppSettings, LedgerEntry } from "../domain/types";
 
-export const SYNC_SCHEMA_VERSION = 1 as const;
+export const API_SCHEMA_VERSION = 1 as const;
+export const SYNC_SCHEMA_VERSION = 2 as const;
 
 export type SyncEntityType = "entry" | "settings";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
 
 export interface SessionResponse {
-  schemaVersion: typeof SYNC_SCHEMA_VERSION;
+  schemaVersion: typeof API_SCHEMA_VERSION;
   user: {
     id: string;
     email: string;
@@ -22,7 +23,7 @@ export interface SessionResponse {
 }
 
 export interface CloudAccountDeletionResponse {
-  schemaVersion: typeof SYNC_SCHEMA_VERSION;
+  schemaVersion: typeof API_SCHEMA_VERSION;
   complete: boolean;
   deletedObjects: number;
   remainingObjects: number;
@@ -39,9 +40,13 @@ export interface EntrySyncMutation extends SyncMutationBase {
   payload: LedgerEntry;
 }
 
+export interface SettingsSyncPayload extends Omit<AppSettings, "monthEndBalanceGoalMinor"> {
+  monthEndBalanceGoalMinor?: number | null;
+}
+
 export interface SettingsSyncMutation extends SyncMutationBase {
   entityType: "settings";
-  payload: AppSettings;
+  payload: SettingsSyncPayload;
 }
 
 export type SyncMutation = EntrySyncMutation | SettingsSyncMutation;

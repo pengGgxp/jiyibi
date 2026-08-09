@@ -140,7 +140,10 @@ function formatEntryConflict(entry: LedgerEntry): string {
 }
 
 function formatSettingsConflict(settings: AppSettings): string {
-  return `初始余额 ${formatCny(settings.initialBalanceMinor)}`;
+  const goal = settings.monthEndBalanceGoalMinor === undefined
+    ? "月末底线未设置"
+    : `月末底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;
+  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${goal}`;
 }
 
 function conflictView(conflict: SyncConflict): CloudConflictView {

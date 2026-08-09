@@ -13,7 +13,13 @@ import {
   restorePreparedBackup,
   type PreparedBackup,
 } from "./backup";
-import { LedgerDatabase, createEntry, getSettings, setInitialBalance } from "./database";
+import {
+  LedgerDatabase,
+  createEntry,
+  getSettings,
+  setInitialBalance,
+  setMonthEndBalanceGoal,
+} from "./database";
 
 interface TestEnvelope {
   format: string;
@@ -183,6 +189,7 @@ describe("encrypted backups", () => {
 
   it("round trips settings, active entries and screenshots", async () => {
     await setInitialBalance(-500, source);
+    await setMonthEndBalanceGoal(123_456, source);
     const active = await createEntry(draft(), source);
     const deleted = await createEntry({ ...draft(), note: "deleted" }, source);
     await source.entries.update(deleted.id, { deletedAt: "2026-07-30T09:00:00.000Z" });
@@ -201,6 +208,7 @@ describe("encrypted backups", () => {
       entryCount: 1,
       attachmentCount: 1,
       initialBalanceMinor: -500,
+      monthEndBalanceGoalMinor: 123_456,
       currency: "CNY",
     });
 
@@ -211,7 +219,30 @@ describe("encrypted backups", () => {
     expect(await target.attachments.count()).toBe(1);
     expect(await target.entries.get(replaced.id)).toBeUndefined();
     expect(await target.attachments.get(replacedAttachmentId)).toBeUndefined();
-    expect((await getSettings(target)).initialBalanceMinor).toBe(-500);
+    expect(await getSettings(target)).toMatchObject({
+      initialBalanceMinor: -500,
+      monthEndBalanceGoalMinor: 123_456,
+    });
+  });
+
+  it("restores a legacy backup whose settings omit the month-end goal", async () => {
+    await setMonthEndBalanceGoal(88_800, source);
+    const backup = await createEncryptedBackup("legacy-goal-password", source);
+    const legacyBackup = await rewriteEncryptedPayload(
+      backup,
+      "legacy-goal-password",
+      (payload) => {
+        delete (payload.settings as Record<string, unknown>).monthEndBalanceGoalMinor;
+      },
+    );
+    await setMonthEndBalanceGoal(-9_900, target);
+
+    const prepared = await decryptBackup(legacyBackup, "legacy-goal-password");
+    expect(prepared.preview.monthEndBalanceGoalMinor).toBeUndefined();
+    expect(prepared.replacement.settings).not.toHaveProperty("monthEndBalanceGoalMinor");
+
+    await restorePreparedBackup(prepared, target);
+    expect(await getSettings(target)).not.toHaveProperty("monthEndBalanceGoalMinor");
   });
 
   it("rejects a wrong password without exposing data", async () => {

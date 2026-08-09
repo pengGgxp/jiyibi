@@ -1,8 +1,9 @@
 import { ApiError } from "./errors";
 import type {
-  AppSettingsPayload,
   LedgerEntryPayload,
+  SettingsMutationPayload,
   SyncMutation,
+  SyncProtocolVersion,
   SyncRequestBody,
 } from "./types";
 
@@ -108,12 +109,17 @@ function validateEntryPayload(value: unknown, entityId: string): LedgerEntryPayl
   return entry;
 }
 
-function validateSettingsPayload(value: unknown, entityId: string): AppSettingsPayload {
+function validateSettingsPayload(
+  value: unknown,
+  entityId: string,
+  protocolVersion: SyncProtocolVersion,
+): SettingsMutationPayload {
   const required = ["id", "currency", "initialBalanceMinor", "schemaVersion", "updatedAt"] as const;
-  if (!isRecord(value) || !hasOnlyKeys(value, required)) {
+  const optional = protocolVersion === 2 ? ["monthEndBalanceGoalMinor"] : [];
+  if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
-  const settings = value as unknown as AppSettingsPayload;
+  const settings = value as unknown as SettingsMutationPayload;
   if (
     entityId !== "primary" ||
     settings.id !== "primary" ||
@@ -121,6 +127,10 @@ function validateSettingsPayload(value: unknown, entityId: string): AppSettingsP
     settings.schemaVersion !== 1 ||
     !Number.isSafeInteger(settings.initialBalanceMinor) ||
     Math.abs(settings.initialBalanceMinor) > MAX_AMOUNT_MINOR ||
+    (settings.monthEndBalanceGoalMinor !== undefined &&
+      settings.monthEndBalanceGoalMinor !== null &&
+      (!Number.isSafeInteger(settings.monthEndBalanceGoalMinor) ||
+        Math.abs(settings.monthEndBalanceGoalMinor) > MAX_AMOUNT_MINOR)) ||
     !isIsoDate(settings.updatedAt)
   ) {
     throw new ApiError(400, "invalid_settings", "Settings payload is invalid");
@@ -139,7 +149,7 @@ function validateCursor(value: unknown): string {
   return value;
 }
 
-function validateMutation(value: unknown): SyncMutation {
+function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion): SyncMutation {
   const keys = ["id", "entityType", "entityId", "baseVersion", "payload"] as const;
   if (!isRecord(value) || !hasOnlyKeys(value, keys) || !isValidId(value.id)) {
     throw new ApiError(400, "invalid_mutation", "Mutation is invalid");
@@ -173,19 +183,25 @@ function validateMutation(value: unknown): SyncMutation {
     entityType: "settings",
     entityId,
     baseVersion: Number(value.baseVersion),
-    payload: validateSettingsPayload(value.payload, entityId),
+    payload: validateSettingsPayload(value.payload, entityId, protocolVersion),
   };
 }
 
 export function validateSyncRequest(value: unknown): SyncRequestBody {
   const keys = ["schemaVersion", "cursor", "mutations"] as const;
-  if (!isRecord(value) || !hasOnlyKeys(value, keys) || value.schemaVersion !== 1) {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, keys) ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2)
+  ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }
   if (!Array.isArray(value.mutations) || value.mutations.length > MAX_MUTATIONS) {
     throw new ApiError(400, "invalid_sync_request", `At most ${MAX_MUTATIONS} mutations are allowed`);
   }
-  const mutations = value.mutations.map(validateMutation);
+  const protocolVersion = value.schemaVersion;
+  const mutations = value.mutations.map((mutation) =>
+    validateMutation(mutation, protocolVersion));
   if (new Set(mutations.map((mutation) => mutation.id)).size !== mutations.length) {
     throw new ApiError(400, "duplicate_mutation", "Mutation IDs must be unique within a request");
   }
@@ -200,7 +216,7 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     );
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: protocolVersion,
     cursor: validateCursor(value.cursor),
     mutations,
   };
