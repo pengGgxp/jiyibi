@@ -30,10 +30,11 @@ BEGIN
         'schemaVersion', NEW.schema_version,
         'updatedAt', NEW.updated_at
       ),
-      CASE WHEN NEW.month_end_balance_goal_minor IS NULL
-        THEN '{}'
-        ELSE json_object('monthEndBalanceGoalMinor', NEW.month_end_balance_goal_minor)
-      END
+      IIF(
+        NEW.month_end_balance_goal_minor IS NULL,
+        '{}',
+        json_object('monthEndBalanceGoalMinor', NEW.month_end_balance_goal_minor)
+      )
     ),
     NEW.server_updated_at
   );
@@ -62,10 +63,11 @@ BEGIN
         'schemaVersion', NEW.schema_version,
         'updatedAt', NEW.updated_at
       ),
-      CASE WHEN NEW.month_end_balance_goal_minor IS NULL
-        THEN '{}'
-        ELSE json_object('monthEndBalanceGoalMinor', NEW.month_end_balance_goal_minor)
-      END
+      IIF(
+        NEW.month_end_balance_goal_minor IS NULL,
+        '{}',
+        json_object('monthEndBalanceGoalMinor', NEW.month_end_balance_goal_minor)
+      )
     ),
     NEW.server_updated_at
   );
