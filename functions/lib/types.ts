@@ -44,17 +44,25 @@ export interface AppSettingsPayload {
   currency: "CNY";
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
+  payCycle?: PayCyclePlanPayload;
   schemaVersion: 1;
   updatedAt: string;
 }
 
+export interface PayCyclePlanPayload {
+  paydayDay: number;
+  monthlySalaryMinor: number;
+  cycleEndBalanceGoalMinor: number;
+}
+
 export interface SettingsMutationPayload
-  extends Omit<AppSettingsPayload, "monthEndBalanceGoalMinor"> {
+  extends Omit<AppSettingsPayload, "monthEndBalanceGoalMinor" | "payCycle"> {
   monthEndBalanceGoalMinor?: number | null;
+  payCycle?: PayCyclePlanPayload | null;
 }
 
 export type SyncEntityType = "entry" | "settings";
-export type SyncProtocolVersion = 1 | 2;
+export type SyncProtocolVersion = 1 | 2 | 3;
 
 interface SyncMutationBase {
   id: string;

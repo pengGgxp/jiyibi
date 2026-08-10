@@ -8,6 +8,7 @@ import type {
   EntryDraft,
   LedgerEntry,
   LedgerSummary,
+  PayCyclePlan,
   ProcessedImage,
 } from "../domain/types";
 import { validateEntryDraft } from "../domain/validation";
@@ -15,6 +16,7 @@ import { createId } from "../lib/id";
 import {
   SYNC_SCHEMA_VERSION,
   type SessionResponse,
+  type SyncProtocolVersion,
   type SyncChange,
   type SyncEntityType,
   type SyncResult,
@@ -32,7 +34,7 @@ export interface SyncState {
   accountEmail: string;
   generation: number;
   cursor: string;
-  syncProtocolVersion?: typeof SYNC_SCHEMA_VERSION;
+  syncProtocolVersion?: SyncProtocolVersion;
   syncProtocolRefreshPending?: true;
   uploadApproved: boolean;
   linkedAt: string;
@@ -59,6 +61,7 @@ export interface SyncOutboxRecord {
   baseVersion: number;
   payload: LedgerEntry | AppSettings;
   clearMonthEndBalanceGoal?: true;
+  clearPayCycle?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -160,7 +163,8 @@ function isDefaultSettings(settings: AppSettings): boolean {
     settings.currency === "CNY" &&
     settings.schemaVersion === DATABASE_SCHEMA_VERSION &&
     settings.initialBalanceMinor === 0 &&
-    settings.monthEndBalanceGoalMinor === undefined
+    settings.monthEndBalanceGoalMinor === undefined &&
+    settings.payCycle === undefined
   );
 }
 
@@ -181,7 +185,7 @@ async function queueSyncMutation(
   payload: LedgerEntry | AppSettings,
   database: LedgerDatabase,
   nowIso: string,
-  options: { clearMonthEndBalanceGoal?: boolean } = {},
+  options: { clearMonthEndBalanceGoal?: boolean; clearPayCycle?: boolean } = {},
 ): Promise<SyncOutboxRecord | undefined> {
   const link = await database.syncState.get("primary");
   if (!link?.uploadApproved) return undefined;
@@ -195,6 +199,9 @@ async function queueSyncMutation(
   const clearsMonthEndBalanceGoal = entityType === "settings" &&
     !Object.prototype.hasOwnProperty.call(payload, "monthEndBalanceGoalMinor") &&
     (options.clearMonthEndBalanceGoal || existing?.clearMonthEndBalanceGoal);
+  const clearsPayCycle = entityType === "settings" &&
+    !Object.prototype.hasOwnProperty.call(payload, "payCycle") &&
+    (options.clearPayCycle || existing?.clearPayCycle);
   const outbox: SyncOutboxRecord = {
     entityKey,
     id: createId("mutation"),
@@ -203,6 +210,7 @@ async function queueSyncMutation(
     baseVersion: existing?.baseVersion ?? entityState?.serverVersion ?? 0,
     payload: syncPayloadFor(entityType, payload),
     ...(clearsMonthEndBalanceGoal ? { clearMonthEndBalanceGoal: true } : {}),
+    ...(clearsPayCycle ? { clearPayCycle: true } : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
   };
@@ -441,6 +449,56 @@ export async function setMonthEndBalanceGoal(
       await database.settings.put(next);
       await queueSyncMutation("settings", next.id, next, database, nowIso, {
         clearMonthEndBalanceGoal: monthEndBalanceGoalMinor === undefined,
+      });
+      return next;
+    },
+  );
+}
+
+export async function setPayCyclePlan(
+  payCycle: PayCyclePlan | undefined,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (
+    payCycle !== undefined &&
+    (
+      !Number.isInteger(payCycle.paydayDay) ||
+      payCycle.paydayDay < 1 ||
+      payCycle.paydayDay > 31 ||
+      !Number.isSafeInteger(payCycle.monthlySalaryMinor) ||
+      payCycle.monthlySalaryMinor <= 0 ||
+      payCycle.monthlySalaryMinor > MAX_AMOUNT_MINOR ||
+      !Number.isSafeInteger(payCycle.cycleEndBalanceGoalMinor) ||
+      Math.abs(payCycle.cycleEndBalanceGoalMinor) > MAX_AMOUNT_MINOR
+    )
+  ) {
+    throw new LedgerDataError("工资周期设置无效", "invalid-settings");
+  }
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const nowIso = now.toISOString();
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      const next: AppSettings = {
+        ...current,
+        updatedAt: nowIso,
+      };
+      delete next.monthEndBalanceGoalMinor;
+      if (payCycle === undefined) {
+        delete next.payCycle;
+      } else {
+        next.payCycle = structuredClone(payCycle);
+      }
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso, {
+        clearMonthEndBalanceGoal: true,
+        clearPayCycle: payCycle === undefined,
       });
       return next;
     },
@@ -1149,6 +1207,10 @@ export async function resolveSyncConflict(
         ...(entityType === "settings" &&
           !Object.prototype.hasOwnProperty.call(localPayload, "monthEndBalanceGoalMinor")
           ? { clearMonthEndBalanceGoal: true as const }
+          : {}),
+        ...(entityType === "settings" &&
+          !Object.prototype.hasOwnProperty.call(localPayload, "payCycle")
+          ? { clearPayCycle: true as const }
           : {}),
         createdAt: existingOutbox?.createdAt ?? nowIso,
         updatedAt: nowIso,

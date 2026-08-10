@@ -115,7 +115,11 @@ function validateSettingsPayload(
   protocolVersion: SyncProtocolVersion,
 ): SettingsMutationPayload {
   const required = ["id", "currency", "initialBalanceMinor", "schemaVersion", "updatedAt"] as const;
-  const optional = protocolVersion === 2 ? ["monthEndBalanceGoalMinor"] : [];
+  const optional = protocolVersion === 1
+    ? []
+    : protocolVersion === 2
+      ? ["monthEndBalanceGoalMinor"]
+      : ["monthEndBalanceGoalMinor", "payCycle"];
   if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
@@ -131,6 +135,24 @@ function validateSettingsPayload(
       settings.monthEndBalanceGoalMinor !== null &&
       (!Number.isSafeInteger(settings.monthEndBalanceGoalMinor) ||
         Math.abs(settings.monthEndBalanceGoalMinor) > MAX_AMOUNT_MINOR)) ||
+    (settings.payCycle !== undefined &&
+      settings.payCycle !== null &&
+      (
+        !isRecord(settings.payCycle) ||
+        !hasOnlyKeys(settings.payCycle, [
+          "paydayDay",
+          "monthlySalaryMinor",
+          "cycleEndBalanceGoalMinor",
+        ]) ||
+        !Number.isInteger(settings.payCycle.paydayDay) ||
+        Number(settings.payCycle.paydayDay) < 1 ||
+        Number(settings.payCycle.paydayDay) > 31 ||
+        !Number.isSafeInteger(settings.payCycle.monthlySalaryMinor) ||
+        Number(settings.payCycle.monthlySalaryMinor) <= 0 ||
+        Number(settings.payCycle.monthlySalaryMinor) > MAX_AMOUNT_MINOR ||
+        !Number.isSafeInteger(settings.payCycle.cycleEndBalanceGoalMinor) ||
+        Math.abs(Number(settings.payCycle.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
+      )) ||
     !isIsoDate(settings.updatedAt)
   ) {
     throw new ApiError(400, "invalid_settings", "Settings payload is invalid");
@@ -192,7 +214,7 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, keys) ||
-    (value.schemaVersion !== 1 && value.schemaVersion !== 2)
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

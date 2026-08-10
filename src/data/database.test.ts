@@ -25,6 +25,7 @@ import {
   resolveSyncConflict,
   setInitialBalance,
   setMonthEndBalanceGoal,
+  setPayCyclePlan,
   softDeleteEntry,
   undoDeleteEntry,
   updateEntry,
@@ -94,6 +95,45 @@ describe("LedgerDatabase", () => {
       schemaVersion: 1,
     });
     expect(settings).not.toHaveProperty("monthEndBalanceGoalMinor");
+    expect(settings).not.toHaveProperty("payCycle");
+  });
+
+  it("saves and clears an atomic pay-cycle plan while migrating the legacy goal", async () => {
+    await setInitialBalance(1_234, database);
+    await setMonthEndBalanceGoal(50_000, database);
+    const plan = {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    };
+
+    const saved = await setPayCyclePlan(plan, database, new Date("2026-08-10T02:00:00.000Z"));
+    expect(saved).toMatchObject({ initialBalanceMinor: 1_234, payCycle: plan });
+    expect(saved).not.toHaveProperty("monthEndBalanceGoalMinor");
+
+    await setInitialBalance(-2_500, database);
+    expect(await getSettings(database)).toMatchObject({
+      initialBalanceMinor: -2_500,
+      payCycle: plan,
+    });
+
+    const cleared = await setPayCyclePlan(undefined, database);
+    expect(cleared).not.toHaveProperty("payCycle");
+    expect(cleared).not.toHaveProperty("monthEndBalanceGoalMinor");
+  });
+
+  it.each([
+    { paydayDay: 0, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 32, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 0, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 1.5, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: Number.NaN },
+  ])("rejects an incomplete or invalid pay-cycle plan: %o", async (invalidPlan) => {
+    const before = await getSettings(database);
+    await expect(setPayCyclePlan(invalidPlan, database)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
+    await expect(getSettings(database)).resolves.toEqual(before);
   });
 
   it("saves and clears the month-end goal without overwriting the initial balance", async () => {
@@ -299,7 +339,7 @@ describe("LedgerDatabase", () => {
 
   it("keeps an explicit goal-clear intent while coalescing settings edits", async () => {
     await linkSyncAccount(session(), true, database);
-    expect((await database.syncState.get("primary"))?.syncProtocolVersion).toBe(2);
+    expect((await database.syncState.get("primary"))?.syncProtocolVersion).toBe(3);
 
     await setMonthEndBalanceGoal(50_000, database);
     expect(await database.syncOutbox.get("settings:primary")).not.toHaveProperty(
@@ -316,6 +356,31 @@ describe("LedgerDatabase", () => {
     const reset = await database.syncOutbox.get("settings:primary");
     expect(reset).not.toHaveProperty("clearMonthEndBalanceGoal");
     expect(reset?.payload).toHaveProperty("monthEndBalanceGoalMinor", -25_000);
+  });
+
+  it("keeps an explicit pay-cycle clear while coalescing later settings edits", async () => {
+    await linkSyncAccount(session(), true, database);
+    const plan = {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    };
+
+    await setPayCyclePlan(plan, database);
+    expect(await database.syncOutbox.get("settings:primary")).not.toHaveProperty(
+      "clearPayCycle",
+    );
+
+    await setPayCyclePlan(undefined, database);
+    await setInitialBalance(1_234, database);
+    const cleared = await database.syncOutbox.get("settings:primary");
+    expect(cleared?.clearPayCycle).toBe(true);
+    expect(cleared?.payload).not.toHaveProperty("payCycle");
+
+    await setPayCyclePlan(plan, database);
+    const reset = await database.syncOutbox.get("settings:primary");
+    expect(reset).not.toHaveProperty("clearPayCycle");
+    expect(reset?.payload).toHaveProperty("payCycle", plan);
   });
 
   it("keeps a durable deletion outbox after the local entry and attachment are purged", async () => {

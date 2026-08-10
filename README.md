@@ -6,7 +6,8 @@
 
 - 支出/收入切换与人民币金额输入
 - 文字或单张截图凭证，支持选择、拍摄与粘贴
-- 当前余额、初始余额、本月收支概览与可选的自然月月末余额底线
+- 当前余额、初始余额、本月收支概览，以及可选的发薪日、每月工资和周期末余额底线
+- 工资周期内展示已支出占工资比例和“当前可再花”；不预测固定支出，也不会自动生成工资收入
 - 记录编辑、软删除与 8 秒撤销
 - 密码加密的单文件备份与整体恢复
 - 可选的 GitHub OAuth 登录及多设备同步，冲突由用户选择保留本机或云端版本
@@ -16,7 +17,7 @@
 ## 数据与隐私
 
 - 金额以人民币“分”的整数形式保存，避免浮点误差。
-- 账目、设置和截图先写入当前浏览器的 IndexedDB。未开启同步时，不会上传账本数据。
+- 账目、初始余额、发薪日、工资、周期底线和截图先写入当前浏览器的 IndexedDB。未开启同步时，不会上传账本数据。
 - 用户登录并确认开启同步后，账目与同步元数据的云副本写入 D1，压缩后的 JPEG 截图云副本写入绑定名为 `ATTACHMENTS` 的 Workers KV；本机数据仍保留。
 - Workers KV 是最终一致存储。截图刚上传后，另一设备可能短暂读取不到并需要重试；这不会影响本机 IndexedDB 中的保存与查看。
 - 云同步必须通过已认证的启用接口明确开启。删除全部云端数据后，其他已登录设备也不能静默恢复云副本，必须再次明确启用。
@@ -77,7 +78,7 @@ npx wrangler pages dev dist
 - 会话 cookie 设置为 `HttpOnly`、`Secure`、`SameSite=Lax`，前端 JavaScript 无法读取。OAuth state 与会话令牌不会以明文写入 D1，D1 只保存其哈希、有效期及完成认证所需的最小元数据。
 - `GET /api/session` 始终可读取当前身份以及 `cloud.syncStatus` 和 `cloud.generation`；状态为 `disabled`、`enabled` 或 `deleting`。`generation` 是服务端单调递增的账号代次，客户端不得自行推测，也不得用后来读取的会话值静默覆盖本机保存的链接代次。
 - `POST /api/account/enable` 接收 `{"confirmation":"ENABLE","generation":0}`，其中 `generation` 必须来自刚读取的 Session。成功返回 `200` 与 `{"schemaVersion":1,"syncStatus":"enabled","generation":1}`，这是上传任何账本数据前必须执行的明确授权。
-- `/api/sync` 的账本协议当前为 v2，并继续接受 v1 请求。v1 响应不返回月末余额底线；设置 mutation 缺少该字段时保留云端值，v2 只有显式发送整数或 `null` 才会设置或关闭底线。
+- `/api/sync` 的账本协议当前为 v3，并继续接受 v1/v2 请求。v1 看不到可选规划字段；v2 只支持旧版自然月目标；v3 才返回工资周期。旧协议或缺少字段的 mutation 必须保留云端新字段，v3 只有显式发送完整工资周期或 `null` 才会设置或关闭计划。
 - `POST /api/sync` 以及附件 `GET/PUT` 必须携带 `X-Jiyibi-Sync-Generation`，值为本机明确连接时保存的非零代次。服务端和本机数据库都会拒绝跨代次读写。
 - 附件请求在写入 Workers KV 前会取得当前代次的短期上传租约，并在请求结束时释放。账号删除在活动租约释放前只返回 `202`；请求异常中断时租约最长 15 分钟后过期，随后删除重试会按代次前缀回收可能迟到的对象。
 - `DELETE /api/account` 接收 `{"confirmation":"DELETE","generation":1}`，每次最多清理 50 个 D1 跟踪对象或相应账号代次前缀下的 KV 对象。未完成时返回 `202`、`Retry-After: 5` 以及 `complete:false`；调用方应等待指定时间并使用同一代次重复请求。最后一个上传租约释放且完整 KV 扫描为空后，服务端还会等待至少 60 秒传播静默窗口，再次完成全扫描后才返回 `200` 与 `complete:true`。
@@ -113,11 +114,11 @@ npx wrangler d1 migrations apply DB --remote
 
 迁移不会由前端构建自动执行。应先确认迁移成功，再发布依赖新表结构的版本。
 
-如果 Wrangler 在包含 `CREATE TRIGGER ... BEGIN ... END` 的迁移上报 `incomplete input`，先确认该次迁移已回滚，再用 D1 的文件执行接口应用对应文件，并补记迁移记录。例如 `0004`：
+如果 Wrangler 在包含 `CREATE TRIGGER ... BEGIN ... END` 的迁移上报 `incomplete input`，先确认该次迁移已回滚，再用 D1 的文件执行接口应用对应文件，并补记迁移记录。例如 `0005`：
 
 ```bash
-npx wrangler d1 execute DB --remote --file=migrations/0004_month_end_balance_goal.sql
-npx wrangler d1 execute DB --remote --command "INSERT INTO d1_migrations (name) SELECT '0004_month_end_balance_goal.sql' WHERE NOT EXISTS (SELECT 1 FROM d1_migrations WHERE name = '0004_month_end_balance_goal.sql')"
+npx wrangler d1 execute DB --remote --file=migrations/0005_pay_cycle_plan.sql
+npx wrangler d1 execute DB --remote --command "INSERT INTO d1_migrations (name) SELECT '0005_pay_cycle_plan.sql' WHERE NOT EXISTS (SELECT 1 FROM d1_migrations WHERE name = '0005_pay_cycle_plan.sql')"
 npx wrangler d1 migrations list DB --remote
 ```
 

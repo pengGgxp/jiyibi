@@ -33,35 +33,48 @@ test("编辑、初始余额和删除撤销会准确重算", async ({ page }, tes
   await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥92.00");
 });
 
-test("月末余额底线会立即展示、随记账重算并在重载后保留", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop-chrome", "目标持久化流只需在桌面项目执行一次");
+test("工资周期会展示发薪日、工资和周期末余额底线", async ({ page }) => {
   await openLedger(page);
 
-  await page.getByRole("button", { name: "设置月末余额底线" }).click();
+  await page.getByRole("button", { name: "设置工资周期" }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
-  const goalToggle = settings.getByRole("switch", { name: /每月显示余额目标/ });
-  const goalAmount = settings.locator("#month-end-balance-goal");
+  const planToggle = settings.getByRole("switch", { name: /打开工资周期规划/ });
+  const payday = settings.locator("#payday-day");
+  const salary = settings.locator("#monthly-salary");
+  const goalAmount = settings.locator("#cycle-end-balance-goal");
 
-  await expect(goalToggle).not.toBeChecked();
+  await expect(planToggle).not.toBeChecked();
+  await expect(payday).toBeDisabled();
+  await expect(salary).toBeDisabled();
   await expect(goalAmount).toBeDisabled();
-  await goalToggle.check();
+  await planToggle.check();
+  await settings.getByRole("button", { name: "保存工资周期" }).click();
+  await expect(settings.getByText("工资和底线请输入有效金额，最多保留两位小数"))
+    .toBeVisible();
+  await payday.fill("10");
+  await salary.fill("1000.00");
   await goalAmount.fill("100.00");
-  await settings.getByRole("button", { name: "保存目标" }).click();
-  await expect(settings.getByText("月末余额底线已更新", { exact: true })).toBeVisible();
+  await settings.getByRole("button", { name: "保存工资周期" }).click();
+  await expect(settings.getByText("工资周期已更新", { exact: true })).toBeVisible();
   await settings.getByRole("button", { name: "关闭设置" }).click();
 
   const goal = page.locator(".summary-panel .balance-goal");
-  await expect(goal).toContainText("本月余额底线¥100.00");
-  await expect(goal).toContainText("当前还差 ¥100.00");
+  await expect(goal).toContainText("每月 10 日发薪");
+  await expect(goal).toContainText("每月工资¥1,000.00");
+  await expect(goal).toContainText("周期末底线 ¥100.00");
+  await expect(goal).toContainText("当前余额还差 ¥100.00");
+  expect(await page.evaluate(() => (
+    document.documentElement.scrollWidth <= document.documentElement.clientWidth
+  ))).toBe(true);
 
   await addTextEntry(page, { amount: "40.00", note: "目标测试收入", kind: "income" });
-  await expect(goal).toContainText("当前还差 ¥60.00");
+  await expect(goal).toContainText("当前余额还差 ¥60.00");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { level: 1, name: "记一笔" })).toBeVisible();
   await dismissOfflineReady(page);
   await expect(page.getByText("目标测试收入", { exact: true })).toBeVisible();
-  await expect(page.locator(".summary-panel .balance-goal")).toContainText("当前还差 ¥60.00");
+  await expect(page.locator(".summary-panel .balance-goal")).toContainText("当前余额还差 ¥60.00");
 });
 
 test("键盘可进入主内容，对话框可用 Escape 关闭并恢复焦点", async ({ page }, testInfo) => {

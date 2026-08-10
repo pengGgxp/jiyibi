@@ -6,6 +6,7 @@ import {
   linkSyncAccount,
   resolveSyncConflict,
   setMonthEndBalanceGoal,
+  setPayCyclePlan,
 } from "../data/database";
 import type { SyncApiClient } from "./api";
 import {
@@ -192,7 +193,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 2,
+      schemaVersion: 3,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
@@ -200,7 +201,34 @@ describe("sync engine", () => {
     }), 1);
   });
 
-  it("refreshes settings once when a linked database upgrades from sync v1", async () => {
+  it("sends an explicit null only when the user clears the pay cycle", async () => {
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, database);
+    await setPayCyclePlan(undefined, database);
+    const queued = (await database.syncOutbox.get("settings:primary"))!;
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 3,
+      mutations: [expect.objectContaining({
+        entityType: "settings",
+        payload: expect.objectContaining({
+          monthEndBalanceGoalMinor: null,
+          payCycle: null,
+        }),
+      })],
+    }), 1);
+  });
+
+  it("refreshes settings once when a linked database upgrades to sync v3", async () => {
     await linkSyncAccount(session(), false, database);
     const legacyState = (await database.syncState.get("primary"))!;
     delete legacyState.syncProtocolVersion;
@@ -216,7 +244,11 @@ describe("sync engine", () => {
     });
     const remoteSettings = {
       ...(await database.settings.get("primary"))!,
-      monthEndBalanceGoalMinor: 25_000,
+      payCycle: {
+        paydayDay: 10,
+        monthlySalaryMinor: 800_000,
+        cycleEndBalanceGoalMinor: 25_000,
+      },
       updatedAt: "2026-08-10T01:00:00.000Z",
     };
     const api = apiClient(emptyResponse({
@@ -233,14 +265,18 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 2,
+      schemaVersion: 3,
       cursor: "0",
       mutations: [],
     }), 1);
-    expect((await database.settings.get("primary"))?.monthEndBalanceGoalMinor).toBe(25_000);
+    expect((await database.settings.get("primary"))?.payCycle).toMatchObject({
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 25_000,
+    });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 2,
+      syncProtocolVersion: 3,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",

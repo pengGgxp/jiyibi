@@ -1,6 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { AppSettings, LedgerSummary } from "../domain";
+import {
+  calculatePayCycleStatus,
+  type AppSettings,
+  type LedgerSummary,
+  type PayCyclePlan,
+} from "../domain";
 import { SummaryPanel } from "./SummaryPanel";
 
 const summary: LedgerSummary = {
@@ -9,26 +14,34 @@ const summary: LedgerSummary = {
   monthExpenseMinor: 2_000,
 };
 
-function settings(monthEndBalanceGoalMinor?: number): AppSettings {
+const plan: PayCyclePlan = {
+  paydayDay: 10,
+  monthlySalaryMinor: 100_000,
+  cycleEndBalanceGoalMinor: 10_000,
+};
+
+function settings(payCycle?: PayCyclePlan, legacyGoal?: number): AppSettings {
   return {
     id: "primary",
     currency: "CNY",
     initialBalanceMinor: 0,
-    ...(monthEndBalanceGoalMinor === undefined ? {} : { monthEndBalanceGoalMinor }),
+    ...(payCycle ? { payCycle } : {}),
+    ...(legacyGoal === undefined ? {} : { monthEndBalanceGoalMinor: legacyGoal }),
     schemaVersion: 1,
     updatedAt: "2026-08-10T00:00:00.000Z",
   };
 }
 
-function renderPanel(
-  balanceMinor: number,
-  monthEndBalanceGoalMinor?: number,
-): HTMLElement {
+function renderPanel(balanceMinor: number, payCycle?: PayCyclePlan, legacyGoal?: number): HTMLElement {
   const host = document.createElement("div");
+  const appSettings = settings(payCycle, legacyGoal);
   host.innerHTML = renderToStaticMarkup(
     <SummaryPanel
       summary={{ ...summary, balanceMinor }}
-      settings={settings(monthEndBalanceGoalMinor)}
+      settings={appSettings}
+      payCycleStatus={payCycle
+        ? calculatePayCycleStatus([], balanceMinor, payCycle, new Date(2026, 7, 10, 12))
+        : undefined}
       loading={false}
       onOpenSettings={vi.fn()}
     />,
@@ -36,37 +49,41 @@ function renderPanel(
   return host;
 }
 
-describe("SummaryPanel month-end balance goal", () => {
-  it("offers a settings entry when no goal is configured", () => {
+describe("SummaryPanel pay cycle", () => {
+  it("offers a settings entry when no pay cycle is configured", () => {
     const panel = renderPanel(8_000);
 
-    expect(panel.querySelector(".balance-goal")).toBeNull();
+    expect(panel.querySelector(".pay-cycle-card")).toBeNull();
     expect(panel.querySelector<HTMLButtonElement>(".balance-goal-setup")?.textContent)
-      .toContain("设置月末余额底线");
+      .toContain("设置工资周期");
   });
 
-  it("shows the remaining amount when the current balance is below the goal", () => {
-    const panel = renderPanel(8_000, 10_000);
-    const goal = panel.querySelector(".balance-goal");
+  it("shows payday, salary, period and the exact balance gap", () => {
+    const panel = renderPanel(8_000, plan);
+    const cycle = panel.querySelector(".pay-cycle-card");
 
-    expect(goal?.classList.contains("is-behind")).toBe(true);
-    expect(goal?.textContent).toContain("本月余额底线¥100.00");
-    expect(goal?.textContent).toContain("当前还差 ¥20.00");
+    expect(cycle?.classList.contains("is-behind")).toBe(true);
+    expect(cycle?.textContent).toContain("每月 10 日发薪");
+    expect(cycle?.textContent).toContain("8月10日—9月9日");
+    expect(cycle?.textContent).toContain("每月工资¥1,000.00");
+    expect(cycle?.textContent).toContain("当前余额还差 ¥20.00");
+    expect(cycle?.textContent).toContain("周期末底线 ¥100.00");
+    expect(cycle?.textContent).toContain("当前可再花 ¥0.00");
   });
 
-  it("states when the current balance exactly reaches the goal", () => {
-    const panel = renderPanel(10_000, 10_000);
-    const goal = panel.querySelector(".balance-goal");
+  it("shows the spendable amount constrained by salary and the balance floor", () => {
+    const panel = renderPanel(12_000, plan);
+    const cycle = panel.querySelector(".pay-cycle-card");
 
-    expect(goal?.classList.contains("is-on-track")).toBe(true);
-    expect(goal?.textContent).toContain("当前正好达到底线");
+    expect(cycle?.classList.contains("is-on-track")).toBe(true);
+    expect(cycle?.textContent).toContain("当前余额高出 ¥20.00");
+    expect(cycle?.textContent).toContain("当前可再花 ¥20.00");
   });
 
-  it("shows the surplus when the current balance is above the goal", () => {
-    const panel = renderPanel(12_000, 10_000);
-    const goal = panel.querySelector(".balance-goal");
+  it("keeps an old natural-month goal visible until the pay cycle is configured", () => {
+    const panel = renderPanel(8_000, undefined, 12_345);
 
-    expect(goal?.classList.contains("is-on-track")).toBe(true);
-    expect(goal?.textContent).toContain("当前高出 ¥20.00");
+    expect(panel.textContent).toContain("旧版自然月底线 ¥123.45");
+    expect(panel.textContent).toContain("设置工资周期");
   });
 });

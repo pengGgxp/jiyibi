@@ -25,11 +25,19 @@ export interface Attachment {
   createdAt: string;
 }
 
+export interface PayCyclePlan {
+  paydayDay: number;
+  monthlySalaryMinor: number;
+  cycleEndBalanceGoalMinor: number;
+}
+
 export interface AppSettings {
   id: "primary";
   currency: "CNY";
   initialBalanceMinor: number;
+  /** Legacy v2 natural-month goal. Kept only for sync and backup compatibility. */
   monthEndBalanceGoalMinor?: number;
+  payCycle?: PayCyclePlan;
   schemaVersion: 1;
   updatedAt: string;
 }
@@ -57,12 +65,19 @@ export interface LedgerSummary {
   monthExpenseMinor: number;
 }
 
-export interface MonthEndBalanceGoalStatus {
+export interface PayCycleStatus extends PayCyclePlan {
   targetMinor: number;
-  differenceMinor: bigint;
-  isOnTrack: boolean;
-  daysRemaining: number;
-  localMonthKey: string;
+  balanceHeadroomMinor: bigint;
+  isCurrentlyAtOrAboveGoal: boolean;
+  cycleExpenseMinor: number;
+  cycleIncomeMinor: number;
+  salaryRemainingMinor: bigint;
+  safeToSpendMinor: bigint;
+  salarySpentPercent: number;
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  nextPaydayDateKey: string;
+  daysUntilPayday: number;
 }
 
 export interface ValidatedEntryDraft {

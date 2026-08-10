@@ -140,17 +140,19 @@ function formatEntryConflict(entry: LedgerEntry): string {
 }
 
 function formatSettingsConflict(settings: AppSettings): string {
-  const goal = settings.monthEndBalanceGoalMinor === undefined
-    ? "月末底线未设置"
-    : `月末底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;
-  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${goal}`;
+  const plan = settings.payCycle
+    ? `每月 ${settings.payCycle.paydayDay} 日发薪，工资 ${formatCny(settings.payCycle.monthlySalaryMinor)}，周期底线 ${formatCny(settings.payCycle.cycleEndBalanceGoalMinor)}`
+    : settings.monthEndBalanceGoalMinor === undefined
+      ? "工资周期未设置"
+      : `旧版自然月底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;
+  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${plan}`;
 }
 
 function conflictView(conflict: SyncConflict): CloudConflictView {
   if (conflict.entityType === "settings") {
     return {
       id: conflict.id,
-      label: "初始余额",
+      label: "账本设置",
       localValue: formatSettingsConflict(conflict.localPayload as AppSettings),
       cloudValue: formatSettingsConflict(conflict.remotePayload as AppSettings),
     };

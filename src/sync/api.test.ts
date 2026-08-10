@@ -69,6 +69,11 @@ function syncResponse(): SyncResponse {
           currency: "CNY",
           initialBalanceMinor: 500,
           monthEndBalanceGoalMinor: 25_000,
+          payCycle: {
+            paydayDay: 10,
+            monthlySalaryMinor: 800_000,
+            cycleEndBalanceGoalMinor: 100_000,
+          },
           schemaVersion: 1,
           updatedAt: "2026-07-30T05:00:00.000Z",
         },
@@ -290,12 +295,13 @@ describe("sync API client", () => {
     });
   });
 
-  it("accepts legacy settings changes without a monthly goal", async () => {
+  it("accepts legacy settings changes without optional planning fields", async () => {
     const response = syncResponse();
     response.results = [];
     const settings = response.changes[1];
     if (settings.entityType !== "settings") throw new Error("Expected settings change");
     delete settings.payload.monthEndBalanceGoalMinor;
+    delete settings.payload.payCycle;
     const fetcher = mockFetch(jsonResponse(response));
 
     await expect(createSyncApiClient(fetcher).sync({
@@ -305,7 +311,7 @@ describe("sync API client", () => {
     }, 3)).resolves.toEqual(response);
   });
 
-  it("sends and receives a settings goal without changing its integer value", async () => {
+  it("sends and receives planning settings without changing integer values", async () => {
     const settingsChange = syncResponse().changes[1];
     if (settingsChange.entityType !== "settings") throw new Error("Expected settings change");
     const request = {
@@ -331,8 +337,35 @@ describe("sync API client", () => {
     await expect(createSyncApiClient(fetcher).sync(request, 3)).resolves.toEqual(response);
     const init = fetcher.mock.calls[0][1];
     expect(JSON.parse(String(init?.body))).toMatchObject({
-      mutations: [{ payload: { monthEndBalanceGoalMinor: 25_000 } }],
+      mutations: [{ payload: {
+        monthEndBalanceGoalMinor: 25_000,
+        payCycle: {
+          paydayDay: 10,
+          monthlySalaryMinor: 800_000,
+          cycleEndBalanceGoalMinor: 100_000,
+        },
+      } }],
     });
+  });
+
+  it.each([
+    null,
+    { paydayDay: 0, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 0, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 1.5 },
+    { paydayDay: 10, monthlySalaryMinor: 1 },
+  ])("rejects an invalid pay cycle in a settings change: %o", async (payCycle) => {
+    const response = syncResponse() as unknown as Record<string, unknown>;
+    const changes = response.changes as Array<Record<string, unknown>>;
+    const settings = changes[1].payload as Record<string, unknown>;
+    settings.payCycle = payCycle;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).rejects.toMatchObject({ code: "invalid-response" });
   });
 
   it.each([null, 1.5, 9_000_000_000_000_001])(

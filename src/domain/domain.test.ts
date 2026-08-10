@@ -7,8 +7,8 @@ import {
   parseSignedAmountToMinor,
   parseUnsignedAmountToMinor,
 } from "./amount";
-import { entryToLocalDateTimeInput, parseLocalDateTime } from "./date";
-import { calculateLedgerSummary, calculateMonthEndBalanceGoalStatus } from "./stats";
+import { entryToLocalDateTimeInput, parseLocalDateTime, resolvePayCycleRange } from "./date";
+import { calculateLedgerSummary, calculatePayCycleStatus } from "./stats";
 import type { LedgerEntry } from "./types";
 import { EntryValidationError, validateEntryDraft } from "./validation";
 
@@ -83,57 +83,69 @@ describe("entry validation and statistics", () => {
   });
 });
 
-describe("month-end balance goal", () => {
-  it.each([
-    { label: "below", balanceMinor: 9_000, targetMinor: 10_000, differenceMinor: -1_000, isOnTrack: false },
-    { label: "equal", balanceMinor: 10_000, targetMinor: 10_000, differenceMinor: 0, isOnTrack: true },
-    { label: "above", balanceMinor: 12_500, targetMinor: 10_000, differenceMinor: 2_500, isOnTrack: true },
-    { label: "negative target reached", balanceMinor: -3_000, targetMinor: -5_000, differenceMinor: 2_000, isOnTrack: true },
-    { label: "negative target missed", balanceMinor: -6_000, targetMinor: -5_000, differenceMinor: -1_000, isOnTrack: false },
-  ])("reports $label without forecasting future expenses", ({
-    balanceMinor,
-    targetMinor,
-    differenceMinor,
-    isOnTrack,
-  }) => {
-    expect(
-      calculateMonthEndBalanceGoalStatus(
-        balanceMinor,
-        targetMinor,
-        new Date(2026, 7, 9, 12, 0),
-      ),
-    ).toMatchObject({
-      targetMinor,
-      differenceMinor: BigInt(differenceMinor),
-      isOnTrack,
-      localMonthKey: "2026-08",
+describe("salary pay cycle", () => {
+  it("uses payday boundaries instead of natural months", () => {
+    expect(resolvePayCycleRange(10, new Date(2026, 7, 9, 12, 0))).toEqual({
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-09",
+      nextPaydayDateKey: "2026-08-10",
+      daysUntilPayday: 1,
+    });
+    expect(resolvePayCycleRange(10, new Date(2026, 7, 10, 12, 0))).toEqual({
+      cycleStartDateKey: "2026-08-10",
+      cycleEndDateKey: "2026-09-09",
+      nextPaydayDateKey: "2026-09-10",
+      daysUntilPayday: 31,
     });
   });
 
-  it("keeps an exact difference when two valid values exceed the safe range together", () => {
-    expect(
-      calculateMonthEndBalanceGoalStatus(
-        9_000_000_000_000_000,
-        -9_000_000_000_000_000,
-      ).differenceMinor,
-    ).toBe(18_000_000_000_000_000n);
-    expect(formatCny(18_000_000_000_000_000n)).toBe("¥180,000,000,000,000.00");
+  it("uses the last day in months without the configured payday", () => {
+    expect(resolvePayCycleRange(31, new Date(2026, 1, 28, 12, 0))).toEqual({
+      cycleStartDateKey: "2026-02-28",
+      cycleEndDateKey: "2026-03-30",
+      nextPaydayDateKey: "2026-03-31",
+      daysUntilPayday: 31,
+    });
+    expect(resolvePayCycleRange(31, new Date(2028, 1, 29, 12, 0)).cycleStartDateKey)
+      .toBe("2028-02-29");
   });
 
-  it.each([
-    { date: new Date(2026, 0, 1, 12, 0), monthKey: "2026-01", daysRemaining: 30 },
-    { date: new Date(2026, 1, 1, 12, 0), monthKey: "2026-02", daysRemaining: 27 },
-    { date: new Date(2028, 1, 1, 12, 0), monthKey: "2028-02", daysRemaining: 28 },
-    { date: new Date(2026, 3, 1, 12, 0), monthKey: "2026-04", daysRemaining: 29 },
-    { date: new Date(2026, 6, 31, 12, 0), monthKey: "2026-07", daysRemaining: 0 },
-  ])("uses the actual natural-month length for $monthKey", ({
-    date,
-    monthKey,
-    daysRemaining,
-  }) => {
-    expect(calculateMonthEndBalanceGoalStatus(0, 0, date)).toMatchObject({
-      localMonthKey: monthKey,
-      daysRemaining,
+  it("compares the actual balance with the cycle floor and tracks salary spending", () => {
+    const entries = [
+      entry({ id: "before", amountMinor: -99_999, localDateKey: "2026-07-09" }),
+      entry({ id: "salary-cycle-expense", amountMinor: -2_500, localDateKey: "2026-07-10" }),
+      entry({ id: "extra-income", amountMinor: 1_000, localDateKey: "2026-08-08" }),
+      entry({ id: "after", amountMinor: -99_999, localDateKey: "2026-08-10" }),
+      entry({ id: "deleted", amountMinor: -50_000, localDateKey: "2026-08-01", deletedAt: "2026-08-02T00:00:00.000Z" }),
+    ];
+    expect(calculatePayCycleStatus(entries, 9_000, {
+      paydayDay: 10,
+      monthlySalaryMinor: 10_000,
+      cycleEndBalanceGoalMinor: 10_000,
+    }, new Date(2026, 7, 9, 12, 0))).toMatchObject({
+      targetMinor: 10_000,
+      balanceHeadroomMinor: -1_000n,
+      isCurrentlyAtOrAboveGoal: false,
+      cycleExpenseMinor: 2_500,
+      cycleIncomeMinor: 1_000,
+      salaryRemainingMinor: 7_500n,
+      safeToSpendMinor: 0n,
+      salarySpentPercent: 25,
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-09",
+      nextPaydayDateKey: "2026-08-10",
+      daysUntilPayday: 1,
     });
+  });
+
+  it("keeps exact differences for large valid balances", () => {
+    const status = calculatePayCycleStatus([], 9_000_000_000_000_000, {
+      paydayDay: 1,
+      monthlySalaryMinor: 1,
+      cycleEndBalanceGoalMinor: -9_000_000_000_000_000,
+    });
+    expect(status.balanceHeadroomMinor).toBe(18_000_000_000_000_000n);
+    expect(status.safeToSpendMinor).toBe(1n);
+    expect(formatCny(status.balanceHeadroomMinor)).toBe("¥180,000,000,000,000.00");
   });
 });

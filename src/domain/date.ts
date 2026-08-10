@@ -53,6 +53,61 @@ function pad(value: number): string {
   return String(value).padStart(2, "0");
 }
 
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function assertPaydayDay(paydayDay: number): void {
+  if (!Number.isInteger(paydayDay) || paydayDay < 1 || paydayDay > 31) {
+    throw new RangeError("发薪日必须是 1 到 31 日");
+  }
+}
+
+function paydayInMonth(year: number, monthIndex: number, paydayDay: number): Date {
+  const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+  return new Date(year, monthIndex, Math.min(paydayDay, lastDay));
+}
+
+function calendarDayNumber(date: Date): number {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000;
+}
+
+export interface PayCycleRange {
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  nextPaydayDateKey: string;
+  daysUntilPayday: number;
+}
+
+export function resolvePayCycleRange(
+  paydayDay: number,
+  now = new Date(),
+): PayCycleRange {
+  assertPaydayDay(paydayDay);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("工资周期日期无效");
+
+  const currentPayday = paydayInMonth(now.getFullYear(), now.getMonth(), paydayDay);
+  const startsThisMonth = calendarDayNumber(now) >= calendarDayNumber(currentPayday);
+  const cycleStart = startsThisMonth
+    ? currentPayday
+    : paydayInMonth(now.getFullYear(), now.getMonth() - 1, paydayDay);
+  const nextPayday = startsThisMonth
+    ? paydayInMonth(now.getFullYear(), now.getMonth() + 1, paydayDay)
+    : currentPayday;
+  const cycleEnd = new Date(
+    nextPayday.getFullYear(),
+    nextPayday.getMonth(),
+    nextPayday.getDate() - 1,
+  );
+
+  return {
+    cycleStartDateKey: localDateKey(cycleStart),
+    cycleEndDateKey: localDateKey(cycleEnd),
+    nextPaydayDateKey: localDateKey(nextPayday),
+    daysUntilPayday: calendarDayNumber(nextPayday) - calendarDayNumber(now),
+  };
+}
+
 export function currentLocalDateTimeInput(now = new Date()): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
@@ -71,5 +126,5 @@ export function currentLocalMonthKey(now = new Date()): string {
 }
 
 export function currentLocalDateKey(now = new Date()): string {
-  return `${currentLocalMonthKey(now)}-${pad(now.getDate())}`;
+  return localDateKey(now);
 }

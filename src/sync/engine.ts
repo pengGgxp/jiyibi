@@ -146,6 +146,7 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
   }
   const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload;
   if (record.clearMonthEndBalanceGoal) payload.monthEndBalanceGoalMinor = null;
+  if (record.clearPayCycle) payload.payCycle = null;
   return {
     id: record.id,
     entityType: "settings",

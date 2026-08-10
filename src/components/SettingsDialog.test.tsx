@@ -1,7 +1,7 @@
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppSettings } from "../domain";
+import type { AppSettings, PayCyclePlan } from "../domain";
 import type { PwaState } from "../hooks/usePwa";
 import type { CloudSyncSectionProps } from "./CloudSyncSection";
 import { SettingsDialog } from "./SettingsDialog";
@@ -75,12 +75,13 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-function settings(monthEndBalanceGoalMinor?: number): AppSettings {
+function settings(payCycle?: PayCyclePlan, legacyGoal?: number): AppSettings {
   return {
     id: "primary",
     currency: "CNY",
     initialBalanceMinor: 0,
-    ...(monthEndBalanceGoalMinor === undefined ? {} : { monthEndBalanceGoalMinor }),
+    ...(payCycle ? { payCycle } : {}),
+    ...(legacyGoal === undefined ? {} : { monthEndBalanceGoalMinor: legacyGoal }),
     schemaVersion: 1,
     updatedAt: "2026-08-10T00:00:00.000Z",
   };
@@ -153,43 +154,83 @@ describe("SettingsDialog backup restore", () => {
   });
 });
 
-describe("SettingsDialog month-end balance goal", () => {
-  it("defaults the goal to off and keeps its amount input disabled", async () => {
+describe("SettingsDialog pay cycle", () => {
+  const plan: PayCyclePlan = {
+    paydayDay: 10,
+    monthlySalaryMinor: 800_000,
+    cycleEndBalanceGoalMinor: -12_345,
+  };
+
+  it("defaults the plan to off and keeps all inputs disabled", async () => {
     const { host: dialog } = await renderDialog(false, settings());
     const toggle = dialog.querySelector<HTMLInputElement>('input[role="switch"]');
-    const amount = dialog.querySelector<HTMLInputElement>("#month-end-balance-goal");
+    const payday = dialog.querySelector<HTMLInputElement>("#payday-day");
+    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary");
+    const goal = dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal");
 
     expect(toggle?.checked).toBe(false);
-    expect(amount?.disabled).toBe(true);
-    expect(amount?.value).toBe("0.00");
+    expect(payday?.disabled).toBe(true);
+    expect(salary?.disabled).toBe(true);
+    expect(goal?.disabled).toBe(true);
+    expect(payday?.value).toBe("1");
+    expect(salary?.value).toBe("0.00");
+    expect(goal?.value).toBe("0.00");
   });
 
-  it("reflects an enabled goal and its signed amount", async () => {
-    const { host: dialog } = await renderDialog(false, settings(-12_345));
+  it("reflects an enabled plan including payday, salary and signed floor", async () => {
+    const { host: dialog } = await renderDialog(false, settings(plan));
     const toggle = dialog.querySelector<HTMLInputElement>('input[role="switch"]');
-    const amount = dialog.querySelector<HTMLInputElement>("#month-end-balance-goal");
 
     expect(toggle?.checked).toBe(true);
-    expect(amount?.disabled).toBe(false);
-    expect(amount?.value).toBe("-123.45");
+    expect(dialog.querySelector<HTMLInputElement>("#payday-day")?.value).toBe("10");
+    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("8000.00");
+    expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
+      .toBe("-123.45");
   });
 
-  it("restores the saved goal after closing with unsaved edits", async () => {
-    const saved = settings(12_345);
+  it("keeps unsaved plan edits when settings refresh while the dialog stays open", async () => {
+    const saved = settings(plan);
     const { host: dialog, render } = await renderDialog(false, saved);
-    const toggle = dialog.querySelector<HTMLInputElement>('input[role="switch"]')!;
-    const amount = dialog.querySelector<HTMLInputElement>("#month-end-balance-goal")!;
+    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
 
     await act(async () => {
-      toggle.click();
-      amount.value = "999.99";
-      amount.dispatchEvent(new Event("input", { bubbles: true }));
+      setInputValue.call(salary, "999.99");
+      salary.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await render(true, { ...saved, initialBalanceMinor: 12_345 });
+
+    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("999.99");
+  });
+
+  it("restores the saved plan after closing with unsaved edits", async () => {
+    const saved = settings(plan);
+    const { host: dialog, render } = await renderDialog(false, saved);
+    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary")!;
+
+    await act(async () => {
+      salary.value = "999.99";
+      salary.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await render(false, saved);
     await render(true, saved);
 
     expect(dialog.querySelector<HTMLInputElement>('input[role="switch"]')?.checked).toBe(true);
-    expect(dialog.querySelector<HTMLInputElement>("#month-end-balance-goal")?.value).toBe("123.45");
+    expect(dialog.querySelector<HTMLInputElement>("#payday-day")?.value).toBe("10");
+    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("8000.00");
+    expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
+      .toBe("-123.45");
+  });
+
+  it("prefills the cycle floor from a legacy natural-month goal", async () => {
+    const { host: dialog } = await renderDialog(false, settings(undefined, 12_345));
+
+    expect(dialog.querySelector<HTMLInputElement>('input[role="switch"]')?.checked).toBe(false);
+    expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
+      .toBe("123.45");
   });
 
   it("discloses every local data type before cloud sync is enabled", async () => {
@@ -200,7 +241,7 @@ describe("SettingsDialog month-end balance goal", () => {
     const { host: dialog } = await renderDialog(false, settings(), ready);
 
     expect(dialog.textContent).toContain("3 笔记录");
-    expect(dialog.textContent).toContain("账本设置（初始余额和月末余额底线）");
+    expect(dialog.textContent).toContain("账本设置（初始余额、发薪日、工资和周期底线）");
     expect(dialog.textContent).toContain("2 张截图");
   });
 });

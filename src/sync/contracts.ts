@@ -1,7 +1,8 @@
-import type { AppSettings, LedgerEntry } from "../domain/types";
+import type { AppSettings, LedgerEntry, PayCyclePlan } from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 2 as const;
+export const SYNC_SCHEMA_VERSION = 3 as const;
+export type SyncProtocolVersion = 1 | 2 | typeof SYNC_SCHEMA_VERSION;
 
 export type SyncEntityType = "entry" | "settings";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
@@ -40,8 +41,9 @@ export interface EntrySyncMutation extends SyncMutationBase {
   payload: LedgerEntry;
 }
 
-export interface SettingsSyncPayload extends Omit<AppSettings, "monthEndBalanceGoalMinor"> {
+export interface SettingsSyncPayload extends Omit<AppSettings, "monthEndBalanceGoalMinor" | "payCycle"> {
   monthEndBalanceGoalMinor?: number | null;
+  payCycle?: PayCyclePlan | null;
 }
 
 export interface SettingsSyncMutation extends SyncMutationBase {

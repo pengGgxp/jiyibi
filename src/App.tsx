@@ -222,6 +222,7 @@ export default function App() {
           <SummaryPanel
             summary={ledger.summary}
             settings={ledger.settings}
+            payCycleStatus={ledger.payCycleStatus}
             loading={ledger.loading}
             onOpenSettings={() => setSettingsOpen(true)}
           />

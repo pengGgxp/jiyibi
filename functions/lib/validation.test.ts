@@ -103,6 +103,96 @@ describe("validateSyncRequest", () => {
     },
   );
 
+  it("accepts a complete version-three pay cycle or an explicit null", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 3;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: {
+          paydayDay: 10,
+          monthlySalaryMinor: 800_000,
+          cycleEndBalanceGoalMinor: 100_000,
+        },
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      payCycle: {
+        paydayDay: 10,
+        monthlySalaryMinor: 800_000,
+        cycleEndBalanceGoalMinor: 100_000,
+      },
+    });
+    const cleared = structuredClone(request) as {
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    cleared.mutations[0].payload.payCycle = null;
+    expect(validateSyncRequest(cleared).mutations[0].payload).toMatchObject({
+      payCycle: null,
+    });
+  });
+
+  it.each([
+    { paydayDay: 0, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 32, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 0, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 1.5, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, monthlySalaryMinor: 1 },
+  ])("rejects an invalid version-three pay cycle: %o", (payCycle) => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 3;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+  });
+
+  it("keeps version two strict and rejects the version-three pay cycle", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 2;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: {
+          paydayDay: 10,
+          monthlySalaryMinor: 800_000,
+          cycleEndBalanceGoalMinor: 100_000,
+        },
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(() => validateSyncRequest(request)).toThrowError("invalid fields");
+  });
+
   it("keeps version one strict and rejects the version-two settings field", () => {
     const request = validRequest() as {
       mutations: Array<Record<string, unknown>>;

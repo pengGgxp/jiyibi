@@ -818,6 +818,70 @@ input::placeholder {
   font-variant-numeric: tabular-nums;
 }
 
+.pay-cycle-range {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.3rem;
+  color: #aebfb6;
+  font-size: 0.66rem;
+}
+
+.salary-budget {
+  margin-top: 0.8rem;
+}
+
+.salary-budget-heading,
+.salary-budget-heading span {
+  display: flex;
+  align-items: center;
+}
+
+.salary-budget-heading {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.salary-budget-heading span {
+  gap: 0.4rem;
+  color: #c9d8d1;
+  font-size: 0.7rem;
+}
+
+.salary-budget-heading svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.salary-budget-heading strong {
+  overflow-wrap: anywhere;
+  color: #f4f9f6;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.salary-progress {
+  height: 0.32rem;
+  margin-top: 0.55rem;
+  overflow: hidden;
+  background: rgb(229 240 234 / 0.16);
+  border-radius: 999px;
+}
+
+.salary-progress span {
+  display: block;
+  height: 100%;
+  background: #9cddba;
+  border-radius: inherit;
+}
+
+.salary-budget > p {
+  margin-top: 0.35rem !important;
+  color: #aebfb6;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .balance-goal-status {
   gap: 0.55rem;
   margin-top: 0.65rem;
@@ -863,6 +927,28 @@ input::placeholder {
   background: transparent;
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+.balance-goal-setup-wrap {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgb(232 243 237 / 0.17);
+}
+
+.legacy-goal-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding-top: 0.75rem;
+  color: #c9d8d1;
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.legacy-goal-note svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 0.9rem;
+  margin-top: 0.08rem;
 }
 
 .month-summary {
@@ -1634,6 +1720,19 @@ input::placeholder {
   margin-top: 1rem;
 }
 
+.pay-cycle-fields {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.pay-cycle-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
 .setting-toggle {
   position: relative;
   display: grid;
@@ -1713,6 +1812,7 @@ input::placeholder {
 }
 
 .signed-input,
+.unit-input,
 .password-input {
   display: grid;
   align-items: center;
@@ -1723,6 +1823,10 @@ input::placeholder {
 
 .signed-input {
   grid-template-columns: auto minmax(0, 1fr);
+}
+
+.unit-input {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .password-input {
@@ -1737,19 +1841,28 @@ input::placeholder {
   font-weight: 750;
 }
 
+.unit-input > span {
+  padding-right: 0.7rem;
+  color: var(--muted-strong);
+  font-weight: 700;
+}
+
 .signed-input input,
+.unit-input input,
 .password-input input {
   background: transparent;
   border: 0;
 }
 
 .signed-input:focus-within,
+.unit-input:focus-within,
 .password-input:focus-within {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 18%, transparent);
 }
 
 .signed-input input:focus,
+.unit-input input:focus,
 .password-input input:focus {
   box-shadow: none;
 }
@@ -2139,6 +2252,15 @@ input::placeholder {
 
   .inline-setting-form {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .pay-cycle-fields {
+    grid-template-columns: 7rem minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .pay-cycle-actions {
+    grid-column: 1 / -1;
   }
 
   .device-settings-grid {

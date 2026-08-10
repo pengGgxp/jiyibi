@@ -1,4 +1,4 @@
-import type { AppSettings, Attachment, LedgerEntry } from "../domain/types";
+import type { AppSettings, Attachment, LedgerEntry, PayCyclePlan } from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
@@ -71,6 +71,7 @@ export interface BackupPreview {
   attachmentCount: number;
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
+  payCycle?: PayCyclePlan;
   currency: "CNY";
 }
 
@@ -273,6 +274,20 @@ function hasConsistentLocalDate(
   return localDateKey === expectedDateKey && localMonthKey === expectedDateKey.slice(0, 7);
 }
 
+function validatePayCycle(value: unknown): value is PayCyclePlan {
+  return (
+    isRecord(value) &&
+    Number.isInteger(value.paydayDay) &&
+    Number(value.paydayDay) >= 1 &&
+    Number(value.paydayDay) <= 31 &&
+    Number.isSafeInteger(value.monthlySalaryMinor) &&
+    Number(value.monthlySalaryMinor) > 0 &&
+    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
+    Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR
+  );
+}
+
 function validateSettings(value: unknown): value is AppSettings {
   return (
     isRecord(value) &&
@@ -284,6 +299,7 @@ function validateSettings(value: unknown): value is AppSettings {
     (value.monthEndBalanceGoalMinor === undefined ||
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
+    (value.payCycle === undefined || validatePayCycle(value.payCycle)) &&
     isIsoDate(value.updatedAt)
   );
 }
@@ -600,6 +616,9 @@ export async function decryptBackup(
       attachmentCount: attachments.length,
       initialBalanceMinor: payload.settings.initialBalanceMinor,
       monthEndBalanceGoalMinor: payload.settings.monthEndBalanceGoalMinor,
+      ...(payload.settings.payCycle
+        ? { payCycle: structuredClone(payload.settings.payCycle) }
+        : {}),
       currency: payload.settings.currency,
     },
     replacement: {

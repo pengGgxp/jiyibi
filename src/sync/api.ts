@@ -1,5 +1,5 @@
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
-import type { AppSettings, Attachment, LedgerEntry } from "../domain/types";
+import type { AppSettings, Attachment, LedgerEntry, PayCyclePlan } from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
   API_SCHEMA_VERSION,
@@ -177,7 +177,7 @@ function isAppSettings(value: unknown): value is AppSettings {
     hasExactKeys(
       value,
       ["id", "currency", "initialBalanceMinor", "schemaVersion", "updatedAt"],
-      ["monthEndBalanceGoalMinor"],
+      ["monthEndBalanceGoalMinor", "payCycle"],
     ) &&
     value.id === "primary" &&
     value.currency === "CNY" &&
@@ -186,8 +186,24 @@ function isAppSettings(value: unknown): value is AppSettings {
     (value.monthEndBalanceGoalMinor === undefined ||
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
+    (value.payCycle === undefined || isPayCyclePlan(value.payCycle)) &&
     value.schemaVersion === 1 &&
     isIsoDate(value.updatedAt)
+  );
+}
+
+function isPayCyclePlan(value: unknown): value is PayCyclePlan {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["paydayDay", "monthlySalaryMinor", "cycleEndBalanceGoalMinor"]) &&
+    Number.isInteger(value.paydayDay) &&
+    Number(value.paydayDay) >= 1 &&
+    Number(value.paydayDay) <= 31 &&
+    Number.isSafeInteger(value.monthlySalaryMinor) &&
+    Number(value.monthlySalaryMinor) > 0 &&
+    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
+    Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR
   );
 }
 

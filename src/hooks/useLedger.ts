@@ -3,10 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import { getSettings, listActiveEntries } from "../data";
 import {
   calculateLedgerSummary,
+  calculatePayCycleStatus,
   currentLocalDateKey,
+  payCyclePlanFromSettings,
   type AppSettings,
   type LedgerEntry,
   type LedgerSummary,
+  type PayCycleStatus,
 } from "../domain";
 
 interface LedgerSnapshot {
@@ -18,6 +21,7 @@ export interface LedgerState {
   entries: LedgerEntry[];
   settings?: AppSettings;
   summary?: LedgerSummary;
+  payCycleStatus?: PayCycleStatus;
   loading: boolean;
   error?: Error;
 }
@@ -87,10 +91,21 @@ export function useLedger(): LedgerState {
     );
   }, [localDateKey, snapshot]);
 
+  const payCycleStatus = useMemo(() => {
+    if (!snapshot || !summary) return undefined;
+    const plan = payCyclePlanFromSettings(snapshot.settings);
+    const [year, month, day] = localDateKey.split("-").map(Number);
+    const localToday = new Date(year, month - 1, day, 12);
+    return plan
+      ? calculatePayCycleStatus(snapshot.entries, summary.balanceMinor, plan, localToday)
+      : undefined;
+  }, [localDateKey, snapshot, summary]);
+
   return {
     entries: snapshot?.entries ?? [],
     settings: snapshot?.settings,
     summary,
+    payCycleStatus,
     loading: !snapshot && !error,
     error,
   };

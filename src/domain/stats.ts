@@ -1,9 +1,10 @@
-import { currentLocalMonthKey } from "./date";
+import { resolvePayCycleRange } from "./date";
 import type {
   AppSettings,
   LedgerEntry,
   LedgerSummary,
-  MonthEndBalanceGoalStatus,
+  PayCyclePlan,
+  PayCycleStatus,
 } from "./types";
 
 function safeAdd(left: number, right: number): number {
@@ -37,25 +38,73 @@ export function calculateLedgerSummary(
   return { balanceMinor, monthIncomeMinor, monthExpenseMinor };
 }
 
-export function calculateMonthEndBalanceGoalStatus(
-  balanceMinor: number,
-  targetMinor: number,
-  now = new Date(),
-): MonthEndBalanceGoalStatus {
-  if (!Number.isSafeInteger(balanceMinor) || !Number.isSafeInteger(targetMinor)) {
-    throw new RangeError("余额目标必须使用整数分");
+export function payCyclePlanFromSettings(
+  settings: AppSettings | undefined,
+): PayCyclePlan | undefined {
+  const plan = settings?.payCycle;
+  if (
+    !plan ||
+    !Number.isInteger(plan.paydayDay) ||
+    plan.paydayDay < 1 ||
+    plan.paydayDay > 31 ||
+    !Number.isSafeInteger(plan.monthlySalaryMinor) ||
+    plan.monthlySalaryMinor <= 0 ||
+    !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
+  ) {
+    return undefined;
   }
-  if (!Number.isFinite(now.getTime())) {
-    throw new RangeError("目标周期日期无效");
+  return plan;
+}
+
+export function calculatePayCycleStatus(
+  entries: readonly LedgerEntry[],
+  balanceMinor: number,
+  plan: PayCyclePlan,
+  now = new Date(),
+): PayCycleStatus {
+  if (
+    !Number.isSafeInteger(balanceMinor) ||
+    !Number.isSafeInteger(plan.monthlySalaryMinor) ||
+    plan.monthlySalaryMinor <= 0 ||
+    !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
+  ) {
+    throw new RangeError("工资周期金额必须使用整数分");
+  }
+  const range = resolvePayCycleRange(plan.paydayDay, now);
+  let cycleExpenseMinor = 0;
+  let cycleIncomeMinor = 0;
+  for (const entry of entries) {
+    if (
+      entry.deletedAt ||
+      entry.localDateKey < range.cycleStartDateKey ||
+      entry.localDateKey > range.cycleEndDateKey
+    ) {
+      continue;
+    }
+    if (entry.amountMinor > 0) {
+      cycleIncomeMinor = safeAdd(cycleIncomeMinor, entry.amountMinor);
+    } else {
+      cycleExpenseMinor = safeAdd(cycleExpenseMinor, Math.abs(entry.amountMinor));
+    }
   }
 
-  const differenceMinor = BigInt(balanceMinor) - BigInt(targetMinor);
-  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const targetMinor = plan.cycleEndBalanceGoalMinor;
+  const balanceHeadroomMinor = BigInt(balanceMinor) - BigInt(targetMinor);
+  const salaryRemainingMinor = BigInt(plan.monthlySalaryMinor) - BigInt(cycleExpenseMinor);
+  const availableMinor = salaryRemainingMinor < balanceHeadroomMinor
+    ? salaryRemainingMinor
+    : balanceHeadroomMinor;
+  const rawSpentPercent = BigInt(cycleExpenseMinor) * 100n / BigInt(plan.monthlySalaryMinor);
   return {
+    ...plan,
     targetMinor,
-    differenceMinor,
-    isOnTrack: differenceMinor >= 0n,
-    daysRemaining: lastDayOfMonth - now.getDate(),
-    localMonthKey: currentLocalMonthKey(now),
+    balanceHeadroomMinor,
+    isCurrentlyAtOrAboveGoal: balanceHeadroomMinor >= 0n,
+    cycleExpenseMinor,
+    cycleIncomeMinor,
+    salaryRemainingMinor,
+    safeToSpendMinor: availableMinor > 0n ? availableMinor : 0n,
+    salarySpentPercent: Number(rawSpentPercent > 999n ? 999n : rawSpentPercent),
+    ...range,
   };
 }

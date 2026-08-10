@@ -21,7 +21,11 @@ vi.mock("../data", () => ({
     id: "primary",
     currency: "CNY",
     initialBalanceMinor: 0,
-    monthEndBalanceGoalMinor: 10_000,
+    payCycle: {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 10_000,
+    },
     schemaVersion: 1,
     updatedAt: "2026-08-10T00:00:00.000Z",
   })),

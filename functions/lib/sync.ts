@@ -34,8 +34,13 @@ function payloadFromRow(
 ): LedgerEntryPayload | AppSettingsPayload {
   try {
     const payload = JSON.parse(row.payload_json) as LedgerEntryPayload | AppSettingsPayload;
-    if (protocolVersion === 1 && row.entity_type === "settings") {
-      delete (payload as AppSettingsPayload).monthEndBalanceGoalMinor;
+    if (row.entity_type === "settings") {
+      if (protocolVersion === 1) {
+        delete (payload as AppSettingsPayload).monthEndBalanceGoalMinor;
+      }
+      if (protocolVersion < 3) {
+        delete (payload as AppSettingsPayload).payCycle;
+      }
     }
     return payload;
   } catch {
@@ -304,17 +309,21 @@ async function writeSettings(
   const settings = mutation.payload as SettingsMutationPayload;
   const now = new Date().toISOString();
   const mutationHash = await syncMutationHash(mutation);
-  const writesGoal = protocolVersion === 2 &&
+  const writesGoal = protocolVersion >= 2 &&
     Object.prototype.hasOwnProperty.call(settings, "monthEndBalanceGoalMinor");
+  const writesPayCycle = protocolVersion === 3 &&
+    Object.prototype.hasOwnProperty.call(settings, "payCycle");
+  const payCycle = settings.payCycle ?? null;
   if (mutation.baseVersion === 0) {
     return db
       .prepare(
         `INSERT INTO ledger_settings (
            user_id, account_generation, id, currency, initial_balance_minor,
-           month_end_balance_goal_minor, schema_version, updated_at, version,
+           month_end_balance_goal_minor, payday_day, monthly_salary_minor,
+           cycle_end_balance_goal_minor, schema_version, updated_at, version,
            last_mutation_id, last_mutation_hash,
            server_updated_at
-         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, 1, ?, 1, ?, ?, ?)
+         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id) DO NOTHING
          RETURNING version`,
       )
@@ -323,6 +332,9 @@ async function writeSettings(
         generation,
         settings.initialBalanceMinor,
         writesGoal ? settings.monthEndBalanceGoalMinor ?? null : null,
+        writesPayCycle ? payCycle?.paydayDay ?? null : null,
+        writesPayCycle ? payCycle?.monthlySalaryMinor ?? null : null,
+        writesPayCycle ? payCycle?.cycleEndBalanceGoalMinor ?? null : null,
         settings.updatedAt,
         mutation.id,
         mutationHash,
@@ -336,6 +348,10 @@ async function writeSettings(
          currency = 'CNY', initial_balance_minor = ?,
          month_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
            ELSE month_end_balance_goal_minor END,
+         payday_day = CASE WHEN ? = 1 THEN ? ELSE payday_day END,
+         monthly_salary_minor = CASE WHEN ? = 1 THEN ? ELSE monthly_salary_minor END,
+         cycle_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
+           ELSE cycle_end_balance_goal_minor END,
          schema_version = 1, updated_at = ?, version = version + 1, last_mutation_id = ?,
          last_mutation_hash = ?, server_updated_at = ?
        WHERE user_id = ? AND account_generation = ?
@@ -346,6 +362,12 @@ async function writeSettings(
       settings.initialBalanceMinor,
       writesGoal ? 1 : 0,
       settings.monthEndBalanceGoalMinor ?? null,
+      writesPayCycle ? 1 : 0,
+      payCycle?.paydayDay ?? null,
+      writesPayCycle ? 1 : 0,
+      payCycle?.monthlySalaryMinor ?? null,
+      writesPayCycle ? 1 : 0,
+      payCycle?.cycleEndBalanceGoalMinor ?? null,
       settings.updatedAt,
       mutation.id,
       mutationHash,

@@ -225,7 +225,7 @@ export function CloudSyncSection({
             <div>
               <h4 id="sync-consent-title">确认开启同步</h4>
               <p>
-                将上传本机 {localEntryCount} 笔记录、账本设置（初始余额和月末余额底线）及
+                将上传本机 {localEntryCount} 笔记录、账本设置（初始余额、发薪日、工资和周期底线）及
                 {localAttachmentCount} 张截图，并合并该账号已有的云端记录。
               </p>
             </div>

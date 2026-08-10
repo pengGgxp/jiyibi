@@ -19,6 +19,7 @@ import {
   getSettings,
   setInitialBalance,
   setMonthEndBalanceGoal,
+  setPayCyclePlan,
 } from "./database";
 
 interface TestEnvelope {
@@ -189,7 +190,12 @@ describe("encrypted backups", () => {
 
   it("round trips settings, active entries and screenshots", async () => {
     await setInitialBalance(-500, source);
-    await setMonthEndBalanceGoal(123_456, source);
+    const payCycle = {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 123_456,
+    };
+    await setPayCyclePlan(payCycle, source);
     const active = await createEntry(draft(), source);
     const deleted = await createEntry({ ...draft(), note: "deleted" }, source);
     await source.entries.update(deleted.id, { deletedAt: "2026-07-30T09:00:00.000Z" });
@@ -208,7 +214,8 @@ describe("encrypted backups", () => {
       entryCount: 1,
       attachmentCount: 1,
       initialBalanceMinor: -500,
-      monthEndBalanceGoalMinor: 123_456,
+      monthEndBalanceGoalMinor: undefined,
+      payCycle,
       currency: "CNY",
     });
 
@@ -221,7 +228,7 @@ describe("encrypted backups", () => {
     expect(await target.attachments.get(replacedAttachmentId)).toBeUndefined();
     expect(await getSettings(target)).toMatchObject({
       initialBalanceMinor: -500,
-      monthEndBalanceGoalMinor: 123_456,
+      payCycle,
     });
   });
 
@@ -243,6 +250,26 @@ describe("encrypted backups", () => {
 
     await restorePreparedBackup(prepared, target);
     expect(await getSettings(target)).not.toHaveProperty("monthEndBalanceGoalMinor");
+  });
+
+  it("rejects a backup with a partial pay-cycle plan", async () => {
+    await setPayCyclePlan({
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, source);
+    const backup = await createEncryptedBackup("partial-plan-password", source);
+    const partial = await rewriteEncryptedPayload(
+      backup,
+      "partial-plan-password",
+      (payload) => {
+        (payload.settings as Record<string, unknown>).payCycle = { paydayDay: 10 };
+      },
+    );
+
+    await expect(decryptBackup(partial, "partial-plan-password")).rejects.toMatchObject({
+      code: "invalid-payload",
+    });
   });
 
   it("rejects a wrong password without exposing data", async () => {

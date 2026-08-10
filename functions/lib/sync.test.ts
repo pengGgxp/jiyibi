@@ -97,11 +97,14 @@ describe("sync mutation receipts", () => {
       version: 1,
     });
     expect(insertQuery).toContain("month_end_balance_goal_minor");
-    expect(insertBindings.slice(0, 5)).toEqual([
+    expect(insertBindings.slice(0, 8)).toEqual([
       "user_1",
       3,
       500,
       goal ?? null,
+      null,
+      null,
+      null,
       "2026-07-30T12:00:00.000Z",
     ]);
   });
@@ -132,8 +135,14 @@ describe("sync mutation receipts", () => {
       version: 2,
     });
     expect(updateQuery).toContain("CASE WHEN ? = 1");
-    expect(updateBindings.slice(0, 4)).toEqual([
+    expect(updateBindings.slice(0, 10)).toEqual([
       500,
+      0,
+      null,
+      0,
+      null,
+      0,
+      null,
       0,
       null,
       "2026-07-30T12:00:00.000Z",
@@ -158,7 +167,9 @@ describe("sync mutation receipts", () => {
     const mutation = settingsMutation({ baseVersion: 1 });
 
     await applyMutation(db, "user_1", 3, mutation, 2);
-    expect(updateBindings.slice(0, 3)).toEqual([500, 0, null]);
+    expect(updateBindings.slice(0, 9)).toEqual([
+      500, 0, null, 0, null, 0, null, 0, null,
+    ]);
   });
 
   it("clears the goal when a version-two client sends an explicit null", async () => {
@@ -189,11 +200,57 @@ describe("sync mutation receipts", () => {
       status: "applied",
       version: 2,
     });
-    expect(updateBindings.slice(0, 4)).toEqual([
+    expect(updateBindings.slice(0, 10)).toEqual([
       500,
       1,
       null,
+      0,
+      null,
+      0,
+      null,
+      0,
+      null,
       "2026-07-30T12:00:00.000Z",
+    ]);
+  });
+
+  it("writes and explicitly clears a version-three pay cycle", async () => {
+    const updates: unknown[][] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("UPDATE ledger_settings SET")) updates.push(values);
+            return this;
+          },
+          async first() {
+            return query.includes("UPDATE ledger_settings SET") ? { version: 2 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const original = settingsMutation();
+    const payCycle = {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    };
+
+    await applyMutation(db, "user_1", 3, settingsMutation({
+      baseVersion: 1,
+      payload: { ...(original.payload as AppSettingsPayload), payCycle },
+    }), 3);
+    await applyMutation(db, "user_1", 3, settingsMutation({
+      id: "mutation_settings_2",
+      baseVersion: 1,
+      payload: { ...(original.payload as AppSettingsPayload), payCycle: null },
+    }), 3);
+
+    expect(updates[0].slice(3, 9)).toEqual([
+      1, 10, 1, 800_000, 1, 100_000,
+    ]);
+    expect(updates[1].slice(3, 9)).toEqual([
+      1, null, 1, null, 1, null,
     ]);
   });
 
@@ -210,6 +267,11 @@ describe("sync mutation receipts", () => {
         currency: "CNY",
         initialBalanceMinor: 500,
         monthEndBalanceGoalMinor: 25_000,
+        payCycle: {
+          paydayDay: 10,
+          monthlySalaryMinor: 800_000,
+          cycleEndBalanceGoalMinor: 100_000,
+        },
         schemaVersion: 1,
         updatedAt: "2026-07-30T12:00:00.000Z",
       }),
@@ -225,8 +287,16 @@ describe("sync mutation receipts", () => {
 
     const legacy = await pullChanges(db, "user_1", 3, "0", 1);
     const current = await pullChanges(db, "user_1", 3, "0", 2);
+    const latest = await pullChanges(db, "user_1", 3, "0", 3);
     expect(legacy.changes[0].payload).not.toHaveProperty("monthEndBalanceGoalMinor");
+    expect(legacy.changes[0].payload).not.toHaveProperty("payCycle");
     expect(current.changes[0].payload).toHaveProperty("monthEndBalanceGoalMinor", 25_000);
+    expect(current.changes[0].payload).not.toHaveProperty("payCycle");
+    expect(latest.changes[0].payload).toHaveProperty("payCycle", {
+      paydayDay: 10,
+      monthlySalaryMinor: 800_000,
+      cycleEndBalanceGoalMinor: 100_000,
+    });
   });
 });
 
