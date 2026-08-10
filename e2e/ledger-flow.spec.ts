@@ -33,7 +33,7 @@ test("编辑、初始余额和删除撤销会准确重算", async ({ page }, tes
   await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥92.00");
 });
 
-test("工资周期会展示发薪日、工资和周期末余额底线", async ({ page }) => {
+test("工资周期配置后会开启两段资金判断", async ({ page }) => {
   await openLedger(page);
 
   await page.getByRole("button", { name: "设置工资周期" }).click();
@@ -58,23 +58,29 @@ test("工资周期会展示发薪日、工资和周期末余额底线", async ({
   await expect(settings.getByText("工资周期已更新", { exact: true })).toBeVisible();
   await settings.getByRole("button", { name: "关闭设置" }).click();
 
-  const goal = page.locator(".summary-panel .balance-goal");
-  await expect(goal).toContainText("每月 10 日发薪");
-  await expect(goal).toContainText("每月工资¥1,000.00");
-  await expect(goal).toContainText("周期末底线 ¥100.00");
-  await expect(goal).toContainText("当前余额还差 ¥100.00");
+  const outlook = page.locator(".summary-panel");
+  await expect(outlook).toContainText("到发薪日");
+  await expect(outlook).toContainText("下个工资周期");
+  await expect(outlook).toContainText("暂不判断");
+  await expect(outlook).toContainText("每日可花");
   expect(await page.evaluate(() => (
     document.documentElement.scrollWidth <= document.documentElement.clientWidth
   ))).toBe(true);
 
+  await page.getByRole("link", { name: "查看详细分析" }).click();
+  await expect(page).toHaveURL(/#analysis$/);
+  await expect(page.getByRole("heading", { level: 2, name: "够不够花" })).toBeVisible();
+  await expect(page.getByText("还没有可参考的花费")).toBeVisible();
+  await page.getByRole("link", { name: "记账" }).click();
+
   await addTextEntry(page, { amount: "40.00", note: "目标测试收入", kind: "income" });
-  await expect(goal).toContainText("当前余额还差 ¥60.00");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥40.00");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { level: 1, name: "记一笔" })).toBeVisible();
   await dismissOfflineReady(page);
   await expect(page.getByText("目标测试收入", { exact: true })).toBeVisible();
-  await expect(page.locator(".summary-panel .balance-goal")).toContainText("当前余额还差 ¥60.00");
+  await expect(page.locator(".summary-panel")).toContainText("下个工资周期");
 });
 
 test("键盘可进入主内容，对话框可用 Escape 关闭并恢复焦点", async ({ page }, testInfo) => {
@@ -85,7 +91,8 @@ test("键盘可进入主内容，对话框可用 Escape 关闭并恢复焦点", 
   await page.keyboard.press("Tab");
   await expect(page.locator(".skip-link")).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/#main-content$/);
+  await expect(page).toHaveURL(/#ledger$/);
+  await expect(page.locator("#main-content")).toBeFocused();
 
   const settingsButton = page.getByRole("button", { name: "打开设置" });
   await settingsButton.focus();

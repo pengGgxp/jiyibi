@@ -36,3 +36,89 @@ export async function expectNoHorizontalOverflow(page: Page): Promise<void> {
   expect(overflow.document).toBeLessThanOrEqual(1);
   expect(overflow.body).toBeLessThanOrEqual(1);
 }
+
+export async function seedAnalysisLedger(
+  page: Page,
+  options: { completedDays?: number; initialBalanceMinor?: number } = {},
+): Promise<void> {
+  const completedDays = options.completedDays ?? 30;
+  const initialBalanceMinor = options.initialBalanceMinor ?? 1_000_000;
+  await page.evaluate(async ({ dayCount, balanceMinor }) => {
+    const dateKey = (date: Date) => [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0"),
+    ].join("-");
+    const today = new Date();
+    const updatedAt = today.toISOString();
+    const entries = [dayCount, Math.max(1, Math.ceil(dayCount / 2)), 1].map((daysAgo, index) => {
+      const localDate = new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        today.getDate() - daysAgo,
+        12,
+      );
+      const key = dateKey(localDate);
+      return {
+        id: `analysis-entry-${index}`,
+        amountMinor: -(index + 1) * 1_000,
+        note: `分析样本 ${index + 1}`,
+        occurredAt: localDate.toISOString(),
+        localDateKey: key,
+        localMonthKey: key.slice(0, 7),
+        timezoneOffsetMinutes: localDate.getTimezoneOffset(),
+        createdAt: localDate.toISOString(),
+        updatedAt: localDate.toISOString(),
+      };
+    });
+    const observationDate = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate() - 220,
+      12,
+    );
+    const observationKey = dateKey(observationDate);
+    entries.unshift({
+      id: "analysis-observation-start",
+      amountMinor: 1,
+      note: "分析观察起点",
+      occurredAt: observationDate.toISOString(),
+      localDateKey: observationKey,
+      localMonthKey: observationKey.slice(0, 7),
+      timezoneOffsetMinutes: observationDate.getTimezoneOffset(),
+      createdAt: observationDate.toISOString(),
+      updatedAt: observationDate.toISOString(),
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open("jiyibi");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const database = request.result;
+        const transaction = database.transaction(["entries", "settings"], "readwrite");
+        transaction.onerror = () => reject(transaction.error);
+        transaction.oncomplete = () => {
+          database.close();
+          resolve();
+        };
+        const entryStore = transaction.objectStore("entries");
+        entryStore.clear();
+        for (const entry of entries) entryStore.put(entry);
+        transaction.objectStore("settings").put({
+          id: "primary",
+          currency: "CNY",
+          initialBalanceMinor: balanceMinor,
+          payCycle: {
+            paydayDay: 10,
+            monthlySalaryMinor: 10_000,
+            cycleEndBalanceGoalMinor: 100_000,
+          },
+          schemaVersion: 1,
+          updatedAt,
+        });
+      };
+    });
+  }, { dayCount: completedDays, balanceMinor: initialBalanceMinor });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await dismissOfflineReady(page);
+}

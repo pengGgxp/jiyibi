@@ -11,7 +11,7 @@ import {
   Settings,
   Wifi,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type MouseEvent } from "react";
 import {
   createEntry,
   purgeDeletedEntries,
@@ -20,9 +20,10 @@ import {
   undoDeleteEntry,
   updateEntry,
 } from "./data";
-import type { EntryDraft, LedgerEntry } from "./domain";
+import { payCyclePlanFromSettings, type EntryDraft, type LedgerEntry } from "./domain";
 import { EditEntryDialog } from "./components/EditEntryDialog";
 import { EntryComposer } from "./components/EntryComposer";
+import { PrimaryNavigation } from "./components/PrimaryNavigation";
 import { RecordList } from "./components/RecordList";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SummaryPanel } from "./components/SummaryPanel";
@@ -30,7 +31,13 @@ import { UndoToasts, type PendingDeletion } from "./components/UndoToasts";
 import { useLedger } from "./hooks/useLedger";
 import { useCloudSync } from "./hooks/useCloudSync";
 import { usePwa } from "./hooks/usePwa";
+import { useHashView } from "./hooks/useHashView";
 import type { CloudSyncPhase } from "./components/CloudSyncSection";
+
+const AnalysisView = lazy(async () => {
+  const module = await import("./components/AnalysisView");
+  return { default: module.AnalysisView };
+});
 
 interface Notice {
   kind: "success" | "error";
@@ -78,12 +85,14 @@ export default function App() {
   const ledger = useLedger();
   const pwa = usePwa();
   const cloud = useCloudSync();
+  const [view, navigate] = useHashView();
   const [editingEntry, setEditingEntry] = useState<LedgerEntry>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState<PendingDeletion[]>([]);
   const [notice, setNotice] = useState<Notice>();
   const deletionTimers = useRef(new Map<string, number>());
   const noticeTimer = useRef<number | undefined>(undefined);
+  const previousView = useRef(view);
 
   const showNotice = (next: Notice) => {
     window.clearTimeout(noticeTimer.current);
@@ -101,6 +110,16 @@ export default function App() {
       for (const timer of timers.values()) window.clearTimeout(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (previousView.current === view) return;
+    previousView.current = view;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("main-content")?.focus({ preventScroll: true });
+      window.scrollTo({ top: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [view]);
 
   const create = async (draft: EntryDraft) => {
     try {
@@ -166,9 +185,14 @@ export default function App() {
     window.setTimeout(() => amountInput?.focus(), 250);
   };
 
+  const skipToMain = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    document.getElementById("main-content")?.focus();
+  };
+
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">跳到主要内容</a>
+      <a className="skip-link" href="#main-content" onClick={skipToMain}>跳到主要内容</a>
       <header className="app-header">
         <div className="brand-lockup">
           <span className="brand-mark"><ReceiptText aria-hidden="true" /></span>
@@ -194,6 +218,8 @@ export default function App() {
         </div>
       </header>
 
+      <PrimaryNavigation view={view} />
+
       {!pwa.online ? (
         <div className="network-banner" role="status">
           <CloudOff aria-hidden="true" /> 当前离线，仍可查看和记录本机账目{cloud.linked ? "；联网后会继续同步。" : "。"}
@@ -211,37 +237,58 @@ export default function App() {
       ) : null}
 
       <main id="main-content" tabIndex={-1}>
-        <div className="workspace-grid">
-          <EntryComposer
-            onCreate={create}
-            onSaved={() => showNotice({
-              kind: "success",
-              message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
-            })}
-          />
-          <SummaryPanel
-            summary={ledger.summary}
-            settings={ledger.settings}
-            payCycleStatus={ledger.payCycleStatus}
-            loading={ledger.loading}
-            onOpenSettings={() => setSettingsOpen(true)}
-          />
-        </div>
+        {view === "ledger" ? (
+          <>
+            <div className="workspace-grid">
+              <SummaryPanel
+                summary={ledger.summary}
+                settings={ledger.settings}
+                payCycle={ledger.settings ? payCyclePlanFromSettings(ledger.settings) : undefined}
+                analysis={ledger.analysis}
+                analysisError={ledger.analysisError}
+                loading={ledger.loading}
+                onOpenSettings={() => setSettingsOpen(true)}
+                onOpenAnalysis={() => navigate("analysis")}
+              />
+              <EntryComposer
+                onCreate={create}
+                onSaved={() => showNotice({
+                  kind: "success",
+                  message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
+                })}
+              />
+            </div>
 
-        {ledger.error ? (
-          <section className="load-error" role="alert">
-            <h2>无法读取本机账目</h2>
-            <p>请确认浏览器允许此网站使用本机存储，然后重新打开页面。</p>
-          </section>
+            {ledger.error ? (
+              <section className="load-error" role="alert">
+                <h2>无法读取本机账目</h2>
+                <p>请确认浏览器允许此网站使用本机存储，然后重新打开页面。</p>
+              </section>
+            ) : (
+              <RecordList
+                entries={ledger.entries}
+                loading={ledger.loading}
+                loadAttachment={cloud.loadAttachment}
+                onEdit={setEditingEntry}
+                onDelete={(entry) => void deleteEntry(entry)}
+                onStartEntry={focusComposer}
+              />
+            )}
+          </>
         ) : (
-          <RecordList
-            entries={ledger.entries}
-            loading={ledger.loading}
-            loadAttachment={cloud.loadAttachment}
-            onEdit={setEditingEntry}
-            onDelete={(entry) => void deleteEntry(entry)}
-            onStartEntry={focusComposer}
-          />
+          <Suspense fallback={<div className="analysis-route-loading" role="status">正在打开分析…</div>}>
+            <AnalysisView
+              analysis={ledger.analysis}
+              summary={ledger.summary}
+              settings={ledger.settings}
+              payCycle={ledger.settings ? payCyclePlanFromSettings(ledger.settings) : undefined}
+              entryCount={ledger.entries.length}
+              loading={ledger.loading}
+              error={ledger.analysisError?.message ?? ledger.error?.message}
+              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenLedger={() => navigate("ledger")}
+            />
+          </Suspense>
         )}
       </main>
 

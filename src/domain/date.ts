@@ -57,6 +57,34 @@ function localDateKey(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+const LOCAL_DATE_KEY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+export function localDateFromKey(dateKey: string): Date {
+  const match = LOCAL_DATE_KEY_PATTERN.exec(dateKey);
+  if (!match) throw new DateTimeError("本地日期格式无效");
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  // Local noon avoids DST transitions that can occur around midnight.
+  const date = new Date(year, month - 1, day, 12);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    throw new DateTimeError("本地日期不存在");
+  }
+  return date;
+}
+
+export function addLocalDays(dateKey: string, dayCount: number): string {
+  if (!Number.isSafeInteger(dayCount)) throw new RangeError("日期偏移量无效");
+  const date = localDateFromKey(dateKey);
+  date.setDate(date.getDate() + dayCount);
+  return localDateKey(date);
+}
+
 function assertPaydayDay(paydayDay: number): void {
   if (!Number.isInteger(paydayDay) || paydayDay < 1 || paydayDay > 31) {
     throw new RangeError("发薪日必须是 1 到 31 日");
@@ -70,6 +98,11 @@ function paydayInMonth(year: number, monthIndex: number, paydayDay: number): Dat
 
 function calendarDayNumber(date: Date): number {
   return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000;
+}
+
+export function localCalendarDayDifference(startDateKey: string, endDateKey: string): number {
+  return calendarDayNumber(localDateFromKey(endDateKey))
+    - calendarDayNumber(localDateFromKey(startDateKey));
 }
 
 export interface PayCycleRange {

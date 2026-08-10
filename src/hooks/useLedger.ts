@@ -4,12 +4,14 @@ import { getSettings, listActiveEntries } from "../data";
 import {
   calculateLedgerSummary,
   calculatePayCycleStatus,
+  calculateSpendingAnalysis,
   currentLocalDateKey,
   payCyclePlanFromSettings,
   type AppSettings,
   type LedgerEntry,
   type LedgerSummary,
   type PayCycleStatus,
+  type SpendingAnalysis,
 } from "../domain";
 
 interface LedgerSnapshot {
@@ -22,6 +24,8 @@ export interface LedgerState {
   settings?: AppSettings;
   summary?: LedgerSummary;
   payCycleStatus?: PayCycleStatus;
+  analysis?: SpendingAnalysis;
+  analysisError?: Error;
   loading: boolean;
   error?: Error;
 }
@@ -101,11 +105,35 @@ export function useLedger(): LedgerState {
       : undefined;
   }, [localDateKey, snapshot, summary]);
 
+  const analysisResult = useMemo(() => {
+    if (!snapshot || !summary) return {};
+    const plan = payCyclePlanFromSettings(snapshot.settings);
+    if (!plan) return {};
+    const [year, month, day] = localDateKey.split("-").map(Number);
+    try {
+      return {
+        analysis: calculateSpendingAnalysis(
+          snapshot.entries,
+          summary.balanceMinor,
+          plan,
+          new Date(year, month - 1, day, 12),
+        ),
+      };
+    } catch (reason) {
+      return {
+        analysisError: reason instanceof Error
+          ? reason
+          : new Error("无法计算消费分析"),
+      };
+    }
+  }, [localDateKey, snapshot, summary]);
+
   return {
     entries: snapshot?.entries ?? [],
     settings: snapshot?.settings,
     summary,
     payCycleStatus,
+    ...analysisResult,
     loading: !snapshot && !error,
     error,
   };

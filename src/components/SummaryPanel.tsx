@@ -1,10 +1,10 @@
 import {
-  ArrowDownLeft,
-  ArrowUpRight,
-  CalendarDays,
+  ArrowRight,
+  CalendarClock,
   CircleAlert,
   CircleCheckBig,
-  Coins,
+  Equal,
+  Gauge,
   PencilLine,
   Target,
   WalletCards,
@@ -12,25 +12,92 @@ import {
 import {
   formatCny,
   type AppSettings,
+  type ForecastOutcome,
   type LedgerSummary,
-  type PayCycleStatus,
+  type PayCyclePlan,
+  type SpendingAnalysis,
 } from "../domain";
 
 interface SummaryPanelProps {
   summary?: LedgerSummary;
   settings?: AppSettings;
-  payCycleStatus?: PayCycleStatus;
+  payCycle?: PayCyclePlan;
+  analysis?: SpendingAnalysis;
+  analysisError?: Error;
   loading: boolean;
   onOpenSettings(): void;
+  onOpenAnalysis(): void;
 }
 
-function shortDate(dateKey: string): string {
-  const [, month, day] = dateKey.split("-").map(Number);
-  return `${month}月${day}日`;
+function OutcomeIcon({ outcome }: { outcome?: ForecastOutcome }) {
+  if (outcome === "surplus") return <CircleCheckBig aria-hidden="true" />;
+  if (outcome === "shortfall") return <CircleAlert aria-hidden="true" />;
+  if (outcome === "exact") return <Equal aria-hidden="true" />;
+  return <CalendarClock aria-hidden="true" />;
 }
 
-export function SummaryPanel({ summary, settings, payCycleStatus, loading, onOpenSettings }: SummaryPanelProps) {
-  const legacyGoal = settings?.monthEndBalanceGoalMinor;
+function amountMagnitude(value: bigint): bigint {
+  return value < 0n ? -value : value;
+}
+
+function currentCycleCopy(analysis: SpendingAnalysis): { title: string; detail: string } {
+  const { currentCycle, confidence, window } = analysis;
+  if (confidence === "insufficient" || currentCycle.affordability === undefined) {
+    const remainingDays = Math.max(0, window.daysNeeded - window.observedDays);
+    return {
+      title: "暂不判断",
+      detail: remainingDays > 0
+        ? `还需积累 ${remainingDays} 个完整日`
+        : "历史记录还不足",
+    };
+  }
+  if (currentCycle.affordability === "exact") {
+    return { title: "预计刚好达到", detail: "周期末余额达到底线" };
+  }
+  const difference = currentCycle.balanceGoalDifferenceMinor ?? 0n;
+  return currentCycle.affordability === "surplus"
+    ? { title: "预计够用", detail: `预计高出底线 ${formatCny(difference)}` }
+    : { title: "预计有缺口", detail: `预计短缺 ${formatCny(amountMagnitude(difference))}` };
+}
+
+function nextCycleCopy(analysis: SpendingAnalysis): { title: string; detail: string } {
+  const { nextCycle, confidence, window } = analysis;
+  if (confidence === "insufficient" || nextCycle.affordability === undefined) {
+    const remainingDays = Math.max(0, window.daysNeeded - window.observedDays);
+    return {
+      title: "暂不判断",
+      detail: remainingDays > 0
+        ? `还需积累 ${remainingDays} 个完整日`
+        : "历史记录还不足",
+    };
+  }
+  if (nextCycle.affordability === "exact") {
+    return { title: "工资刚好覆盖", detail: "预计支出与工资相当" };
+  }
+  const difference = nextCycle.salaryDifferenceMinor ?? 0n;
+  return nextCycle.affordability === "surplus"
+    ? { title: "工资预计够用", detail: `预计结余 ${formatCny(difference)}` }
+    : { title: "工资预计不够", detail: `预计少 ${formatCny(amountMagnitude(difference))}` };
+}
+
+function confidenceLabel(analysis: SpendingAnalysis): string {
+  if (analysis.confidence === "ready") return "按近 30 天估算";
+  if (analysis.confidence === "preliminary") return "初步估算";
+  return "数据积累中";
+}
+
+export function SummaryPanel({
+  summary,
+  settings,
+  payCycle,
+  analysis,
+  analysisError,
+  loading,
+  onOpenSettings,
+  onOpenAnalysis,
+}: SummaryPanelProps) {
+  const currentCopy = analysis ? currentCycleCopy(analysis) : undefined;
+  const nextCopy = analysis ? nextCycleCopy(analysis) : undefined;
 
   return (
     <section className="summary-panel" aria-labelledby="summary-title" aria-busy={loading}>
@@ -46,89 +113,55 @@ export function SummaryPanel({ summary, settings, payCycleStatus, loading, onOpe
       ) : (
         <span className="summary-skeleton balance-skeleton" aria-hidden="true" />
       )}
-      <p className="initial-balance">
-        初始余额 {settings ? formatCny(settings.initialBalanceMinor) : "读取中"}
-      </p>
 
-      {payCycleStatus ? (
-        <div className={`balance-goal pay-cycle-card ${payCycleStatus.isCurrentlyAtOrAboveGoal ? "is-on-track" : "is-behind"}`}>
-          <div className="balance-goal-heading">
-            <span><CalendarDays aria-hidden="true" /> 工资周期</span>
-            <strong>每月 {payCycleStatus.paydayDay} 日发薪</strong>
+      {!settings ? null : !payCycle ? (
+        <div className="summary-plan-empty">
+          <Target aria-hidden="true" />
+          <div>
+            <strong>先设置发薪日和工资</strong>
+            <p>设置后才能判断这次和下个工资周期够不够花。</p>
           </div>
-          <div className="pay-cycle-range">
-            <span>{shortDate(payCycleStatus.cycleStartDateKey)}—{shortDate(payCycleStatus.cycleEndDateKey)}</span>
-            <span>下次发薪 {shortDate(payCycleStatus.nextPaydayDateKey)}</span>
-          </div>
-          <div className="salary-budget">
-            <div className="salary-budget-heading">
-              <span><Coins aria-hidden="true" /> 每月工资</span>
-              <strong>{formatCny(payCycleStatus.monthlySalaryMinor)}</strong>
-            </div>
-            <div
-              className="salary-progress"
-              role="progressbar"
-              aria-label="本周期工资支出比例"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.min(100, payCycleStatus.salarySpentPercent)}
-            >
-              <span style={{ width: `${Math.min(100, payCycleStatus.salarySpentPercent)}%` }} />
-            </div>
-            <p>
-              已支出 {formatCny(payCycleStatus.cycleExpenseMinor)}
-              {payCycleStatus.salarySpentPercent >= 999
-                ? "，已超过工资"
-                : `，占工资 ${payCycleStatus.salarySpentPercent}%`}
-            </p>
-          </div>
-          <div className="balance-goal-status" aria-live="polite" aria-atomic="true">
-            {payCycleStatus.isCurrentlyAtOrAboveGoal
-              ? <CircleCheckBig aria-hidden="true" />
-              : <CircleAlert aria-hidden="true" />}
-            <span>
-              {payCycleStatus.balanceHeadroomMinor === 0n
-                ? "当前正好达到周期底线"
-                : payCycleStatus.isCurrentlyAtOrAboveGoal
-                  ? `当前余额高出 ${formatCny(payCycleStatus.balanceHeadroomMinor)}`
-                  : `当前余额还差 ${formatCny(-payCycleStatus.balanceHeadroomMinor)}`}
-              <small>
-                周期末底线 {formatCny(payCycleStatus.targetMinor)} ·
-                {payCycleStatus.daysUntilPayday === 1
-                  ? "明天发薪"
-                  : `距下次发薪还有 ${payCycleStatus.daysUntilPayday} 天`}
-                · 当前可再花 {formatCny(payCycleStatus.safeToSpendMinor)}
-              </small>
-            </span>
-          </div>
-        </div>
-      ) : settings ? (
-        <div className="balance-goal-setup-wrap">
-          {legacyGoal !== undefined ? (
-            <p className="legacy-goal-note"><Target aria-hidden="true" /> 旧版自然月底线 {formatCny(legacyGoal)}，设置发薪日和工资后继续使用。</p>
-          ) : null}
-          <button type="button" className="balance-goal-setup" onClick={onOpenSettings}>
-            <Target aria-hidden="true" /> 设置工资周期
+          <button type="button" className="summary-plan-action" onClick={onOpenSettings}>
+            设置工资周期 <ArrowRight aria-hidden="true" />
           </button>
         </div>
+      ) : analysisError ? (
+        <div className="summary-analysis-error" role="alert">
+          <CircleAlert aria-hidden="true" />
+          <span><strong>分析暂时不可用</strong><small>{analysisError.message}</small></span>
+        </div>
+      ) : analysis && currentCopy && nextCopy ? (
+        <>
+          <div className="summary-confidence">{confidenceLabel(analysis)}</div>
+          <div className="summary-forecast-list" aria-live="polite" aria-atomic="true">
+            <div className={`summary-forecast summary-forecast--${analysis.currentCycle.affordability ?? "pending"}`}>
+              <OutcomeIcon outcome={analysis.currentCycle.affordability} />
+              <span><small>到发薪日</small><strong>{currentCopy.title}</strong></span>
+              <p>{currentCopy.detail}</p>
+            </div>
+            <div className={`summary-forecast summary-forecast--${analysis.nextCycle.affordability ?? "pending"}`}>
+              <OutcomeIcon outcome={analysis.nextCycle.affordability} />
+              <span><small>下个工资周期</small><strong>{nextCopy.title}</strong></span>
+              <p>{nextCopy.detail}</p>
+            </div>
+          </div>
+          <dl className="summary-allowance">
+            <div>
+              <dt><CalendarClock aria-hidden="true" /> 剩余天数</dt>
+              <dd>{analysis.currentCycle.daysUntilPayday} 天</dd>
+            </div>
+            <div>
+              <dt><Gauge aria-hidden="true" /> 每日可花</dt>
+              <dd>{formatCny(analysis.currentCycle.dailySafeToSpendMinor)}</dd>
+            </div>
+          </dl>
+          <a className="summary-analysis-link" href="#analysis" onClick={onOpenAnalysis}>
+            查看详细分析 <ArrowRight aria-hidden="true" />
+          </a>
+        </>
+      ) : loading ? (
+        <div className="summary-forecast-skeleton" aria-hidden="true"><span /><span /></div>
       ) : null}
-
-      <div className="month-summary" aria-label="本月收支">
-        <div>
-          <span className="summary-icon income"><ArrowDownLeft aria-hidden="true" /></span>
-          <span>
-            <small>本月收入</small>
-            <strong>{summary ? `+${formatCny(summary.monthIncomeMinor)}` : "—"}</strong>
-          </span>
-        </div>
-        <div>
-          <span className="summary-icon expense"><ArrowUpRight aria-hidden="true" /></span>
-          <span>
-            <small>本月支出</small>
-            <strong>{summary ? `−${formatCny(summary.monthExpenseMinor)}` : "—"}</strong>
-          </span>
-        </div>
-      </div>
     </section>
   );
 }
