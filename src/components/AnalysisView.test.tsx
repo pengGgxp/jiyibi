@@ -172,7 +172,8 @@ describe("AnalysisView states", () => {
     });
 
     expect(host.textContent).toContain("先设置工资周期");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("去设置工资周期"));
+    expect(host.textContent).toContain("需要发薪日、月工资和周期底线。");
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置工资周期"));
     await act(async () => button?.click());
     expect(onOpenSettings).toHaveBeenCalledOnce();
   });
@@ -186,7 +187,8 @@ describe("AnalysisView states", () => {
     empty.currentCycleSeries = [];
     const { host, onOpenLedger } = await renderView({ result: empty, entryCount: 0 });
 
-    expect(host.textContent).toContain("还没有可参考的花费");
+    expect(host.textContent).toContain("还没有支出记录");
+    expect(host.textContent).toContain("记录满 14 个完整日后开始估算。");
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("去记一笔"));
     await act(async () => button?.click());
     expect(onOpenLedger).toHaveBeenCalledOnce();
@@ -201,19 +203,26 @@ describe("AnalysisView states", () => {
     todayOnly.currentCycle.actualExpenseMinor = 2_400;
     const { host } = await renderView({ result: todayOnly, entryCount: 1 });
 
-    expect(host.textContent).not.toContain("还没有可参考的花费");
-    expect(host.textContent).toContain("本周期已支出");
+    expect(host.textContent).not.toContain("还没有支出记录");
+    expect(host.textContent).toContain("本周期支出");
     expect(host.textContent).toContain("¥24.00");
-    expect(host.textContent).toContain("积累中");
+    expect(host.textContent).toContain("还差 14 个完整日");
+    expect(host.textContent).toContain("满 14 个完整日后开始估算");
+    expect(host.textContent).toContain("暂不预测周期末余额");
+    expect(host.textContent).not.toContain("统计口径：");
+    expect(host.textContent).not.toContain("保守估算");
     expect(host.textContent).not.toContain("预计够用");
   });
 
   it("explains why an insufficient sample does not produce a verdict", async () => {
     const { host } = await renderView({ result: analysis("insufficient") });
 
-    expect(host.textContent).toContain("还需积累 9 个完整日");
-    expect(host.textContent).toContain("积累中");
+    expect(host.textContent).toContain("还差 9 个完整日");
+    expect(host.textContent).toContain("满 14 个完整日后开始估算");
     expect(host.textContent).toContain("暂不预测周期末余额");
+    expect(host.textContent).toContain("暂不预测下个工资周期");
+    expect(host.textContent).not.toContain("统计口径：");
+    expect(host.textContent).not.toContain("保守估算");
     expect(host.textContent).not.toContain("预计够用");
   });
 
@@ -221,13 +230,28 @@ describe("AnalysisView states", () => {
     const { host, onOpenLedger } = await renderView({ error: "账目合计超出安全范围" });
 
     expect(host.querySelector('[role="alert"]')?.textContent).toContain("账目合计超出安全范围");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("回到账目"));
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("请检查账目后重新打开分析页");
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("返回记账页"));
     await act(async () => button?.click());
     expect(onOpenLedger).toHaveBeenCalledOnce();
+  });
+
+  it("gives storage read failures a relevant retry instruction", async () => {
+    const { host } = await renderView({ error: "无法读取本机账目" });
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("无法读取本机账目。请刷新页面重试。");
+    expect(host.querySelector('[role="alert"]')?.textContent).not.toContain("请检查账目");
   });
 });
 
 describe("AnalysisView forecasts and charts", () => {
+  it("uses the concise confidence labels for preliminary data", async () => {
+    const { host } = await renderView({ result: analysis("preliminary") });
+
+    expect(host.textContent).toContain("初步估算");
+    expect(host.textContent).toContain("已有 20 个完整日");
+  });
+
   it.each([
     ["surplus", "预计够用", "+¥1,500.00"],
     ["shortfall", "预计有缺口", "−¥500.00"],
@@ -239,6 +263,16 @@ describe("AnalysisView forecasts and charts", () => {
     expect(host.textContent).toContain(difference);
   });
 
+  it.each([
+    ["surplus", "月工资预计剩 ¥1,500.00"],
+    ["shortfall", "月工资预计少 ¥500.00"],
+    ["exact", "刚好等于月工资"],
+  ] as const)("renders the next-cycle %s wording", async (outcome, detail) => {
+    const { host } = await renderView({ result: analysis("ready", outcome) });
+
+    expect(host.textContent).toContain(detail);
+  });
+
   it("renders three chart explanations and semantic data tables", async () => {
     const { host } = await renderView({ result: analysis() });
 
@@ -246,19 +280,56 @@ describe("AnalysisView forecasts and charts", () => {
     expect(host.querySelectorAll("table caption")).toHaveLength(3);
     expect(host.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
     expect(host.querySelectorAll('th[scope="row"]').length).toBeGreaterThan(0);
-    expect(host.textContent).toContain("没有支出的日期也计入统计");
+    expect(host.textContent).toContain("当前周期累计支出");
+    expect(host.textContent).toContain("完整工资周期支出");
+    expect(host.textContent).toContain("近 30 个完整日的每日支出");
+    expect(host.textContent).toContain("包含 0 支出日");
+    expect(host.textContent).toContain("统计口径：");
+    expect((host.textContent?.match(/统计口径：/g) ?? []).length).toBe(1);
+    for (const oldCopy of [
+      "资金判断",
+      "两段钱，分别回答",
+      "把依据摆在一起",
+      "花费速度",
+      "工资基线",
+      "可绘制的支出点",
+    ]) {
+      expect(host.textContent).not.toContain(oldCopy);
+    }
+  });
+
+  it("uses the requested empty chart labels without implementation language", async () => {
+    const result = analysis("preliminary");
+    result.currentCycleSeries = [];
+    result.completedCycles = [];
+    result.dailyExpenses = [];
+    const { host } = await renderView({ result, entryCount: 1 });
+
+    expect(Array.from(host.querySelectorAll(".analysis-chart-empty")).map((item) => item.textContent)).toEqual([
+      "当前周期暂无支出。",
+      "暂无完整周期数据。",
+      "暂无完整日数据。",
+    ]);
+    expect(Array.from(host.querySelectorAll("table caption")).map((item) => item.textContent)).toEqual([
+      "当前周期累计支出",
+      "完整工资周期支出",
+      "每日支出",
+    ]);
+    expect(host.textContent).not.toContain("记录完整工资周期后显示");
+    expect(host.textContent).not.toContain("记录完整日后显示");
   });
 
   it("uses solid actuals, dashed predictions and a named salary reference", async () => {
     const { host } = await renderView({ result: analysis() });
 
-    expect(host.querySelector('[data-chart-series="实际累计支出（实线）"]')?.getAttribute("data-line-style")).toBe("solid");
-    expect(host.querySelector('[data-chart-series="预测累计支出（虚线）"]')?.getAttribute("data-line-style")).toBe("dashed");
-    expect(host.querySelectorAll('[data-reference-line="当前工资参考"]')).toHaveLength(2);
-    expect(Array.from(host.querySelectorAll('[data-reference-line="当前工资参考"]')).every(
+    expect(host.querySelector('[data-chart-series="实际支出"]')?.getAttribute("data-line-style")).toBe("solid");
+    expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
+    expect(host.querySelectorAll('[data-reference-line="当前月工资"]')).toHaveLength(2);
+    expect(Array.from(host.querySelectorAll('[data-reference-line="当前月工资"]')).every(
       (line) => line.getAttribute("data-if-overflow") === "extendDomain",
     )).toBe(true);
-    expect(host.textContent).toContain("实际累计支出（实线）");
-    expect(host.textContent).toContain("预测累计支出（虚线）");
+    expect(host.textContent).toContain("实际支出");
+    expect(host.textContent).toContain("预测支出");
+    expect(host.textContent).toContain("当前月工资");
   });
 });

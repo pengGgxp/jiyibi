@@ -33,7 +33,7 @@ test("编辑、初始余额和删除撤销会准确重算", async ({ page }, tes
   await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥92.00");
 });
 
-test("工资周期配置后会开启两段资金判断", async ({ page }) => {
+test("工资周期配置后会开启资金分析", async ({ page }) => {
   await openLedger(page);
 
   await page.getByRole("button", { name: "设置工资周期" }).click();
@@ -70,7 +70,7 @@ test("工资周期配置后会开启两段资金判断", async ({ page }) => {
   await page.getByRole("link", { name: "查看详细分析" }).click();
   await expect(page).toHaveURL(/#analysis$/);
   await expect(page.getByRole("heading", { level: 2, name: "够不够花" })).toBeVisible();
-  await expect(page.getByText("还没有可参考的花费")).toBeVisible();
+  await expect(page.getByText("还没有支出记录")).toBeVisible();
   await page.getByRole("link", { name: "记账" }).click();
 
   await addTextEntry(page, { amount: "40.00", note: "目标测试收入", kind: "income" });

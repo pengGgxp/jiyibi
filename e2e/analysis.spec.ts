@@ -17,6 +17,8 @@ test("页签使用哈希导航并支持刷新、返回和未知地址回退", as
   await expect(page.getByRole("heading", { level: 2, name: "够不够花" })).toBeVisible();
   await expect(page.locator("#main-content")).toBeFocused();
   await expect(page.getByText("先设置工资周期")).toBeVisible();
+  await expect(page.getByText("需要发薪日、月工资和周期底线。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "设置工资周期" })).toBeVisible();
   await expect(page.getByRole("link", { name: "分析", exact: true })).toHaveAttribute("aria-current", "page");
 
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -37,18 +39,33 @@ test("稳定样本会生成三张可访问图表和完整数据表", async ({ pa
   }
 
   await page.getByRole("link", { name: "分析", exact: true }).click();
-  await expect(page.getByText("按近 30 天估算", { exact: true })).toBeVisible();
+  await expect(page.getByText("近 30 天估算", { exact: true })).toBeVisible();
   await expect(page.getByText("预计够用", { exact: true })).toBeVisible();
   await expect(page.getByText("工资预计够用", { exact: true })).toBeVisible();
   await expect(page.locator(".analysis-chart-section")).toHaveCount(3);
   await expect(page.locator(".analysis-chart .recharts-wrapper")).toHaveCount(3);
+  const chartSizes = await page.locator(".analysis-chart .recharts-wrapper").evaluateAll((charts) => (
+    charts.map((chart) => {
+      const bounds = chart.getBoundingClientRect();
+      return { width: bounds.width, height: bounds.height };
+    })
+  ));
+  expect(chartSizes.every(({ width, height }) => width > 100 && height > 100)).toBe(true);
   const accessibleCharts = page.locator(".analysis-chart .recharts-surface[role='application']");
   await expect(accessibleCharts).toHaveCount(3);
-  await expect(accessibleCharts.nth(0)).toHaveAttribute("aria-labelledby", "current-cycle-chart-title");
-  await expect(accessibleCharts.nth(1)).toHaveAttribute("aria-labelledby", "completed-cycle-chart-title");
-  await expect(accessibleCharts.nth(2)).toHaveAttribute("aria-labelledby", "daily-expense-chart-title");
+  await expect(accessibleCharts.nth(0)).toHaveAccessibleName("当前周期累计支出");
+  await expect(accessibleCharts.nth(0)).toHaveAccessibleDescription(/本周期已支出.+预计周期末余额/);
+  await expect(accessibleCharts.nth(1)).toHaveAccessibleName("完整工资周期支出");
+  await expect(accessibleCharts.nth(1)).toHaveAccessibleDescription(/显示最近 \d+ 个完整周期；横线为当前月工资。/);
+  await expect(accessibleCharts.nth(2)).toHaveAccessibleName("近 30 个完整日的每日支出");
+  await expect(accessibleCharts.nth(2)).toHaveAccessibleDescription(/30 个完整日共支出.+包含 0 支出日。/);
   await expect(page.locator(".recharts-reference-line-line")).toHaveCount(2);
-  await expect(page.locator("#daily-expense-chart-title")).toContainText("近三十天");
+  await expect(page.locator("#daily-expense-chart-title")).toHaveText("近 30 个完整日的每日支出");
+  await expect(page.locator(".analysis-insight-strip")).toHaveCount(1);
+  await expect(page.locator(".analysis-insight-strip")).toContainText("统计口径：截至昨天的 30 个完整日");
+  for (const oldCopy of ["两段钱，分别回答", "把依据摆在一起", "工资基线", "可绘制的支出点"]) {
+    await expect(page.locator("body")).not.toContainText(oldCopy);
+  }
   const renderedLines = await page.locator("#current-cycle-chart-title")
     .locator("xpath=ancestor::section")
     .locator(".recharts-line-curve")
@@ -65,7 +82,18 @@ test("稳定样本会生成三张可访问图表和完整数据表", async ({ pa
   await expect(dailyRows).toHaveCount(30);
   await expect(dailyRows.filter({ hasText: "¥0.00" }).first()).toBeAttached();
 
-  const firstTableToggle = page.locator(".analysis-data-details summary").first();
+  const chartKeys = page.locator(".analysis-chart-key");
+  await expect(chartKeys).toHaveCount(3);
+  await expect(chartKeys.nth(0)).toHaveAccessibleName("当前周期累计支出图例");
+  await expect(chartKeys.nth(1)).toHaveAccessibleName("完整工资周期支出图例");
+  await expect(chartKeys.nth(2)).toHaveAccessibleName("近 30 个完整日的每日支出图例");
+
+  const tableToggles = page.locator(".analysis-data-details summary");
+  await expect(tableToggles).toHaveCount(3);
+  await expect(tableToggles.nth(0)).toHaveAccessibleName("当前周期累计支出：查看数据表");
+  await expect(tableToggles.nth(1)).toHaveAccessibleName("完整工资周期支出：查看数据表");
+  await expect(tableToggles.nth(2)).toHaveAccessibleName("近 30 个完整日的每日支出：查看数据表");
+  const firstTableToggle = tableToggles.nth(0);
   await firstTableToggle.focus();
   await page.keyboard.press("Enter");
   await expect(firstTableToggle.locator("xpath=..//table")).toBeVisible();
@@ -85,7 +113,7 @@ test("超长金额不会挤出首页或分析页", async ({ page }, testInfo) =>
   await expect(page.locator(".summary-panel .balance-value")).toContainText("89,999,999,999,940");
   await expectNoHorizontalOverflow(page);
   await page.getByRole("link", { name: "分析", exact: true }).click();
-  await expect(page.getByText("预计周期末余额")).toBeVisible();
+  await expect(page.locator(".analysis-metric dt").filter({ hasText: "预计周期末余额" })).toHaveCount(1);
   await expectNoHorizontalOverflow(page);
 });
 

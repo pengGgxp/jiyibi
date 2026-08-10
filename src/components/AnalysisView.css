@@ -7,8 +7,7 @@
 .analysis-header,
 .analysis-section-heading,
 .analysis-outlook-heading,
-.analysis-chart-heading,
-.analysis-footnote {
+.analysis-chart-heading {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -20,7 +19,7 @@
 }
 
 .analysis-header h2 {
-  margin: 0.18rem 0 0;
+  margin: 0;
   color: var(--ink);
   font-size: 1.55rem;
   line-height: 1.15;
@@ -83,12 +82,8 @@
   border-bottom: 1px solid rgb(232 243 237 / 0.18);
 }
 
-.analysis-outlook-heading .eyebrow {
-  color: #aebfb6;
-}
-
 .analysis-outlook-heading h3 {
-  margin: 0.16rem 0 0;
+  margin: 0;
   color: #f4f9f6;
   font-size: 1.1rem;
   line-height: 1.25;
@@ -190,7 +185,7 @@
 }
 
 .analysis-section-heading h3 {
-  margin: 0.16rem 0 0;
+  margin: 0;
   color: var(--ink);
   font-size: 1.1rem;
   line-height: 1.25;
@@ -377,7 +372,6 @@
   height: 17rem;
 }
 
-.analysis-chart .recharts-wrapper,
 .analysis-chart .recharts-surface {
   max-width: 100%;
 }
@@ -484,37 +478,6 @@
   text-align: right;
 }
 
-.analysis-footnote {
-  align-items: center;
-  justify-content: flex-start;
-  padding-block: 0.85rem 0;
-  color: var(--muted);
-  border-top: 1px solid var(--line);
-  font-size: 0.7rem;
-  line-height: 1.45;
-}
-
-.analysis-footnote svg {
-  width: 1rem;
-  height: 1rem;
-  flex: 0 0 1rem;
-  color: var(--muted-strong);
-}
-
-.analysis-footnote p {
-  margin: 0;
-}
-
-.analysis-footnote a {
-  min-height: 2.75rem;
-  margin-left: auto;
-  padding: 0.65rem 0;
-  color: var(--brand);
-  font-weight: 760;
-  text-decoration: underline;
-  text-underline-offset: 0.18em;
-}
-
 .analysis-state {
   display: flex;
   align-items: flex-start;
@@ -575,8 +538,7 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .analysis-data-details summary:hover,
-  .analysis-footnote a:hover {
+  .analysis-data-details summary:hover {
     color: var(--brand);
   }
 }
@@ -678,16 +640,6 @@
     height: 15rem;
   }
 
-  .analysis-footnote {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .analysis-footnote a {
-    width: 100%;
-    margin-left: 1.5rem;
-    padding-top: 0.15rem;
-  }
 }
 
 @media (forced-colors: active) {

@@ -9,14 +9,12 @@ import {
   ListChecks,
   Settings2,
   Table2,
-  TrendingDown,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -84,28 +82,22 @@ function tooltipAmount(value: unknown): string {
   return formatCny(value);
 }
 
-function confidenceLabel(confidence: SpendingAnalysis["confidence"]): string {
-  if (confidence === "ready") return "按近 30 天估算";
-  if (confidence === "preliminary") return "初步估算";
-  return "数据积累中";
+function confidenceLabel(analysis: SpendingAnalysis): string {
+  if (analysis.confidence === "ready") return "近 30 天估算";
+  if (analysis.confidence === "preliminary") return "初步估算";
+  const remaining = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
+  return `还差 ${remaining} 个完整日`;
 }
 
 function confidenceDescription(analysis: SpendingAnalysis): string {
   const { observedDays, daysNeeded } = analysis.window;
-  if (analysis.confidence === "ready") {
-    return "统计最近 30 个已完成本地日期；没有支出的日期也计入日均。";
-  }
-  if (analysis.confidence === "preliminary") {
-    return `已记录 ${observedDays} 个完整日，先用现有记录做初步估算。`;
-  }
-  const remaining = Math.max(0, daysNeeded - observedDays);
-  return remaining > 0
-    ? `还需积累 ${remaining} 个完整日，暂不下“够不够花”的结论。`
-    : "当前记录还不足以形成稳定估算。";
+  if (analysis.confidence === "ready") return "包含 0 支出日";
+  if (analysis.confidence === "preliminary") return `已有 ${observedDays} 个完整日`;
+  return `满 ${daysNeeded} 个完整日后开始估算`;
 }
 
 function affordabilityLabel(value: "surplus" | "shortfall" | "exact" | undefined, next = false): string {
-  if (!value) return "积累中";
+  if (!value) return "暂不预测";
   if (value === "surplus") return next ? "工资预计够用" : "预计够用";
   if (value === "shortfall") return next ? "工资预计不够" : "预计有缺口";
   return "预计刚好覆盖";
@@ -150,7 +142,7 @@ function ChartKey({ kind, children }: { kind: "actual" | "predicted" | "salary" 
 interface ChartFrameProps {
   id: string;
   title: string;
-  description: string;
+  description?: string;
   keys?: ReactNode;
   children: ReactNode;
   table: ReactNode;
@@ -162,15 +154,15 @@ function ChartFrame({ id, title, description, keys, children, table }: ChartFram
       <div className="analysis-chart-heading">
         <div>
           <h3 id={`${id}-title`}>{title}</h3>
-          <p id={`${id}-description`}>{description}</p>
+          {description ? <p id={`${id}-description`}>{description}</p> : null}
         </div>
-        {keys ? <div className="analysis-chart-key" aria-label="图例">{keys}</div> : null}
+        {keys ? <div className="analysis-chart-key" aria-label={`${title}图例`}>{keys}</div> : null}
       </div>
-      <div className="analysis-chart" aria-describedby={`${id}-description`}>
+      <div className="analysis-chart" aria-describedby={description ? `${id}-description` : undefined}>
         {children}
       </div>
       <details className="analysis-data-details">
-        <summary><Table2 aria-hidden="true" /> 查看数据表</summary>
+        <summary aria-label={`${title}：查看数据表`}><Table2 aria-hidden="true" /> 查看数据表</summary>
         <div className="analysis-table-wrap">{table}</div>
       </details>
     </section>
@@ -211,7 +203,7 @@ function StatePanel({
 function CurrentCycleTable({ analysis }: { analysis: SpendingAnalysis }) {
   return (
     <table>
-      <caption>当前工资周期每日累计支出</caption>
+      <caption>当前周期累计支出</caption>
       <thead>
         <tr>
           <th scope="col">日期</th>
@@ -229,7 +221,7 @@ function CurrentCycleTable({ analysis }: { analysis: SpendingAnalysis }) {
             <td>{point.isPaydayBoundary ? "发薪日" : ""}</td>
           </tr>
         )) : (
-          <tr><td colSpan={4}>当前周期还没有支出记录</td></tr>
+          <tr><td colSpan={4}>当前周期暂无支出。</td></tr>
         )}
       </tbody>
     </table>
@@ -239,7 +231,7 @@ function CurrentCycleTable({ analysis }: { analysis: SpendingAnalysis }) {
 function CompletedCyclesTable({ analysis }: { analysis: SpendingAnalysis }) {
   return (
     <table>
-      <caption>最近六个完整工资周期支出</caption>
+      <caption>完整工资周期支出</caption>
       <thead>
         <tr>
           <th scope="col">周期</th>
@@ -253,7 +245,7 @@ function CompletedCyclesTable({ analysis }: { analysis: SpendingAnalysis }) {
             <td>{displayAmount(cycle.expenseMinor)}</td>
           </tr>
         )) : (
-          <tr><td colSpan={2}>还没有完整工资周期</td></tr>
+          <tr><td colSpan={2}>暂无完整周期数据。</td></tr>
         )}
       </tbody>
     </table>
@@ -261,9 +253,13 @@ function CompletedCyclesTable({ analysis }: { analysis: SpendingAnalysis }) {
 }
 
 function DailyExpensesTable({ analysis }: { analysis: SpendingAnalysis }) {
+  const title = analysis.dailyExpenses.length
+    ? `近 ${analysis.window.observedDays} 个完整日的每日支出`
+    : "每日支出";
+
   return (
     <table>
-      <caption>最近三十个完成日期每日支出</caption>
+      <caption>{title}</caption>
       <thead>
         <tr>
           <th scope="col">日期</th>
@@ -277,57 +273,72 @@ function DailyExpensesTable({ analysis }: { analysis: SpendingAnalysis }) {
             <td>{displayAmount(day.expenseMinor)}</td>
           </tr>
         )) : (
-          <tr><td colSpan={2}>还没有可统计的完成日期</td></tr>
+          <tr><td colSpan={2}>暂无完整日数据。</td></tr>
         )}
       </tbody>
     </table>
   );
 }
 
-function currentCycleInsight(analysis: SpendingAnalysis): string {
+function currentCycleVerdict(analysis: SpendingAnalysis): string {
   const cycle = analysis.currentCycle;
   if (cycle.projectedEndBalanceMinor === undefined || cycle.balanceGoalDifferenceMinor === undefined) {
-    return `当前周期已记录支出 ${displayAmount(cycle.actualExpenseMinor)}；数据不足，暂不预测周期末余额。`;
+    return `本周期已支出 ${displayAmount(cycle.actualExpenseMinor)}，数据不足，暂不预测周期末余额。`;
   }
   if (cycle.affordability === "surplus") {
-    return `按已记录账目估算，周期末余额为 ${displayAmount(cycle.projectedEndBalanceMinor)}，预计高出底线 ${displayAmount(cycle.balanceGoalDifferenceMinor)}。`;
+    return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，高出周期底线 ${displayAmount(cycle.balanceGoalDifferenceMinor)}。`;
   }
   if (cycle.affordability === "shortfall") {
-    return `按已记录账目估算，周期末余额为 ${displayAmount(cycle.projectedEndBalanceMinor)}，预计低于底线 ${displayAmount(-cycle.balanceGoalDifferenceMinor)}。`;
+    return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，低于周期底线 ${displayAmount(-cycle.balanceGoalDifferenceMinor)}。`;
   }
-  return `按已记录账目估算，周期末余额预计刚好达到 ${displayAmount(cycle.projectedEndBalanceMinor)}。`;
+  return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，刚好达到周期底线。`;
 }
 
-function nextCycleInsight(analysis: SpendingAnalysis): string {
+function currentCycleChartDescription(analysis: SpendingAnalysis): string {
+  const cycle = analysis.currentCycle;
+  if (cycle.projectedEndBalanceMinor === undefined) {
+    return `本周期已支出 ${displayAmount(cycle.actualExpenseMinor)}，暂不预测周期末余额。`;
+  }
+  return `本周期已支出 ${displayAmount(cycle.actualExpenseMinor)}，预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}。`;
+}
+
+function nextCycleVerdict(analysis: SpendingAnalysis): string {
   const cycle = analysis.nextCycle;
   if (cycle.estimatedExpenseMinor === undefined || cycle.salaryDifferenceMinor === undefined) {
-    return "先积累足够的历史支出数据，再估算下个工资周期。";
+    return "数据不足，暂不预测下个工资周期。";
   }
   if (cycle.affordability === "surplus") {
-    return `下个周期约 ${cycle.days} 天，预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，工资预计有 ${displayAmount(cycle.salaryDifferenceMinor)} 结余。`;
+    return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，月工资预计剩 ${displayAmount(cycle.salaryDifferenceMinor)}。`;
   }
   if (cycle.affordability === "shortfall") {
-    return `下个周期约 ${cycle.days} 天，预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，工资预计少 ${displayAmount(-cycle.salaryDifferenceMinor)}。`;
+    return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，月工资预计少 ${displayAmount(-cycle.salaryDifferenceMinor)}。`;
   }
-  return `下个周期约 ${cycle.days} 天，预计支出与工资刚好相当。`;
+  return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，刚好等于月工资。`;
 }
 
-function dailyInsight(analysis: SpendingAnalysis): string {
+function dailyChartDescription(analysis: SpendingAnalysis): string {
   const { observedDays, totalExpenseMinor } = analysis.window;
-  return `最近 ${observedDays} 个完整日共支出 ${displayAmount(totalExpenseMinor)}；没有支出的日期也计入统计。`;
+  return `${observedDays} 个完整日共支出 ${displayAmount(totalExpenseMinor)}，包含 0 支出日。`;
+}
+
+function errorMessage(error: string | undefined): string {
+  const reason = error?.trim().replace(/[。！？!?]+$/u, "");
+  if (!reason) return "无法读取本机账目。请刷新页面重试。";
+  if (/存储空间不足|配额/u.test(reason)) return `${reason}。请释放本机存储空间后重试。`;
+  if (/超出安全范围/u.test(reason)) return `${reason}。请检查账目后重新打开分析页。`;
+  return `${reason}。请刷新页面重试。`;
 }
 
 function AnalysisHeader({ analysis }: { analysis?: SpendingAnalysis }) {
   return (
     <header className="analysis-header">
       <div>
-        <p className="eyebrow">资金判断</p>
         <h2>够不够花</h2>
-        <p className="analysis-lede">用已经记录的花费速度，看看这次发薪前和下个周期的余量。</p>
+        <p className="analysis-lede">按近 30 天支出，估算发薪前和下个工资周期是否够用。</p>
       </div>
       {analysis ? (
         <div className={`analysis-confidence analysis-confidence--${analysis.confidence}`}>
-          <span>{confidenceLabel(analysis.confidence)}</span>
+          <span>{confidenceLabel(analysis)}</span>
           <small>{confidenceDescription(analysis)}</small>
         </div>
       ) : null}
@@ -366,31 +377,31 @@ export function AnalysisView({
         <StatePanel
           kind="error"
           title="分析暂时不可用"
-          message={error || "无法读取本机账目，请稍后重试。"}
-          actionLabel="回到账目"
+          message={errorMessage(error)}
+          actionLabel="返回记账页"
           onAction={onOpenLedger}
         />
       ) : !activePlan ? (
         <StatePanel
           kind="empty"
           title="先设置工资周期"
-          message="填写发薪日、每月工资和周期末余额底线后，这里才能判断是否够用。"
-          actionLabel="去设置工资周期"
+          message="需要发薪日、月工资和周期底线。"
+          actionLabel="设置工资周期"
           onAction={onOpenSettings}
         />
       ) : !analysis ? (
         <StatePanel
           kind="error"
           title="分析暂时不可用"
-          message="本机账目已经读取，但分析结果没有生成。请回到账目后重试。"
-          actionLabel="回到账目"
+          message="没有生成分析结果。请重新打开分析页重试。"
+          actionLabel="返回记账页"
           onAction={onOpenLedger}
         />
       ) : entryCount === 0 || (entryCount === undefined && analysis.window.observedDays === 0) ? (
         <StatePanel
           kind="empty"
-          title="还没有可参考的花费"
-          message="先记录几笔消费，积累至少 14 个完整日后，这里会开始给出“够不够花”的估算。"
+          title="还没有支出记录"
+          message="记录满 14 个完整日后开始估算。"
           actionLabel="去记一笔"
           onAction={onOpenLedger}
         />
@@ -398,72 +409,67 @@ export function AnalysisView({
         <>
           <section className="analysis-outlook" aria-labelledby="analysis-outlook-title">
             <div className="analysis-outlook-heading">
-              <div>
-                <p className="eyebrow">先看结论</p>
-                <h3 id="analysis-outlook-title">两段钱，分别回答</h3>
-              </div>
-              <p className="analysis-method"><Info aria-hidden="true" /> 仅按已记录支出估算，不预测固定支出</p>
+              <h3 id="analysis-outlook-title">结论</h3>
+              <p className="analysis-method"><Info aria-hidden="true" /> 只统计已记录支出，不含固定支出。</p>
             </div>
             <div className="analysis-verdict-grid">
               <article className={`analysis-verdict analysis-verdict--${analysis.currentCycle.affordability ?? "pending"}`}>
                 <div className="analysis-verdict-label"><StatusIcon value={analysis.currentCycle.affordability} /> 到发薪日</div>
                 <strong>{affordabilityLabel(analysis.currentCycle.affordability)}</strong>
-                <p>{currentCycleInsight(analysis)}</p>
-                <small>还剩 {analysis.currentCycle.daysUntilPayday} 天 · 每日可花 {displayAmount(analysis.currentCycle.dailySafeToSpendMinor)}</small>
+                <p>{currentCycleVerdict(analysis)}</p>
+                <small>剩余 {analysis.currentCycle.daysUntilPayday} 天 · 每日可花 {displayAmount(analysis.currentCycle.dailySafeToSpendMinor)}</small>
               </article>
               <article className={`analysis-verdict analysis-verdict--${analysis.nextCycle.affordability ?? "pending"}`}>
                 <div className="analysis-verdict-label"><StatusIcon value={analysis.nextCycle.affordability} /> 下个工资周期</div>
                 <strong>{affordabilityLabel(analysis.nextCycle.affordability, true)}</strong>
-                <p>{nextCycleInsight(analysis)}</p>
-                <small>工资基线 {displayAmount(activePlan.monthlySalaryMinor)} · 周期约 {analysis.nextCycle.days} 天</small>
+                <p>{nextCycleVerdict(analysis)}</p>
+                <small>月工资 {displayAmount(activePlan.monthlySalaryMinor)} · 周期 {analysis.nextCycle.days} 天</small>
               </article>
             </div>
           </section>
 
           <section className="analysis-metrics-section" aria-labelledby="analysis-metrics-title">
             <div className="analysis-section-heading">
-              <div>
-                <p className="eyebrow">关键数字</p>
-                <h3 id="analysis-metrics-title">把依据摆在一起</h3>
-              </div>
-              <p>{confidenceDescription(analysis)}</p>
+              <h3 id="analysis-metrics-title">关键数据</h3>
             </div>
             <dl className="analysis-metrics">
               <Metric
                 label="预计周期末余额"
                 value={displayAmount(analysis.currentCycle.projectedEndBalanceMinor)}
-                detail="当前周期结束时"
+                detail="本周期结束时"
                 tone={analysis.currentCycle.affordability === "shortfall" ? "negative" : analysis.currentCycle.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric
-                label="与周期底线"
+                label="距周期底线"
                 value={displaySignedAmount(analysis.currentCycle.balanceGoalDifferenceMinor)}
-                detail={`底线 ${displayAmount(activePlan.cycleEndBalanceGoalMinor)}`}
+                detail={`周期底线 ${displayAmount(activePlan.cycleEndBalanceGoalMinor)}`}
                 tone={analysis.currentCycle.affordability === "shortfall" ? "negative" : analysis.currentCycle.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric
-                label="下周期工资差额"
+                label="下个工资周期差额"
                 value={displaySignedAmount(analysis.nextCycle.salaryDifferenceMinor)}
-                detail="工资减去预计支出"
+                detail="月工资 − 预计支出"
                 tone={analysis.nextCycle.affordability === "shortfall" ? "negative" : analysis.nextCycle.affordability === "surplus" ? "positive" : "pending"}
               />
-              <Metric label="近 30 天日均支出" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail="完整日期平均" />
-              <Metric label="本周期已支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} detail="从发薪日开始" />
+              <Metric label="近 30 天日均支出" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`近 ${analysis.window.observedDays} 个完整日`} />
+              <Metric label="本周期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} detail="从发薪日开始" />
               <Metric label="本月收入" value={summary ? `+${displayAmount(summary.monthIncomeMinor)}` : "—"} detail="有效收入记录" tone="positive" />
               <Metric label="本月支出" value={summary ? `−${displayAmount(summary.monthExpenseMinor)}` : "—"} detail="有效支出记录" tone="negative" />
             </dl>
           </section>
 
-          <section className="analysis-insight-strip" aria-label="统计说明">
-            <ListChecks aria-hidden="true" />
-            <p><strong>怎么算：</strong>{dailyInsight(analysis)} 今天按一个完整消费日计入，结果是保守估算。</p>
-          </section>
+          {analysis.confidence !== "insufficient" ? (
+            <section className="analysis-insight-strip" aria-label="统计口径">
+              <ListChecks aria-hidden="true" />
+              <p>统计口径：截至昨天的 {analysis.window.observedDays} 个完整日，包含 0 支出日；今天按完整一天估算。</p>
+            </section>
+          ) : null}
 
           <ChartFrame
             id="current-cycle-chart"
-            title="当前周期，花费走到哪里了"
-            description={currentCycleInsight(analysis)}
-            keys={<><ChartKey kind="actual">实际累计支出（实线）</ChartKey><ChartKey kind="predicted">预测累计支出（虚线）</ChartKey><ChartKey kind="salary">当前工资参考</ChartKey></>}
+            title="当前周期累计支出"
+            description={currentCycleChartDescription(analysis)}
+            keys={<><ChartKey kind="actual">实际支出</ChartKey><ChartKey kind="predicted">预测支出</ChartKey><ChartKey kind="salary">当前月工资</ChartKey></>}
             table={<CurrentCycleTable analysis={analysis} />}
           >
             {analysis.currentCycleSeries.length ? (
@@ -479,27 +485,26 @@ export function AnalysisView({
                   <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} minTickGap={18} />
                   <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                   <Tooltip formatter={(value) => tooltipAmount(value)} labelFormatter={(label) => `日期 ${label}`} />
-                  <Legend />
                   <ReferenceLine
                     y={activePlan.monthlySalaryMinor}
                     stroke="var(--brand)"
                     strokeDasharray="2 4"
                     ifOverflow="extendDomain"
-                    label={{ value: "当前工资参考", position: "insideTopRight", fill: "var(--brand)" }}
+                    label={{ value: "当前月工资", position: "insideTopRight", fill: "var(--brand)" }}
                   />
-                  <Line type="monotone" dataKey="actualCumulativeMinor" name="实际累计支出（实线）" stroke="var(--focus)" strokeWidth={2.5} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
-                  <Line type="monotone" dataKey="projectedCumulativeMinor" name="预测累计支出（虚线）" stroke="var(--expense)" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="actualCumulativeMinor" name="实际支出" stroke="var(--focus)" strokeWidth={2.5} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
+                  <Line type="monotone" dataKey="projectedCumulativeMinor" name="预测支出" stroke="var(--expense)" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls={false} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
-            ) : <p className="analysis-chart-empty">当前周期还没有可绘制的支出点。</p>}
+            ) : <p className="analysis-chart-empty">当前周期暂无支出。</p>}
           </ChartFrame>
 
           <div className="analysis-chart-grid">
             <ChartFrame
               id="completed-cycle-chart"
-              title="最近六个工资周期"
-              description={analysis.completedCycles.length ? `最近 ${analysis.completedCycles.length} 个完整周期的实际支出；横线是当前工资参考。` : "还没有完整工资周期可比较。"}
-              keys={<><ChartKey kind="expense">实际周期支出</ChartKey><ChartKey kind="salary">当前工资参考</ChartKey></>}
+              title="完整工资周期支出"
+              description={analysis.completedCycles.length ? `显示最近 ${analysis.completedCycles.length} 个完整周期；横线为当前月工资。` : undefined}
+              keys={<><ChartKey kind="expense">实际支出</ChartKey><ChartKey kind="salary">当前月工资</ChartKey></>}
               table={<CompletedCyclesTable analysis={analysis} />}
             >
               {analysis.completedCycles.length ? (
@@ -515,18 +520,18 @@ export function AnalysisView({
                     <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} interval="preserveStartEnd" angle={-18} textAnchor="end" height={42} />
                     <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                     <Tooltip formatter={(value) => tooltipAmount(value)} />
-                    <ReferenceLine y={activePlan.monthlySalaryMinor} stroke="var(--brand)" strokeDasharray="2 4" ifOverflow="extendDomain" label={{ value: "当前工资参考", position: "insideTopRight", fill: "var(--brand)" }} />
-                    <Bar dataKey="expenseMinor" name="实际周期支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                    <ReferenceLine y={activePlan.monthlySalaryMinor} stroke="var(--brand)" strokeDasharray="2 4" ifOverflow="extendDomain" label={{ value: "当前月工资", position: "insideTopRight", fill: "var(--brand)" }} />
+                    <Bar dataKey="expenseMinor" name="实际支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
                   </BarChart>
                 </ResponsiveContainer>
-              ) : <p className="analysis-chart-empty">再经过一个完整工资周期，这里会出现比较。</p>}
+              ) : <p className="analysis-chart-empty">暂无完整周期数据。</p>}
             </ChartFrame>
 
             <ChartFrame
               id="daily-expense-chart"
-              title="近三十天，每天花多少"
-              description={dailyInsight(analysis)}
-              keys={<ChartKey kind="expense">每日支出（含零支出日）</ChartKey>}
+              title={analysis.dailyExpenses.length ? `近 ${analysis.window.observedDays} 个完整日的每日支出` : "每日支出"}
+              description={analysis.dailyExpenses.length ? dailyChartDescription(analysis) : undefined}
+              keys={<ChartKey kind="expense">每日支出</ChartKey>}
               table={<DailyExpensesTable analysis={analysis} />}
             >
               {analysis.dailyExpenses.length ? (
@@ -545,14 +550,8 @@ export function AnalysisView({
                     <Bar dataKey="expenseMinor" name="每日支出" fill="var(--expense)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
                   </BarChart>
                 </ResponsiveContainer>
-              ) : <p className="analysis-chart-empty">还没有可绘制的完成日期。</p>}
+              ) : <p className="analysis-chart-empty">暂无完整日数据。</p>}
             </ChartFrame>
-          </div>
-
-          <div className="analysis-footnote">
-            <TrendingDown aria-hidden="true" />
-            <p>预测只回答“按现在的花法大概怎样”，不会自动记入工资，也不会替你判断固定支出。</p>
-            <a href="#ledger" onClick={onOpenLedger}>回到账目</a>
           </div>
         </>
       )}
