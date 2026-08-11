@@ -1,7 +1,7 @@
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppSettings, PayCyclePlan } from "../domain";
+import type { AppSettings, IncomeForecast, PayCyclePlan } from "../domain";
 import type { PwaState } from "../hooks/usePwa";
 import type { CloudSyncSectionProps } from "./CloudSyncSection";
 import { SettingsDialog } from "./SettingsDialog";
@@ -75,13 +75,18 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-function settings(payCycle?: PayCyclePlan, legacyGoal?: number): AppSettings {
+function settings(
+  payCycle?: PayCyclePlan,
+  legacyGoal?: number,
+  incomeForecast?: IncomeForecast,
+): AppSettings {
   return {
     id: "primary",
     currency: "CNY",
     initialBalanceMinor: 0,
     ...(payCycle ? { payCycle } : {}),
     ...(legacyGoal === undefined ? {} : { monthEndBalanceGoalMinor: legacyGoal }),
+    ...(incomeForecast ? { incomeForecast } : {}),
     schemaVersion: 1,
     updatedAt: "2026-08-10T00:00:00.000Z",
   };
@@ -93,12 +98,14 @@ async function renderDialog(
   cloudOverride?: CloudSyncSectionProps,
 ): Promise<{
   host: HTMLElement;
+  onOpenIncomeForecast: ReturnType<typeof vi.fn>;
   render(open: boolean, nextSettings?: AppSettings): Promise<void>;
 }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
   mountedRoots.push(root);
+  const onOpenIncomeForecast = vi.fn();
   const render = async (open: boolean, nextSettings = appSettings) => {
     await act(async () => {
       root.render(
@@ -109,12 +116,13 @@ async function renderDialog(
           cloudSync={cloudOverride ?? cloudSync(linked)}
           onClose={vi.fn()}
           onDataChanged={vi.fn()}
+          onOpenIncomeForecast={onOpenIncomeForecast}
         />,
       );
     });
   };
   await render(true);
-  return { host, render };
+  return { host, onOpenIncomeForecast, render };
 }
 
 describe("SettingsDialog backup restore", () => {
@@ -157,7 +165,6 @@ describe("SettingsDialog backup restore", () => {
 describe("SettingsDialog pay cycle", () => {
   const plan: PayCyclePlan = {
     paydayDay: 10,
-    monthlySalaryMinor: 800_000,
     cycleEndBalanceGoalMinor: -12_345,
   };
 
@@ -165,64 +172,86 @@ describe("SettingsDialog pay cycle", () => {
     const { host: dialog } = await renderDialog(false, settings());
     const toggle = dialog.querySelector<HTMLInputElement>('input[role="switch"]');
     const payday = dialog.querySelector<HTMLInputElement>("#payday-day");
-    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary");
     const goal = dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal");
 
     expect(toggle?.checked).toBe(false);
     expect(payday?.disabled).toBe(true);
-    expect(salary?.disabled).toBe(true);
     expect(goal?.disabled).toBe(true);
     expect(payday?.value).toBe("1");
-    expect(salary?.value).toBe("0.00");
     expect(goal?.value).toBe("0.00");
+    expect(dialog.querySelector("#monthly-salary")).toBeNull();
   });
 
-  it("reflects an enabled plan including payday, salary and signed floor", async () => {
+  it("reflects an enabled plan including payday and signed floor", async () => {
     const { host: dialog } = await renderDialog(false, settings(plan));
     const toggle = dialog.querySelector<HTMLInputElement>('input[role="switch"]');
 
     expect(toggle?.checked).toBe(true);
     expect(dialog.querySelector<HTMLInputElement>("#payday-day")?.value).toBe("10");
-    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("8000.00");
     expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
       .toBe("-123.45");
+    expect(dialog.querySelector("#monthly-salary")).toBeNull();
   });
 
   it("keeps unsaved plan edits when settings refresh while the dialog stays open", async () => {
     const saved = settings(plan);
     const { host: dialog, render } = await renderDialog(false, saved);
-    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary")!;
+    const goal = dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")!;
     const setInputValue = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",
     )!.set!;
 
     await act(async () => {
-      setInputValue.call(salary, "999.99");
-      salary.dispatchEvent(new Event("input", { bubbles: true }));
+      setInputValue.call(goal, "999.99");
+      goal.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await render(true, { ...saved, initialBalanceMinor: 12_345 });
 
-    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("999.99");
+    expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
+      .toBe("999.99");
   });
 
   it("restores the saved plan after closing with unsaved edits", async () => {
     const saved = settings(plan);
     const { host: dialog, render } = await renderDialog(false, saved);
-    const salary = dialog.querySelector<HTMLInputElement>("#monthly-salary")!;
+    const goal = dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
 
     await act(async () => {
-      salary.value = "999.99";
-      salary.dispatchEvent(new Event("input", { bubbles: true }));
+      setInputValue.call(goal, "999.99");
+      goal.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await render(false, saved);
     await render(true, saved);
 
     expect(dialog.querySelector<HTMLInputElement>('input[role="switch"]')?.checked).toBe(true);
     expect(dialog.querySelector<HTMLInputElement>("#payday-day")?.value).toBe("10");
-    expect(dialog.querySelector<HTMLInputElement>("#monthly-salary")?.value).toBe("8000.00");
     expect(dialog.querySelector<HTMLInputElement>("#cycle-end-balance-goal")?.value)
       .toBe("-123.45");
+  });
+
+  it("shows the one-time income forecast separately and opens its editor", async () => {
+    const forecast: IncomeForecast = {
+      id: "forecast-1",
+      targetPaydayDateKey: "2026-09-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    };
+    const { host: dialog, onOpenIncomeForecast } = await renderDialog(
+      false,
+      settings(plan, undefined, forecast),
+    );
+    const trigger = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.includes("修改收入预期"));
+
+    expect(dialog.textContent).toContain("最低 ¥5,000.00 · 预计 ¥8,000.00");
+    expect(trigger).toBeDefined();
+    await act(async () => trigger?.click());
+    expect(onOpenIncomeForecast).toHaveBeenCalledOnce();
   });
 
   it("prefills the cycle floor from a legacy natural-month goal", async () => {
@@ -241,7 +270,7 @@ describe("SettingsDialog pay cycle", () => {
     const { host: dialog } = await renderDialog(false, settings(), ready);
 
     expect(dialog.textContent).toContain("3 笔记录");
-    expect(dialog.textContent).toContain("账本设置（初始余额、发薪日、工资和周期底线）");
+    expect(dialog.textContent).toContain("账本设置（初始余额、发薪周期和下次收入预期）");
     expect(dialog.textContent).toContain("2 张截图");
   });
 });

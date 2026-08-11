@@ -119,11 +119,15 @@ function validateSettingsPayload(
     ? []
     : protocolVersion === 2
       ? ["monthEndBalanceGoalMinor"]
-      : ["monthEndBalanceGoalMinor", "payCycle"];
+      : protocolVersion === 3
+        ? ["monthEndBalanceGoalMinor", "payCycle"]
+        : ["monthEndBalanceGoalMinor", "payCycle", "incomeForecast"];
   if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
   const settings = value as unknown as SettingsMutationPayload;
+  const hasPayCycle = Object.hasOwn(settings, "payCycle");
+  const hasIncomeForecast = Object.hasOwn(settings, "incomeForecast");
   if (
     entityId !== "primary" ||
     settings.id !== "primary" ||
@@ -137,27 +141,68 @@ function validateSettingsPayload(
         Math.abs(settings.monthEndBalanceGoalMinor) > MAX_AMOUNT_MINOR)) ||
     (settings.payCycle !== undefined &&
       settings.payCycle !== null &&
-      (
-        !isRecord(settings.payCycle) ||
-        !hasOnlyKeys(settings.payCycle, [
-          "paydayDay",
-          "monthlySalaryMinor",
-          "cycleEndBalanceGoalMinor",
-        ]) ||
-        !Number.isInteger(settings.payCycle.paydayDay) ||
-        Number(settings.payCycle.paydayDay) < 1 ||
-        Number(settings.payCycle.paydayDay) > 31 ||
-        !Number.isSafeInteger(settings.payCycle.monthlySalaryMinor) ||
-        Number(settings.payCycle.monthlySalaryMinor) <= 0 ||
-        Number(settings.payCycle.monthlySalaryMinor) > MAX_AMOUNT_MINOR ||
-        !Number.isSafeInteger(settings.payCycle.cycleEndBalanceGoalMinor) ||
-        Math.abs(Number(settings.payCycle.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
-      )) ||
+      !isValidPayCycle(settings.payCycle, protocolVersion)) ||
+    (settings.incomeForecast !== undefined &&
+      settings.incomeForecast !== null &&
+      !isValidIncomeForecast(settings.incomeForecast)) ||
+    (hasPayCycle && settings.payCycle === undefined) ||
+    (hasIncomeForecast && settings.incomeForecast === undefined) ||
+    (protocolVersion >= 4 && settings.incomeForecast !== undefined &&
+      settings.incomeForecast !== null &&
+      (settings.payCycle === undefined || settings.payCycle === null)) ||
+    (protocolVersion >= 4 && settings.payCycle === null &&
+      (!hasIncomeForecast || settings.incomeForecast !== null)) ||
     !isIsoDate(settings.updatedAt)
   ) {
     throw new ApiError(400, "invalid_settings", "Settings payload is invalid");
   }
   return settings;
+}
+
+function isValidPayCycle(
+  value: unknown,
+  protocolVersion: SyncProtocolVersion,
+): boolean {
+  if (!isRecord(value)) return false;
+  const required = protocolVersion === 3
+    ? ["paydayDay", "monthlySalaryMinor", "cycleEndBalanceGoalMinor"] as const
+    : ["paydayDay", "cycleEndBalanceGoalMinor"] as const;
+  if (!hasOnlyKeys(value, required)) return false;
+  if (
+    !Number.isInteger(value.paydayDay) ||
+    Number(value.paydayDay) < 1 ||
+    Number(value.paydayDay) > 31 ||
+    !Number.isSafeInteger(value.cycleEndBalanceGoalMinor) ||
+    Math.abs(Number(value.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
+  ) {
+    return false;
+  }
+  return protocolVersion !== 3 || (
+    Number.isSafeInteger(value.monthlySalaryMinor) &&
+    Number(value.monthlySalaryMinor) > 0 &&
+    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function isValidIncomeForecast(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, [
+      "id",
+      "targetPaydayDateKey",
+      "minimumIncomeMinor",
+      "expectedIncomeMinor",
+    ]) &&
+    isValidId(value.id) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.minimumIncomeMinor) &&
+    Number(value.minimumIncomeMinor) >= 0 &&
+    Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.expectedIncomeMinor) &&
+    Number(value.expectedIncomeMinor) >= 0 &&
+    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor)
+  );
 }
 
 function validateCursor(value: unknown): string {
@@ -214,7 +259,8 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
   if (
     !isRecord(value) ||
     !hasOnlyKeys(value, keys) ||
-    (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
+      value.schemaVersion !== 3 && value.schemaVersion !== 4)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

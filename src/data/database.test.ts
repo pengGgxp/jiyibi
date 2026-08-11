@@ -1,8 +1,9 @@
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
+import type { AppSettings, EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
 import {
   API_SCHEMA_VERSION,
+  SYNC_SCHEMA_VERSION,
   type SessionResponse,
   type SyncChange,
 } from "../sync/contracts";
@@ -12,6 +13,7 @@ import {
   LedgerDatabase,
   applyRemoteChanges,
   assertSyncAccount,
+  clearIncomeForecast,
   createDefaultSettings,
   createEntry,
   getAttachment,
@@ -21,9 +23,11 @@ import {
   linkSyncAccount,
   markPushResults,
   purgeDeletedEntry,
+  recordActualIncome,
   replaceLedgerData,
   resolveSyncConflict,
   setInitialBalance,
+  setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
   softDeleteEntry,
@@ -103,7 +107,6 @@ describe("LedgerDatabase", () => {
     await setMonthEndBalanceGoal(50_000, database);
     const plan = {
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 100_000,
     };
 
@@ -111,29 +114,190 @@ describe("LedgerDatabase", () => {
     expect(saved).toMatchObject({ initialBalanceMinor: 1_234, payCycle: plan });
     expect(saved).not.toHaveProperty("monthEndBalanceGoalMinor");
 
+    const forecast = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, database, new Date(2026, 7, 10, 10));
     await setInitialBalance(-2_500, database);
     expect(await getSettings(database)).toMatchObject({
       initialBalanceMinor: -2_500,
       payCycle: plan,
+      incomeForecast: forecast.incomeForecast,
     });
+
+    await setPayCyclePlan({ ...plan, cycleEndBalanceGoalMinor: 120_000 }, database);
+    expect((await getSettings(database)).incomeForecast).toEqual(forecast.incomeForecast);
 
     const cleared = await setPayCyclePlan(undefined, database);
     expect(cleared).not.toHaveProperty("payCycle");
+    expect(cleared).not.toHaveProperty("incomeForecast");
     expect(cleared).not.toHaveProperty("monthEndBalanceGoalMinor");
   });
 
   it.each([
-    { paydayDay: 0, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 32, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, monthlySalaryMinor: 0, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, monthlySalaryMinor: 1.5, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: Number.NaN },
+    { paydayDay: 0, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 32, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10.5, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, cycleEndBalanceGoalMinor: 1.5 },
+    { paydayDay: 10, cycleEndBalanceGoalMinor: Number.NaN },
   ])("rejects an incomplete or invalid pay-cycle plan: %o", async (invalidPlan) => {
     const before = await getSettings(database);
     await expect(setPayCyclePlan(invalidPlan, database)).rejects.toMatchObject({
       code: "invalid-settings",
     });
     await expect(getSettings(database)).resolves.toEqual(before);
+  });
+
+  it("saves one income forecast for the next payday and preserves its id while editing", async () => {
+    const now = new Date(2026, 7, 9, 10, 30);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, database, now);
+
+    const saved = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, database, now);
+    expect(saved.incomeForecast).toMatchObject({
+      id: expect.any(String),
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    });
+
+    const edited = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 550_000,
+      expectedIncomeMinor: 850_000,
+    }, database, now);
+    expect(edited.incomeForecast?.id).toBe(saved.incomeForecast?.id);
+    expect(edited.incomeForecast?.minimumIncomeMinor).toBe(550_000);
+
+    const cleared = await clearIncomeForecast(database, now);
+    expect(cleared).not.toHaveProperty("incomeForecast");
+  });
+
+  it.each([
+    {
+      targetPaydayDateKey: "2026-08-11",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: -1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 3,
+      expectedIncomeMinor: 2,
+    },
+    {
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1.5,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast with spaces",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "f".repeat(129),
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+  ])("rejects an invalid income forecast: %o", async (invalidForecast) => {
+    const now = new Date(2026, 7, 9, 10, 30);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, database, now);
+    const before = await getSettings(database);
+
+    await expect(
+      setIncomeForecast(invalidForecast, database, now),
+    ).rejects.toMatchObject({ code: "invalid-settings" });
+    await expect(getSettings(database)).resolves.toEqual(before);
+  });
+
+  it("records a due actual income and clears its forecast atomically", async () => {
+    const forecastNow = new Date(2026, 7, 9, 10, 30);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, database, forecastNow);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, database, forecastNow);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+
+    const result = await recordActualIncome(
+      765_432,
+      database,
+      new Date(2026, 7, 10, 14, 35),
+    );
+    expect(result.entry).toMatchObject({
+      amountMinor: 765_432,
+      note: "本次实际收入",
+      localDateKey: "2026-08-10",
+      localMonthKey: "2026-08",
+    });
+    expect(result.settings).not.toHaveProperty("incomeForecast");
+    expect(await database.entries.toArray()).toEqual([result.entry]);
+    expect(await database.syncOutbox.get(`entry:${result.entry?.id}`)).toBeDefined();
+    expect(await database.syncOutbox.get("settings:primary")).toMatchObject({
+      clearIncomeForecast: true,
+    });
+
+    await expect(
+      recordActualIncome(765_432, database, new Date(2026, 7, 10, 14, 36)),
+    ).rejects.toMatchObject({ code: "invalid-settings" });
+    expect(await database.entries.count()).toBe(1);
+  });
+
+  it("allows a zero actual income without creating a zero-value entry", async () => {
+    const forecastNow = new Date(2026, 7, 9, 10, 30);
+    await setPayCyclePlan({ paydayDay: 10, cycleEndBalanceGoalMinor: 0 }, database, forecastNow);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 0,
+      expectedIncomeMinor: 0,
+    }, database, forecastNow);
+
+    const result = await recordActualIncome(0, database, new Date(2026, 7, 10, 9));
+    expect(result.entry).toBeUndefined();
+    expect(result.settings).not.toHaveProperty("incomeForecast");
+    expect(await database.entries.count()).toBe(0);
+  });
+
+  it("rolls back the actual income entry when its sync mutation cannot be queued", async () => {
+    const forecastNow = new Date(2026, 7, 9, 10, 30);
+    await setPayCyclePlan({ paydayDay: 10, cycleEndBalanceGoalMinor: 0 }, database, forecastNow);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 100,
+      expectedIncomeMinor: 200,
+    }, database, forecastNow);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const put = vi.spyOn(database.syncOutbox, "put").mockRejectedValueOnce(new Error("quota"));
+
+    await expect(
+      recordActualIncome(150, database, new Date(2026, 7, 10, 9)),
+    ).rejects.toThrow("quota");
+    expect(await database.entries.count()).toBe(0);
+    expect((await getSettings(database)).incomeForecast).toBeDefined();
+    put.mockRestore();
   });
 
   it("saves and clears the month-end goal without overwriting the initial balance", async () => {
@@ -318,6 +482,94 @@ describe("LedgerDatabase", () => {
     }
   });
 
+  it("upgrades v2 settings, outbox payloads and conflict snapshots to income forecasts", async () => {
+    const name = `jiyibi-v2-upgrade-${crypto.randomUUID()}`;
+    const legacy = new Dexie(name);
+    legacy.version(1).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+    });
+    legacy.version(2).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    });
+    await legacy.open();
+    const legacySettings = {
+      ...createDefaultSettings(new Date("2026-08-01T00:00:00.000Z")),
+      payCycle: {
+        paydayDay: 31,
+        monthlySalaryMinor: 800_000,
+        cycleEndBalanceGoalMinor: 100_000,
+      },
+    };
+    const remoteSettings = {
+      ...legacySettings,
+      payCycle: { ...legacySettings.payCycle, monthlySalaryMinor: 900_000 },
+    };
+    await legacy.table("settings").add(legacySettings);
+    await legacy.table("syncOutbox").add({
+      entityKey: "settings:primary",
+      id: "legacy-mutation",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 2,
+      payload: legacySettings,
+      clearPayCycle: true,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
+    await legacy.table("syncConflicts").add({
+      id: "settings:primary",
+      entityType: "settings",
+      entityId: "primary",
+      localPayload: legacySettings,
+      remotePayload: remoteSettings,
+      remoteVersion: 3,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
+    legacy.close();
+
+    const upgraded = new LedgerDatabase(name, new Date(2026, 7, 30, 12));
+    try {
+      await upgraded.open();
+      expect(await upgraded.settings.get("primary")).toMatchObject({
+        payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+        incomeForecast: {
+          id: "legacy-income-2026-08-31",
+          targetPaydayDateKey: "2026-08-31",
+          minimumIncomeMinor: 0,
+          expectedIncomeMinor: 800_000,
+        },
+      });
+      const outbox = await upgraded.syncOutbox.get("settings:primary");
+      expect(outbox).toMatchObject({
+        clearIncomeForecast: true,
+        payload: {
+          payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+          incomeForecast: { expectedIncomeMinor: 800_000 },
+        },
+      });
+      expect(outbox?.payload).not.toHaveProperty("payCycle.monthlySalaryMinor");
+      const conflict = await upgraded.syncConflicts.get("settings:primary");
+      expect(conflict?.localPayload).toMatchObject({
+        incomeForecast: { expectedIncomeMinor: 800_000 },
+      });
+      expect(conflict?.remotePayload).toMatchObject({
+        incomeForecast: { expectedIncomeMinor: 900_000 },
+      });
+    } finally {
+      upgraded.close();
+      await upgraded.delete();
+    }
+  });
+
   it("atomically coalesces local edits while preserving their original base version", async () => {
     await linkSyncAccount(session(), true, database);
     const created = await createEntry(draft(), database);
@@ -339,7 +591,9 @@ describe("LedgerDatabase", () => {
 
   it("keeps an explicit goal-clear intent while coalescing settings edits", async () => {
     await linkSyncAccount(session(), true, database);
-    expect((await database.syncState.get("primary"))?.syncProtocolVersion).toBe(3);
+    expect((await database.syncState.get("primary"))?.syncProtocolVersion).toBe(
+      SYNC_SCHEMA_VERSION,
+    );
 
     await setMonthEndBalanceGoal(50_000, database);
     expect(await database.syncOutbox.get("settings:primary")).not.toHaveProperty(
@@ -362,7 +616,6 @@ describe("LedgerDatabase", () => {
     await linkSyncAccount(session(), true, database);
     const plan = {
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 100_000,
     };
 
@@ -381,6 +634,33 @@ describe("LedgerDatabase", () => {
     const reset = await database.syncOutbox.get("settings:primary");
     expect(reset).not.toHaveProperty("clearPayCycle");
     expect(reset?.payload).toHaveProperty("payCycle", plan);
+  });
+
+  it("keeps an explicit income-forecast clear while coalescing later settings edits", async () => {
+    const now = new Date(2026, 7, 9, 10);
+    await setPayCyclePlan({ paydayDay: 10, cycleEndBalanceGoalMinor: 0 }, database, now);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 100,
+      expectedIncomeMinor: 200,
+    }, database, now);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+
+    await clearIncomeForecast(database, now);
+    await setInitialBalance(1_234, database, now);
+    const cleared = await database.syncOutbox.get("settings:primary");
+    expect(cleared?.clearIncomeForecast).toBe(true);
+    expect(cleared?.payload).not.toHaveProperty("incomeForecast");
+
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 150,
+      expectedIncomeMinor: 250,
+    }, database, now);
+    const reset = await database.syncOutbox.get("settings:primary");
+    expect(reset).not.toHaveProperty("clearIncomeForecast");
+    expect(reset?.payload).toHaveProperty("incomeForecast.expectedIncomeMinor", 250);
   });
 
   it("keeps a durable deletion outbox after the local entry and attachment are purged", async () => {
@@ -472,6 +752,60 @@ describe("LedgerDatabase", () => {
     expect((retry?.payload as LedgerEntry).note).toBe("keep this");
     expect((await database.entries.get(local.id))?.note).toBe("keep this");
     expect(await database.syncConflicts.get(`entry:${local.id}`)).toBeUndefined();
+  });
+
+  it("keeps a legacy-income claim durable when a settings conflict uses the cloud version", async () => {
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 10_000,
+    }, database, new Date(2026, 7, 9, 10));
+    const sent = (await database.syncOutbox.get("settings:primary"))!;
+    const remote: AppSettings = {
+      ...(await getSettings(database)),
+      payCycle: {
+        paydayDay: 10,
+        cycleEndBalanceGoalMinor: 25_000,
+      },
+      incomeForecast: {
+        id: "legacy-income-2026-08-10",
+        targetPaydayDateKey: "2026-08-10",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 700_000,
+      },
+      updatedAt: "2026-08-09T03:00:00.000Z",
+    };
+    await markPushResults([sent], [{
+      id: sent.id,
+      status: "conflict",
+      remote: {
+        seq: "4",
+        entityType: "settings",
+        entityId: "primary",
+        version: 4,
+        payload: remote,
+        claimLegacyIncomeForecast: true,
+      },
+    }], database, new Date(2026, 7, 9, 11));
+
+    expect(await database.syncConflicts.get("settings:primary")).toMatchObject({
+      claimLegacyIncomeForecast: true,
+      remoteVersion: 4,
+    });
+    await resolveSyncConflict(
+      "settings",
+      "primary",
+      "use-cloud",
+      database,
+      new Date(2026, 7, 9, 12),
+    );
+
+    expect((await getSettings(database)).incomeForecast).toEqual(remote.incomeForecast);
+    expect(await database.syncOutbox.get("settings:primary")).toMatchObject({
+      baseVersion: 4,
+      payload: { incomeForecast: remote.incomeForecast },
+    });
+    expect(await database.syncConflicts.get("settings:primary")).toBeUndefined();
   });
 
   it("rejects a different authenticated account until the ledger is explicitly unlinked", async () => {

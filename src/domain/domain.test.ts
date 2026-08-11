@@ -83,7 +83,7 @@ describe("entry validation and statistics", () => {
   });
 });
 
-describe("salary pay cycle", () => {
+describe("pay cycle", () => {
   it("uses payday boundaries instead of natural months", () => {
     expect(resolvePayCycleRange(10, new Date(2026, 7, 9, 12, 0))).toEqual({
       cycleStartDateKey: "2026-07-10",
@@ -110,7 +110,7 @@ describe("salary pay cycle", () => {
       .toBe("2028-02-29");
   });
 
-  it("compares the actual balance with the cycle floor and tracks salary spending", () => {
+  it("compares the actual balance with the cycle floor and tracks cycle activity", () => {
     const entries = [
       entry({ id: "before", amountMinor: -99_999, localDateKey: "2026-07-09" }),
       entry({ id: "salary-cycle-expense", amountMinor: -2_500, localDateKey: "2026-07-10" }),
@@ -120,7 +120,6 @@ describe("salary pay cycle", () => {
     ];
     expect(calculatePayCycleStatus(entries, 9_000, {
       paydayDay: 10,
-      monthlySalaryMinor: 10_000,
       cycleEndBalanceGoalMinor: 10_000,
     }, new Date(2026, 7, 9, 12, 0))).toMatchObject({
       targetMinor: 10_000,
@@ -128,9 +127,7 @@ describe("salary pay cycle", () => {
       isCurrentlyAtOrAboveGoal: false,
       cycleExpenseMinor: 2_500,
       cycleIncomeMinor: 1_000,
-      salaryRemainingMinor: 7_500n,
       safeToSpendMinor: 0n,
-      salarySpentPercent: 25,
       cycleStartDateKey: "2026-07-10",
       cycleEndDateKey: "2026-08-09",
       nextPaydayDateKey: "2026-08-10",
@@ -141,11 +138,10 @@ describe("salary pay cycle", () => {
   it("keeps exact differences for large valid balances", () => {
     const status = calculatePayCycleStatus([], 9_000_000_000_000_000, {
       paydayDay: 1,
-      monthlySalaryMinor: 1,
       cycleEndBalanceGoalMinor: -9_000_000_000_000_000,
     });
     expect(status.balanceHeadroomMinor).toBe(18_000_000_000_000_000n);
-    expect(status.safeToSpendMinor).toBe(1n);
+    expect(status.safeToSpendMinor).toBe(18_000_000_000_000_000n);
     expect(formatCny(status.balanceHeadroomMinor)).toBe("¥180,000,000,000,000.00");
   });
 });

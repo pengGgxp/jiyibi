@@ -193,6 +193,183 @@ describe("validateSyncRequest", () => {
     expect(() => validateSyncRequest(request)).toThrowError("invalid fields");
   });
 
+  it("accepts version-four pay-cycle and income-forecast fields or explicit nulls", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 4;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: {
+          paydayDay: 10,
+          cycleEndBalanceGoalMinor: 100_000,
+        },
+        incomeForecast: {
+          id: "forecast_2026_08_10",
+          targetPaydayDateKey: "2026-08-10",
+          minimumIncomeMinor: 600_000,
+          expectedIncomeMinor: 800_000,
+        },
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 100_000 },
+      incomeForecast: {
+        minimumIncomeMinor: 600_000,
+        expectedIncomeMinor: 800_000,
+      },
+    });
+
+    const cleared = structuredClone(request) as {
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    cleared.mutations[0].payload.payCycle = null;
+    cleared.mutations[0].payload.incomeForecast = null;
+    expect(validateSyncRequest(cleared).mutations[0].payload).toMatchObject({
+      payCycle: null,
+      incomeForecast: null,
+    });
+  });
+
+  it.each([
+    {
+      id: "forecast_1",
+      targetPaydayDateKey: "2026-02-30",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast_1",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 3,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast_1",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: -1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast_1",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1,
+    },
+  ])("rejects an invalid version-four income forecast: %o", (incomeForecast) => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 4;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 0 },
+        incomeForecast,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+  });
+
+  it("keeps version three and version four pay-cycle shapes distinct", () => {
+    const base = {
+      id: "primary",
+      currency: "CNY",
+      initialBalanceMinor: 500,
+      schemaVersion: 1,
+      updatedAt: "2026-07-30T04:01:00.000Z",
+    };
+    const request = validRequest() as {
+      schemaVersion: number;
+      mutations: Array<Record<string, unknown> & {
+        payload: Record<string, unknown>;
+      }>;
+    };
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: base,
+    }];
+
+    request.schemaVersion = 3;
+    request.mutations[0].payload = {
+      ...base,
+      payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 0 },
+    };
+    expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+
+    request.schemaVersion = 4;
+    request.mutations[0].payload = {
+      ...base,
+      payCycle: {
+        paydayDay: 10,
+        monthlySalaryMinor: 100,
+        cycleEndBalanceGoalMinor: 0,
+      },
+    };
+    expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+  });
+
+  it.each([
+    {
+      payCycle: undefined,
+      incomeForecast: {
+        id: "forecast_1",
+        targetPaydayDateKey: "2026-08-10",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 1,
+      },
+    },
+    { payCycle: null, incomeForecast: undefined },
+    {
+      payCycle: null,
+      incomeForecast: {
+        id: "forecast_1",
+        targetPaydayDateKey: "2026-08-10",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 1,
+      },
+    },
+  ])("rejects an incomplete version-four income planning pair: %o", ({
+    payCycle,
+    incomeForecast,
+  }) => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 4;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle,
+        incomeForecast,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+    expect(() => validateSyncRequest(request)).toThrowError("Settings payload is invalid");
+  });
+
   it("keeps version one strict and rejects the version-two settings field", () => {
     const request = validRequest() as {
       mutations: Array<Record<string, unknown>>;

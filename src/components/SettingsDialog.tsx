@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  TrendingUp,
   Upload,
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
@@ -23,7 +24,7 @@ import {
   setPayCyclePlan,
   type PreparedBackup,
 } from "../data";
-import { formatCny, parseSignedAmountToMinor, parseUnsignedAmountToMinor, type AppSettings } from "../domain";
+import { formatCny, parseSignedAmountToMinor, type AppSettings } from "../domain";
 import type { PwaState } from "../hooks/usePwa";
 import { useStorageEstimate } from "../hooks/useStorageEstimate";
 import { CloudSyncSection, type CloudSyncSectionProps } from "./CloudSyncSection";
@@ -36,6 +37,7 @@ interface SettingsDialogProps {
   cloudSync: CloudSyncSectionProps;
   onClose(): void;
   onDataChanged(): void;
+  onOpenIncomeForecast(): void;
 }
 
 function signedInput(minor: number): string {
@@ -49,6 +51,11 @@ function bytesLabel(bytes: number): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+}
+
+function readableDateKey(dateKey: string): string {
+  const [, month, day] = dateKey.split("-");
+  return month && day ? `${Number(month)} 月 ${Number(day)} 日` : dateKey;
 }
 
 function backupErrorMessage(reason: unknown): string {
@@ -77,6 +84,7 @@ export function SettingsDialog({
   cloudSync,
   onClose,
   onDataChanged,
+  onOpenIncomeForecast,
 }: SettingsDialogProps) {
   const [initialBalance, setInitialBalanceInput] = useState("0.00");
   const [balanceError, setBalanceError] = useState<string>();
@@ -84,7 +92,6 @@ export function SettingsDialog({
   const [savingBalance, setSavingBalance] = useState(false);
   const [payCycleEnabled, setPayCycleEnabled] = useState(false);
   const [paydayInput, setPaydayInput] = useState("1");
-  const [salaryInput, setSalaryInput] = useState("0.00");
   const [cycleGoalInput, setCycleGoalInput] = useState("0.00");
   const [payCycleError, setPayCycleError] = useState<string>();
   const [payCycleStatus, setPayCycleStatus] = useState<string>();
@@ -111,7 +118,6 @@ export function SettingsDialog({
     setInitialBalanceInput(signedInput(settings.initialBalanceMinor));
     setPayCycleEnabled(settings.payCycle !== undefined);
     setPaydayInput(String(settings.payCycle?.paydayDay ?? 1));
-    setSalaryInput(signedInput(settings.payCycle?.monthlySalaryMinor ?? 0));
     setCycleGoalInput(signedInput(
       settings.payCycle?.cycleEndBalanceGoalMinor ?? settings.monthEndBalanceGoalMinor ?? 0,
     ));
@@ -159,7 +165,6 @@ export function SettingsDialog({
   const savePayCycle = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     let paydayDay = 1;
-    let salaryMinor = 0;
     let goalMinor = 0;
     if (payCycleEnabled) {
       if (!/^\d{1,2}$/.test(paydayInput) || (paydayDay = Number(paydayInput)) < 1 || paydayDay > 31) {
@@ -167,11 +172,10 @@ export function SettingsDialog({
         return;
       }
       try {
-        salaryMinor = parseUnsignedAmountToMinor(salaryInput);
         goalMinor = parseSignedAmountToMinor(cycleGoalInput);
         setPayCycleError(undefined);
       } catch {
-        setPayCycleError("工资和底线请输入有效金额，最多保留两位小数");
+        setPayCycleError("周期底线请输入有效金额，最多保留两位小数");
         return;
       }
     }
@@ -180,13 +184,12 @@ export function SettingsDialog({
     try {
       await setPayCyclePlan(payCycleEnabled ? {
         paydayDay,
-        monthlySalaryMinor: salaryMinor,
         cycleEndBalanceGoalMinor: goalMinor,
       } : undefined);
-      setPayCycleStatus(payCycleEnabled ? "工资周期已更新" : "工资周期已关闭");
+      setPayCycleStatus(payCycleEnabled ? "发薪周期已更新" : "发薪周期已关闭");
       onDataChanged();
     } catch {
-      setPayCycleError("工资周期没有保存，请重试");
+      setPayCycleError("发薪周期没有保存，请重试");
     } finally {
       setSavingPayCycle(false);
     }
@@ -307,8 +310,8 @@ export function SettingsDialog({
           <div className="settings-section-heading">
             <div className="settings-icon"><CalendarDays aria-hidden="true" /></div>
             <div>
-              <h3 id="pay-cycle-setting-title">工资周期</h3>
-              <p>按发薪日划分周期，工资只用于预算，不会自动记入余额。</p>
+              <h3 id="pay-cycle-setting-title">发薪周期</h3>
+              <p>发薪日用于划分周期；收入到账后仍需确认记账。</p>
             </div>
           </div>
           <form className="goal-setting-form" onSubmit={(event) => void savePayCycle(event)} noValidate>
@@ -325,8 +328,8 @@ export function SettingsDialog({
               />
               <span className="toggle-control" aria-hidden="true"><span /></span>
               <span>
-                <strong>打开工资周期规划</strong>
-                <small>打开应用即可看到工资进度和当前可再花金额</small>
+                <strong>打开发薪周期</strong>
+                <small>查看到发薪日的余额判断和每日可花金额</small>
               </span>
             </label>
             <div className="pay-cycle-fields">
@@ -347,25 +350,6 @@ export function SettingsDialog({
                     }}
                   />
                   <span>日</span>
-                </div>
-              </div>
-              <div className="field-group compact-field">
-                <label htmlFor="monthly-salary">每月工资</label>
-                <div className="signed-input">
-                  <span aria-hidden="true">¥</span>
-                  <input
-                    id="monthly-salary"
-                    value={salaryInput}
-                    inputMode="decimal"
-                    disabled={!payCycleEnabled}
-                    aria-invalid={Boolean(payCycleError)}
-                    aria-describedby={payCycleError ? "pay-cycle-error" : undefined}
-                    onChange={(event) => {
-                      setSalaryInput(event.target.value);
-                      setPayCycleError(undefined);
-                      setPayCycleStatus(undefined);
-                    }}
-                  />
                 </div>
               </div>
               <div className="field-group compact-field">
@@ -390,13 +374,28 @@ export function SettingsDialog({
               <div className="pay-cycle-actions">
                 <button type="submit" className="secondary-button" disabled={savingPayCycle}>
                   {savingPayCycle ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
-                  保存工资周期
+                  保存发薪周期
                 </button>
                 {payCycleError ? <p id="pay-cycle-error" className="field-error">{payCycleError}</p> : null}
               </div>
             </div>
           </form>
           {payCycleStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {payCycleStatus}</p> : null}
+          {settings?.payCycle ? (
+            <div className="income-setting-row">
+              <div>
+                <span><TrendingUp aria-hidden="true" /> 下次收入</span>
+                {settings?.incomeForecast ? (
+                  <strong>
+                    {readableDateKey(settings.incomeForecast.targetPaydayDateKey)} · 最低 {formatCny(settings.incomeForecast.minimumIncomeMinor)} · 预计 {formatCny(settings.incomeForecast.expectedIncomeMinor)}
+                  </strong>
+                ) : <strong>尚未填写</strong>}
+              </div>
+              <button type="button" className="secondary-button" onClick={onOpenIncomeForecast}>
+                {settings?.incomeForecast ? "修改收入预期" : "填写下次收入"}
+              </button>
+            </div>
+          ) : null}
         </section>
 
         <CloudSyncSection {...cloudSync} />
@@ -509,8 +508,10 @@ export function SettingsDialog({
                     <div><dt>截图</dt><dd>{prepared.preview.attachmentCount} 张</dd></div>
                     <div><dt>初始余额</dt><dd>{formatCny(prepared.preview.initialBalanceMinor)}</dd></div>
                     <div><dt>发薪日</dt><dd>{prepared.preview.payCycle ? `每月 ${prepared.preview.payCycle.paydayDay} 日` : "未设置"}</dd></div>
-                    <div><dt>每月工资</dt><dd>{prepared.preview.payCycle ? formatCny(prepared.preview.payCycle.monthlySalaryMinor) : "未设置"}</dd></div>
                     <div><dt>周期底线</dt><dd>{prepared.preview.payCycle ? formatCny(prepared.preview.payCycle.cycleEndBalanceGoalMinor) : prepared.preview.monthEndBalanceGoalMinor === undefined ? "未设置" : `${formatCny(prepared.preview.monthEndBalanceGoalMinor)}（旧版）`}</dd></div>
+                    <div><dt>收入目标日</dt><dd>{prepared.preview.incomeForecast?.targetPaydayDateKey ?? "未设置"}</dd></div>
+                    <div><dt>最低收入</dt><dd>{prepared.preview.incomeForecast ? formatCny(prepared.preview.incomeForecast.minimumIncomeMinor) : "未设置"}</dd></div>
+                    <div><dt>预计收入</dt><dd>{prepared.preview.incomeForecast ? formatCny(prepared.preview.incomeForecast.expectedIncomeMinor) : "未设置"}</dd></div>
                   </dl>
                   <p className="restore-warning">恢复会整体替换当前设备上的账目，且不能撤销。</p>
                   <button type="button" className="destructive-button" disabled={restoring} onClick={() => void confirmRestore()}>

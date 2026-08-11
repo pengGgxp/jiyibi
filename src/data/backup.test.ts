@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Attachment, EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
 import {
   BACKUP_FORMAT,
+  BACKUP_PAYLOAD_SCHEMA_VERSION,
   MAX_BACKUP_ATTACHMENTS,
   MAX_BACKUP_ATTACHMENT_BYTES,
   MAX_BACKUP_ENTRIES,
@@ -18,6 +19,7 @@ import {
   createEntry,
   getSettings,
   setInitialBalance,
+  setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
 } from "./database";
@@ -192,10 +194,16 @@ describe("encrypted backups", () => {
     await setInitialBalance(-500, source);
     const payCycle = {
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 123_456,
     };
-    await setPayCyclePlan(payCycle, source);
+    const planNow = new Date(2026, 6, 30, 10);
+    await setPayCyclePlan(payCycle, source, planNow);
+    const forecastSettings = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, source, planNow);
+    const incomeForecast = forecastSettings.incomeForecast;
     const active = await createEntry(draft(), source);
     const deleted = await createEntry({ ...draft(), note: "deleted" }, source);
     await source.entries.update(deleted.id, { deletedAt: "2026-07-30T09:00:00.000Z" });
@@ -216,6 +224,7 @@ describe("encrypted backups", () => {
       initialBalanceMinor: -500,
       monthEndBalanceGoalMinor: undefined,
       payCycle,
+      incomeForecast,
       currency: "CNY",
     });
 
@@ -229,6 +238,7 @@ describe("encrypted backups", () => {
     expect(await getSettings(target)).toMatchObject({
       initialBalanceMinor: -500,
       payCycle,
+      incomeForecast,
     });
   });
 
@@ -252,10 +262,54 @@ describe("encrypted backups", () => {
     expect(await getSettings(target)).not.toHaveProperty("monthEndBalanceGoalMinor");
   });
 
+  it("migrates a v1 monthly salary into a one-time expected income", async () => {
+    const backup = await createEncryptedBackup("legacy-income-password", source);
+    const legacyBackup = await rewriteEncryptedPayload(
+      backup,
+      "legacy-income-password",
+      (payload) => {
+        payload.schemaVersion = 1;
+        const settings = payload.settings as Record<string, unknown>;
+        settings.payCycle = {
+          paydayDay: 31,
+          monthlySalaryMinor: 800_000,
+          cycleEndBalanceGoalMinor: 100_000,
+        };
+        delete settings.incomeForecast;
+      },
+    );
+    const restoreNow = new Date(2026, 1, 28, 12);
+
+    const prepared = await decryptBackup(
+      legacyBackup,
+      "legacy-income-password",
+      restoreNow,
+    );
+    expect(prepared.preview).toMatchObject({
+      payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+      incomeForecast: {
+        id: "legacy-income-2026-02-28",
+        targetPaydayDateKey: "2026-02-28",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 800_000,
+      },
+    });
+    expect(prepared.preview.payCycle).not.toHaveProperty("monthlySalaryMinor");
+
+    await restorePreparedBackup(prepared, target);
+    expect(await getSettings(target)).toMatchObject({
+      payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+      incomeForecast: {
+        targetPaydayDateKey: "2026-02-28",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 800_000,
+      },
+    });
+  });
+
   it("rejects a backup with a partial pay-cycle plan", async () => {
     await setPayCyclePlan({
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 100_000,
     }, source);
     const backup = await createEncryptedBackup("partial-plan-password", source);
@@ -268,6 +322,32 @@ describe("encrypted backups", () => {
     );
 
     await expect(decryptBackup(partial, "partial-plan-password")).rejects.toMatchObject({
+      code: "invalid-payload",
+    });
+  });
+
+  it("rejects an income forecast id that cloud sync cannot store", async () => {
+    const planNow = new Date(2026, 6, 30, 10);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, source, planNow);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, source, planNow);
+    const backup = await createEncryptedBackup("invalid-forecast-id", source);
+    const invalid = await rewriteEncryptedPayload(
+      backup,
+      "invalid-forecast-id",
+      (payload) => {
+        const settings = payload.settings as Record<string, unknown>;
+        (settings.incomeForecast as Record<string, unknown>).id = "f".repeat(129);
+      },
+    );
+
+    await expect(decryptBackup(invalid, "invalid-forecast-id")).rejects.toMatchObject({
       code: "invalid-payload",
     });
   });
@@ -296,7 +376,7 @@ describe("encrypted backups", () => {
     const futureBackup = await rewriteEncryptedPayload(
       backup,
       "future-password",
-      (payload) => { payload.schemaVersion = 999; },
+      (payload) => { payload.schemaVersion = BACKUP_PAYLOAD_SCHEMA_VERSION + 997; },
     );
     await expect(decryptBackup(futureBackup, "future-password")).rejects.toMatchObject({
       code: "unsupported-version",

@@ -363,6 +363,69 @@ main {
   padding: 1.25rem 0 3rem;
 }
 
+main:focus {
+  outline: none;
+}
+
+.income-reminder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 0.8rem 0.9rem;
+  color: var(--ink-soft);
+  background: var(--warning-soft);
+  border: 1px solid #e2cf9c;
+  border-radius: 8px;
+}
+
+.income-reminder > div,
+.income-reminder > div > span,
+.income-reminder-actions {
+  display: flex;
+  align-items: center;
+}
+
+.income-reminder > div {
+  min-width: 0;
+  gap: 0.65rem;
+}
+
+.income-reminder > div > svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: 0 0 1.2rem;
+  color: #8b650f;
+}
+
+.income-reminder > div > span {
+  align-items: flex-start;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.12rem;
+}
+
+.income-reminder strong,
+.income-reminder small {
+  overflow-wrap: anywhere;
+}
+
+.income-reminder strong {
+  font-size: 0.84rem;
+}
+
+.income-reminder small {
+  color: var(--muted-strong);
+  font-size: 0.69rem;
+  line-height: 1.4;
+}
+
+.income-reminder-actions {
+  flex: 0 0 auto;
+  gap: 0.35rem;
+}
+
 .workspace-grid {
   display: grid;
   gap: 1rem;
@@ -1124,6 +1187,106 @@ input::placeholder {
   line-height: 1.45;
 }
 
+.summary-income-scenarios {
+  display: grid;
+  grid-column: 2;
+  gap: 0.45rem;
+  min-width: 0;
+  margin-top: 0.45rem;
+}
+
+.summary-income-scenario {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.1rem 0.45rem;
+  min-width: 0;
+  padding: 0.5rem 0.55rem;
+  background: rgb(238 247 242 / 0.08);
+  border: 1px solid rgb(232 243 237 / 0.12);
+  border-radius: 6px;
+}
+
+.summary-income-scenario > svg {
+  grid-row: 1 / span 2;
+  width: 0.95rem;
+  height: 0.95rem;
+  margin-top: 0.1rem;
+  color: #bfd0c7;
+}
+
+.summary-income-scenario > span {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.summary-income-scenario small,
+.summary-income-scenario strong,
+.summary-income-scenario p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.summary-income-scenario small {
+  color: #c9d8d1;
+  font-size: 0.64rem;
+}
+
+.summary-income-scenario strong {
+  color: #f4f9f6;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.summary-income-scenario p {
+  grid-column: 2;
+  color: #aebfb6;
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+.summary-income-scenario.summary-forecast--surplus > svg {
+  color: #a8e3c2;
+}
+
+.summary-income-scenario.summary-forecast--shortfall > svg {
+  color: #ffc0ba;
+}
+
+.summary-income-scenario.summary-forecast--exact > svg {
+  color: #f5d59b;
+}
+
+.summary-income-empty {
+  grid-column: 2;
+  min-width: 0;
+  margin-top: 0.35rem;
+}
+
+.summary-income-empty > p {
+  color: #aebfb6;
+  font-size: 0.64rem;
+}
+
+.summary-income-action {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  min-height: 2.75rem;
+  padding: 0;
+  color: #dce8e2;
+  background: transparent;
+  font-size: 0.72rem;
+  font-weight: 740;
+}
+
+.summary-income-action svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
 .summary-forecast--surplus > svg {
   color: #a8e3c2;
 }
@@ -1571,6 +1734,73 @@ input::placeholder {
   padding-top: 0.3rem;
 }
 
+.income-dialog-form,
+.income-dialog-fields {
+  display: grid;
+  gap: 1rem;
+}
+
+.income-dialog-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.income-target-date,
+.income-dialog-state {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.75rem 0.8rem;
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.income-target-date > svg,
+.income-dialog-state > svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: 0 0 1.15rem;
+  color: var(--brand);
+}
+
+.income-target-date small,
+.income-target-date strong {
+  display: block;
+}
+
+.income-target-date small {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.income-target-date strong {
+  margin-top: 0.15rem;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.income-dialog-fields > .field-help {
+  grid-column: 1 / -1;
+  margin: -0.25rem 0 0;
+}
+
+.income-actual-field {
+  max-width: 22rem;
+}
+
+.income-dialog-state {
+  align-items: flex-start;
+  color: var(--expense);
+  background: var(--expense-soft);
+  border-color: #e8c1bd;
+}
+
+.income-dialog-state p {
+  color: var(--muted-strong);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
 .inline-status,
 .success-status {
   gap: 0.45rem;
@@ -1981,6 +2211,52 @@ input::placeholder {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.65rem;
+}
+
+.income-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 0.8rem;
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.income-setting-row > div {
+  min-width: 0;
+}
+
+.income-setting-row span,
+.income-setting-row strong {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.income-setting-row span {
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.69rem;
+}
+
+.income-setting-row span svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.income-setting-row strong {
+  margin-top: 0.25rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.income-setting-row .secondary-button {
+  flex: 0 0 auto;
 }
 
 .setting-toggle {
@@ -2617,6 +2893,28 @@ input::placeholder {
 
   .update-banner > div {
     flex-direction: column-reverse;
+  }
+
+  .income-reminder,
+  .income-setting-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .income-reminder-actions {
+    justify-content: flex-end;
+  }
+
+  .income-dialog-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .income-dialog-fields > .field-help {
+    grid-column: auto;
+  }
+
+  .income-setting-row .secondary-button {
+    align-self: flex-start;
   }
 
   .modal-shell,

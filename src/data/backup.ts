@@ -1,4 +1,10 @@
-import type { AppSettings, Attachment, LedgerEntry, PayCyclePlan } from "../domain/types";
+import type {
+  AppSettings,
+  Attachment,
+  IncomeForecast,
+  LedgerEntry,
+  PayCyclePlan,
+} from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
@@ -6,17 +12,21 @@ import {
   type LedgerDatabase,
   type LedgerReplacement,
   ledgerDb,
+  migrateLegacyIncomeSettings,
   replaceLedgerData,
 } from "./database";
 
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 2 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
 export const MAX_BACKUP_ATTACHMENTS = 2_500;
 export const MAX_BACKUP_ATTACHMENT_BYTES = 40 * 1024 * 1024;
+
+const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MIN_ACCEPTED_ITERATIONS = 100_000;
 const MAX_ACCEPTED_ITERATIONS = 2_000_000;
 const SALT_BYTES = 16;
@@ -56,9 +66,26 @@ interface SerializedAttachment extends Omit<Attachment, "blob"> {
   dataBase64: string;
 }
 
+interface LegacyPayCyclePlan extends PayCyclePlan {
+  monthlySalaryMinor: number;
+}
+
+type LegacyAppSettings = Omit<AppSettings, "payCycle" | "incomeForecast"> & {
+  payCycle?: LegacyPayCyclePlan;
+};
+
 interface BackupPayloadV1 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof DATABASE_SCHEMA_VERSION;
+  exportedAt: string;
+  settings: LegacyAppSettings;
+  entries: LedgerEntry[];
+  attachments: SerializedAttachment[];
+}
+
+interface BackupPayloadV2 {
+  format: typeof BACKUP_PAYLOAD_FORMAT;
+  schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
   settings: AppSettings;
   entries: LedgerEntry[];
@@ -72,6 +99,7 @@ export interface BackupPreview {
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
+  incomeForecast?: IncomeForecast;
   currency: "CNY";
 }
 
@@ -274,17 +302,47 @@ function hasConsistentLocalDate(
   return localDateKey === expectedDateKey && localMonthKey === expectedDateKey.slice(0, 7);
 }
 
-function validatePayCycle(value: unknown): value is PayCyclePlan {
+function validatePayCycleBase(value: unknown): value is PayCyclePlan {
   return (
     isRecord(value) &&
     Number.isInteger(value.paydayDay) &&
     Number(value.paydayDay) >= 1 &&
     Number(value.paydayDay) <= 31 &&
-    Number.isSafeInteger(value.monthlySalaryMinor) &&
-    Number(value.monthlySalaryMinor) > 0 &&
-    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR &&
     Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
     Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function validatePayCycle(value: unknown): value is PayCyclePlan {
+  return (
+    validatePayCycleBase(value) &&
+    !Object.prototype.hasOwnProperty.call(value, "monthlySalaryMinor")
+  );
+}
+
+function validateLegacyPayCycle(value: unknown): value is LegacyPayCyclePlan {
+  return (
+    validatePayCycleBase(value) &&
+    isRecord(value) &&
+    Number.isSafeInteger(value.monthlySalaryMinor) &&
+    Number(value.monthlySalaryMinor) > 0 &&
+    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function validateIncomeForecast(value: unknown): value is IncomeForecast {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    SYNC_ID_PATTERN.test(value.id) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.minimumIncomeMinor) &&
+    Number(value.minimumIncomeMinor) >= 0 &&
+    Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.expectedIncomeMinor) &&
+    Number(value.expectedIncomeMinor) >= 0 &&
+    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor)
   );
 }
 
@@ -300,6 +358,25 @@ function validateSettings(value: unknown): value is AppSettings {
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
     (value.payCycle === undefined || validatePayCycle(value.payCycle)) &&
+    (value.incomeForecast === undefined ||
+      (value.payCycle !== undefined && validateIncomeForecast(value.incomeForecast))) &&
+    isIsoDate(value.updatedAt)
+  );
+}
+
+function validateLegacySettings(value: unknown): value is LegacyAppSettings {
+  return (
+    isRecord(value) &&
+    value.id === "primary" &&
+    value.currency === "CNY" &&
+    value.schemaVersion === DATABASE_SCHEMA_VERSION &&
+    Number.isSafeInteger(value.initialBalanceMinor) &&
+    Math.abs(Number(value.initialBalanceMinor)) <= MAX_AMOUNT_MINOR &&
+    (value.monthEndBalanceGoalMinor === undefined ||
+      (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
+        Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
+    (value.payCycle === undefined || validateLegacyPayCycle(value.payCycle)) &&
+    value.incomeForecast === undefined &&
     isIsoDate(value.updatedAt)
   );
 }
@@ -338,16 +415,22 @@ function validateEntry(value: unknown): value is LedgerEntry {
   );
 }
 
-function parsePayload(value: unknown): BackupPayloadV1 {
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
-  if (value.schemaVersion !== DATABASE_SCHEMA_VERSION) {
+  if (
+    value.schemaVersion !== DATABASE_SCHEMA_VERSION &&
+    value.schemaVersion !== BACKUP_PAYLOAD_SCHEMA_VERSION
+  ) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
   }
+  const settingsAreValid = value.schemaVersion === DATABASE_SCHEMA_VERSION
+    ? validateLegacySettings(value.settings)
+    : validateSettings(value.settings);
   if (
     !isIsoDate(value.exportedAt) ||
-    !validateSettings(value.settings) ||
+    !settingsAreValid ||
     !Array.isArray(value.entries) ||
     !Array.isArray(value.attachments)
   ) {
@@ -433,10 +516,17 @@ function parsePayload(value: unknown): BackupPayloadV1 {
     }
   }
 
-  return value as unknown as BackupPayloadV1;
+  const settings = value.schemaVersion === DATABASE_SCHEMA_VERSION
+    ? migrateLegacyIncomeSettings((value as unknown as BackupPayloadV1).settings, now)
+    : structuredClone(value.settings as AppSettings);
+  return {
+    ...value,
+    schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
+    settings,
+  } as unknown as BackupPayloadV2;
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV1> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV2> {
   const snapshot = await database.transaction(
     "r",
     database.settings,
@@ -500,7 +590,7 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
   }
   return {
     format: BACKUP_PAYLOAD_FORMAT,
-    schemaVersion: DATABASE_SCHEMA_VERSION,
+    schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
     exportedAt: now.toISOString(),
     settings: snapshot.settings,
     entries: snapshot.entries,
@@ -554,6 +644,7 @@ export async function createEncryptedBackup(
 export async function decryptBackup(
   source: Blob | string,
   password: string,
+  now = new Date(),
 ): Promise<PreparedBackup> {
   if (!password) throw new BackupError("请输入备份密码", "password-required");
   let envelope: BackupEnvelopeV1;
@@ -592,7 +683,7 @@ export async function decryptBackup(
   } catch (error) {
     throw new BackupError("备份内容已损坏", "invalid-payload", { cause: error });
   }
-  const payload = parsePayload(decoded);
+  const payload = parsePayload(decoded, now);
   const attachments: Attachment[] = payload.attachments.map((attachment) => {
     const bytes = base64ToBytes(attachment.dataBase64, "invalid-payload");
     if (bytes.length !== attachment.size) {
@@ -619,6 +710,9 @@ export async function decryptBackup(
       ...(payload.settings.payCycle
         ? { payCycle: structuredClone(payload.settings.payCycle) }
         : {}),
+      ...(payload.settings.incomeForecast
+        ? { incomeForecast: structuredClone(payload.settings.incomeForecast) }
+        : {}),
       currency: payload.settings.currency,
     },
     replacement: {
@@ -635,7 +729,7 @@ export async function restorePreparedBackup(
 ): Promise<void> {
   const payload = {
     format: BACKUP_PAYLOAD_FORMAT,
-    schemaVersion: DATABASE_SCHEMA_VERSION,
+    schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
     exportedAt: prepared.preview.exportedAt,
     settings: prepared.replacement.settings,
     entries: prepared.replacement.entries,
@@ -672,8 +766,9 @@ export async function restoreEncryptedBackup(
   source: Blob | string,
   password: string,
   database = ledgerDb,
+  now = new Date(),
 ): Promise<BackupPreview> {
-  const prepared = await decryptBackup(source, password);
+  const prepared = await decryptBackup(source, password, now);
   await restorePreparedBackup(prepared, database);
   return prepared.preview;
 }

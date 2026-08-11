@@ -45,24 +45,53 @@ export interface AppSettingsPayload {
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlanPayload;
+  incomeForecast?: IncomeForecastPayload;
   schemaVersion: 1;
   updatedAt: string;
 }
 
+/**
+ * v4 may expose a one-time migration hint when D1 still only has the legacy
+ * monthly salary. Clients claim it into a dated income forecast and never
+ * persist this field in the local domain model.
+ */
+export interface SyncAppSettingsPayload extends AppSettingsPayload {
+  _legacyMonthlySalaryMinor?: number;
+}
+
 export interface PayCyclePlanPayload {
   paydayDay: number;
-  monthlySalaryMinor: number;
   cycleEndBalanceGoalMinor: number;
 }
 
+export interface LegacyPayCyclePlanPayload extends PayCyclePlanPayload {
+  monthlySalaryMinor: number;
+}
+
+export interface IncomeForecastPayload {
+  id: string;
+  targetPaydayDateKey: string;
+  minimumIncomeMinor: number;
+  expectedIncomeMinor: number;
+}
+
+export interface LegacyAppSettingsPayload
+  extends Omit<AppSettingsPayload, "payCycle" | "incomeForecast"> {
+  payCycle?: LegacyPayCyclePlanPayload;
+}
+
 export interface SettingsMutationPayload
-  extends Omit<AppSettingsPayload, "monthEndBalanceGoalMinor" | "payCycle"> {
+  extends Omit<
+    AppSettingsPayload,
+    "monthEndBalanceGoalMinor" | "payCycle" | "incomeForecast"
+  > {
   monthEndBalanceGoalMinor?: number | null;
-  payCycle?: PayCyclePlanPayload | null;
+  payCycle?: PayCyclePlanPayload | LegacyPayCyclePlanPayload | null;
+  incomeForecast?: IncomeForecastPayload | null;
 }
 
 export type SyncEntityType = "entry" | "settings";
-export type SyncProtocolVersion = 1 | 2 | 3;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4;
 
 interface SyncMutationBase {
   id: string;
@@ -85,7 +114,7 @@ export interface RemoteChange {
   entityType: SyncEntityType;
   entityId: string;
   version: number;
-  payload: LedgerEntryPayload | AppSettingsPayload;
+  payload: LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload;
 }
 
 export type MutationResult =

@@ -158,6 +158,64 @@
   font-variant-numeric: tabular-nums;
 }
 
+.analysis-income-basis {
+  margin-top: 0.45rem !important;
+}
+
+.analysis-income-scenarios {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
+.analysis-income-scenarios > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.2rem 0.75rem;
+  min-width: 0;
+  padding: 0.65rem 0.7rem;
+  background: rgb(238 247 242 / 0.08);
+  border: 1px solid rgb(232 243 237 / 0.13);
+  border-radius: 6px;
+}
+
+.analysis-income-scenarios span {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #c9d8d1;
+  font-size: 0.69rem;
+}
+
+.analysis-income-scenarios span svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 0.9rem;
+}
+
+.analysis-income-scenarios strong {
+  overflow-wrap: anywhere;
+  color: #f4f9f6;
+  font-size: 0.75rem;
+  text-align: right;
+}
+
+.analysis-income-scenarios p {
+  grid-column: 1 / -1;
+  min-height: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #aebfb6;
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.analysis-income-action {
+  margin-top: 0.75rem;
+}
+
 .analysis-verdict--surplus .analysis-verdict-label {
   color: #a8e3c2;
 }
@@ -347,11 +405,6 @@
 .analysis-chart-key-line--predicted {
   border-top-style: dashed;
   border-top-color: var(--expense);
-}
-
-.analysis-chart-key-line--salary {
-  border-top-style: dotted;
-  border-top-color: var(--brand);
 }
 
 .analysis-chart-key-line--expense {
@@ -621,6 +674,14 @@
 
   .analysis-verdict > p {
     min-height: 0;
+  }
+
+  .analysis-income-scenarios > div {
+    grid-template-columns: 1fr;
+  }
+
+  .analysis-income-scenarios strong {
+    text-align: left;
   }
 
   .analysis-metric {

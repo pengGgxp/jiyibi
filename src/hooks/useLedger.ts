@@ -116,6 +116,7 @@ export function useLedger(): LedgerState {
           snapshot.entries,
           summary.balanceMinor,
           plan,
+          snapshot.settings.incomeForecast,
           new Date(year, month - 1, day, 12),
         ),
       };

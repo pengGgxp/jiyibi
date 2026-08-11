@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
 import {
+  clearIncomeForecast,
   LedgerDatabase,
   createEntry,
   linkSyncAccount,
   resolveSyncConflict,
+  setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
 } from "../data/database";
@@ -193,7 +195,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 3,
+      schemaVersion: 4,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
@@ -205,7 +207,6 @@ describe("sync engine", () => {
     await linkSyncAccount(session(), true, database);
     await setPayCyclePlan({
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 100_000,
     }, database);
     await setPayCyclePlan(undefined, database);
@@ -217,21 +218,56 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 3,
+      schemaVersion: 4,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
           monthEndBalanceGoalMinor: null,
           payCycle: null,
+          incomeForecast: null,
         }),
       })],
     }), 1);
   });
 
-  it("refreshes settings once when a linked database upgrades to sync v3", async () => {
+  it("sends an explicit null when the user clears only the next income forecast", async () => {
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 100_000,
+    }, database, new Date(2026, 7, 1));
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
+    }, database, new Date(2026, 7, 1));
+    await clearIncomeForecast(database, new Date(2026, 7, 2));
+    const queued = (await database.syncOutbox.get("settings:primary"))!;
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 4,
+      mutations: [expect.objectContaining({
+        entityType: "settings",
+        payload: expect.objectContaining({
+          payCycle: {
+            paydayDay: 10,
+            cycleEndBalanceGoalMinor: 100_000,
+          },
+          incomeForecast: null,
+        }),
+      })],
+    }), 1);
+  });
+
+  it("refreshes settings once when a linked database upgrades from sync v3 to v4", async () => {
     await linkSyncAccount(session(), false, database);
     const legacyState = (await database.syncState.get("primary"))!;
-    delete legacyState.syncProtocolVersion;
+    legacyState.syncProtocolVersion = 3;
     legacyState.cursor = "9";
     await database.syncState.put(legacyState);
     await database.entitySyncState.put({
@@ -246,8 +282,13 @@ describe("sync engine", () => {
       ...(await database.settings.get("primary"))!,
       payCycle: {
         paydayDay: 10,
-        monthlySalaryMinor: 800_000,
         cycleEndBalanceGoalMinor: 25_000,
+      },
+      incomeForecast: {
+        id: "forecast-remote",
+        targetPaydayDateKey: "2026-09-10",
+        minimumIncomeMinor: 500_000,
+        expectedIncomeMinor: 800_000,
       },
       updatedAt: "2026-08-10T01:00:00.000Z",
     };
@@ -265,22 +306,100 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 3,
+      schemaVersion: 4,
       cursor: "0",
       mutations: [],
     }), 1);
     expect((await database.settings.get("primary"))?.payCycle).toMatchObject({
       paydayDay: 10,
-      monthlySalaryMinor: 800_000,
       cycleEndBalanceGoalMinor: 25_000,
+    });
+    expect((await database.settings.get("primary"))?.incomeForecast).toMatchObject({
+      targetPaydayDateKey: "2026-09-10",
+      minimumIncomeMinor: 500_000,
+      expectedIncomeMinor: 800_000,
     });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 3,
+      syncProtocolVersion: 4,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",
     );
+  });
+
+  it("claims a legacy salary during the v4 refresh and writes it back on the next round", async () => {
+    await linkSyncAccount(session(), true, database);
+    const legacyState = (await database.syncState.get("primary"))!;
+    legacyState.syncProtocolVersion = 3;
+    legacyState.cursor = "8";
+    await database.syncState.put(legacyState);
+    await database.entitySyncState.put({
+      id: "settings:primary",
+      entityType: "settings",
+      entityId: "primary",
+      serverVersion: 1,
+      status: "clean",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    });
+    const remoteSettings = {
+      ...(await database.settings.get("primary"))!,
+      payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 25_000 },
+      incomeForecast: {
+        id: "legacy-income-2026-08-10",
+        targetPaydayDateKey: "2026-08-10",
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 700_000,
+      },
+      updatedAt: "2026-08-09T01:00:00.000Z",
+    };
+    const api = apiClient(emptyResponse());
+    vi.mocked(api.sync).mockImplementation(async (request) => {
+      if (request.mutations.length === 0) {
+        return emptyResponse({
+          changes: [{
+            seq: "9",
+            entityType: "settings",
+            entityId: "primary",
+            version: 2,
+            payload: remoteSettings,
+            claimLegacyIncomeForecast: true,
+          }],
+          nextCursor: "9",
+        });
+      }
+      return emptyResponse({
+        results: request.mutations.map((mutation) => ({
+          id: mutation.id,
+          status: "applied" as const,
+          version: 3,
+        })),
+        nextCursor: "9",
+      });
+    });
+
+    await syncNow(database, api);
+
+    const requests = vi.mocked(api.sync).mock.calls.map(([request]) => request);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ cursor: "0", mutations: [] });
+    expect(requests[1].mutations[0]).toMatchObject({
+      entityType: "settings",
+      baseVersion: 2,
+      payload: {
+        payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 25_000 },
+        incomeForecast: {
+          targetPaydayDateKey: "2026-08-10",
+          minimumIncomeMinor: 0,
+          expectedIncomeMinor: 700_000,
+        },
+      },
+    });
+    expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
+    expect(await database.syncState.get("primary")).toMatchObject({
+      cursor: "9",
+      syncProtocolVersion: 4,
+    });
   });
 
   it("caches a conflicting cloud screenshot so using the cloud version is complete", async () => {

@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppSettings, PayCyclePlan, SpendingAnalysis } from "../domain";
+import type { AppSettings, IncomeForecast, PayCyclePlan, SpendingAnalysis } from "../domain";
 import { AnalysisView } from "./AnalysisView";
 
 vi.mock("recharts", () => {
@@ -30,8 +30,14 @@ vi.mock("recharts", () => {
 
 const plan: PayCyclePlan = {
   paydayDay: 10,
-  monthlySalaryMinor: 800_000,
   cycleEndBalanceGoalMinor: 100_000,
+};
+
+const incomeForecast: IncomeForecast = {
+  id: "forecast-1",
+  targetPaydayDateKey: "2026-09-10",
+  minimumIncomeMinor: 600_000,
+  expectedIncomeMinor: 800_000,
 };
 
 const settings: AppSettings = {
@@ -39,6 +45,7 @@ const settings: AppSettings = {
   currency: "CNY",
   initialBalanceMinor: 0,
   payCycle: plan,
+  incomeForecast,
   schemaVersion: 1,
   updatedAt: "2026-08-10T00:00:00.000Z",
 };
@@ -54,9 +61,17 @@ function analysis(
     affordability: outcome,
   };
   const nextPrediction = confidence === "insufficient" ? {} : {
-    estimatedExpenseMinor: outcome === "shortfall" ? 850_000 : outcome === "exact" ? 800_000 : 650_000,
-    salaryDifferenceMinor: outcome === "shortfall" ? -50_000n : outcome === "exact" ? 0n : 150_000n,
-    affordability: outcome,
+    referenceSpendMinor: 700_000,
+    minimumIncomeScenario: {
+      incomeMinor: incomeForecast.minimumIncomeMinor,
+      differenceMinor: -100_000n,
+      affordability: "shortfall" as const,
+    },
+    expectedIncomeScenario: {
+      incomeMinor: incomeForecast.expectedIncomeMinor,
+      differenceMinor: 100_000n,
+      affordability: "surplus" as const,
+    },
   };
   const observedDays = confidence === "ready" ? 30 : confidence === "preliminary" ? 20 : 5;
 
@@ -71,7 +86,6 @@ function analysis(
       totalExpenseMinor: 300_000,
       averageDailyExpenseMinor: 10_000,
     },
-    salaryReferenceMinor: plan.monthlySalaryMinor,
     cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
     currentCycle: {
       cycleStartDateKey: "2026-08-10",
@@ -80,7 +94,6 @@ function analysis(
       daysUntilPayday: 21,
       actualExpenseMinor: 200_000,
       balanceHeadroomMinor: 500_000n,
-      salaryRemainingMinor: 600_000n,
       safeToSpendMinor: 500_000n,
       dailySafeToSpendMinor: 23_809n,
       ...prediction,
@@ -148,6 +161,7 @@ async function renderView({
   const root = createRoot(host);
   mountedRoots.push(root);
   const onOpenSettings = vi.fn();
+  const onOpenIncomeForecast = vi.fn();
   const onOpenLedger = vi.fn();
   await act(async () => {
     root.render(
@@ -158,11 +172,12 @@ async function renderView({
         entryCount={entryCount}
         error={error}
         onOpenSettings={onOpenSettings}
+        onOpenIncomeForecast={onOpenIncomeForecast}
         onOpenLedger={onOpenLedger}
       />,
     );
   });
-  return { host, onOpenSettings, onOpenLedger };
+  return { host, onOpenSettings, onOpenIncomeForecast, onOpenLedger };
 }
 
 describe("AnalysisView states", () => {
@@ -171,9 +186,9 @@ describe("AnalysisView states", () => {
       appSettings: { ...settings, payCycle: undefined },
     });
 
-    expect(host.textContent).toContain("先设置工资周期");
-    expect(host.textContent).toContain("需要发薪日、月工资和周期底线。");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置工资周期"));
+    expect(host.textContent).toContain("先设置发薪周期");
+    expect(host.textContent).toContain("需要发薪日和周期底线。");
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置发薪周期"));
     await act(async () => button?.click());
     expect(onOpenSettings).toHaveBeenCalledOnce();
   });
@@ -220,7 +235,7 @@ describe("AnalysisView states", () => {
     expect(host.textContent).toContain("还差 9 个完整日");
     expect(host.textContent).toContain("满 14 个完整日后开始估算");
     expect(host.textContent).toContain("暂不预测周期末余额");
-    expect(host.textContent).toContain("暂不预测下个工资周期");
+    expect(host.textContent).toContain("数据不足，暂不判断");
     expect(host.textContent).not.toContain("统计口径：");
     expect(host.textContent).not.toContain("保守估算");
     expect(host.textContent).not.toContain("预计够用");
@@ -263,14 +278,30 @@ describe("AnalysisView forecasts and charts", () => {
     expect(host.textContent).toContain(difference);
   });
 
-  it.each([
-    ["surplus", "月工资预计剩 ¥1,500.00"],
-    ["shortfall", "月工资预计少 ¥500.00"],
-    ["exact", "刚好等于月工资"],
-  ] as const)("renders the next-cycle %s wording", async (outcome, detail) => {
-    const { host } = await renderView({ result: analysis("ready", outcome) });
+  it("renders minimum and expected income as separate scenarios", async () => {
+    const { host } = await renderView({ result: analysis("ready") });
 
-    expect(host.textContent).toContain(detail);
+    expect(host.textContent).toContain("最低收入 ¥6,000.00");
+    expect(host.textContent).toContain("按当前花法还差 ¥1,000.00");
+    expect(host.textContent).toContain("预计收入 ¥8,000.00");
+    expect(host.textContent).toContain("按当前花法可多 ¥1,000.00");
+    expect(host.textContent).toContain("最低收入差额−¥1,000.00");
+    expect(host.textContent).toContain("预计收入差额+¥1,000.00");
+    expect(host.textContent).not.toContain("月工资");
+  });
+
+  it("keeps the analysis visible when the next income forecast is missing", async () => {
+    const { host, onOpenIncomeForecast } = await renderView({
+      result: analysis("ready"),
+      appSettings: { ...settings, incomeForecast: undefined },
+    });
+
+    expect(host.textContent).toContain("预计周期末余额");
+    expect(host.textContent).toContain("当前周期累计支出");
+    const button = Array.from(host.querySelectorAll("button"))
+      .find((item) => item.textContent?.includes("填写下次收入"));
+    await act(async () => button?.click());
+    expect(onOpenIncomeForecast).toHaveBeenCalledOnce();
   });
 
   it("renders three chart explanations and semantic data tables", async () => {
@@ -319,17 +350,14 @@ describe("AnalysisView forecasts and charts", () => {
     expect(host.textContent).not.toContain("记录完整日后显示");
   });
 
-  it("uses solid actuals, dashed predictions and a named salary reference", async () => {
+  it("uses solid actuals and dashed predictions without a fixed-income reference", async () => {
     const { host } = await renderView({ result: analysis() });
 
     expect(host.querySelector('[data-chart-series="实际支出"]')?.getAttribute("data-line-style")).toBe("solid");
     expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
-    expect(host.querySelectorAll('[data-reference-line="当前月工资"]')).toHaveLength(2);
-    expect(Array.from(host.querySelectorAll('[data-reference-line="当前月工资"]')).every(
-      (line) => line.getAttribute("data-if-overflow") === "extendDomain",
-    )).toBe(true);
+    expect(host.querySelectorAll("[data-reference-line]")).toHaveLength(0);
     expect(host.textContent).toContain("实际支出");
     expect(host.textContent).toContain("预测支出");
-    expect(host.textContent).toContain("当前月工资");
+    expect(host.textContent).not.toContain("当前月工资");
   });
 });

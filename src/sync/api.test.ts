@@ -71,8 +71,13 @@ function syncResponse(): SyncResponse {
           monthEndBalanceGoalMinor: 25_000,
           payCycle: {
             paydayDay: 10,
-            monthlySalaryMinor: 800_000,
             cycleEndBalanceGoalMinor: 100_000,
+          },
+          incomeForecast: {
+            id: "forecast-2026-08-10",
+            targetPaydayDateKey: "2026-08-10",
+            minimumIncomeMinor: 600_000,
+            expectedIncomeMinor: 800_000,
           },
           schemaVersion: 1,
           updatedAt: "2026-07-30T05:00:00.000Z",
@@ -302,6 +307,7 @@ describe("sync API client", () => {
     if (settings.entityType !== "settings") throw new Error("Expected settings change");
     delete settings.payload.monthEndBalanceGoalMinor;
     delete settings.payload.payCycle;
+    delete settings.payload.incomeForecast;
     const fetcher = mockFetch(jsonResponse(response));
 
     await expect(createSyncApiClient(fetcher).sync({
@@ -310,6 +316,61 @@ describe("sync API client", () => {
       mutations: [],
     }, 3)).resolves.toEqual(response);
   });
+
+  it("normalizes a legacy salary hint into a dated one-time income forecast", async () => {
+    const response = syncResponse() as unknown as Record<string, unknown>;
+    response.results = [];
+    const changes = response.changes as Array<Record<string, unknown>>;
+    const settings = changes[1].payload as Record<string, unknown>;
+    delete settings.incomeForecast;
+    settings._legacyMonthlySalaryMinor = 700_000;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    const result = await createSyncApiClient(
+      fetcher,
+      undefined,
+      () => new Date(2026, 7, 9, 12),
+    ).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3);
+
+    const settingsChange = result.changes[1];
+    expect(settingsChange).toMatchObject({
+      entityType: "settings",
+      claimLegacyIncomeForecast: true,
+      payload: {
+        payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 100_000 },
+        incomeForecast: {
+          id: "legacy-income-2026-08-10",
+          targetPaydayDateKey: "2026-08-10",
+          minimumIncomeMinor: 0,
+          expectedIncomeMinor: 700_000,
+        },
+      },
+    });
+    expect(settingsChange.payload).not.toHaveProperty("_legacyMonthlySalaryMinor");
+  });
+
+  it.each([0, 1.5, 9_000_000_000_000_001])(
+    "rejects an invalid legacy salary hint: %s",
+    async (legacySalary) => {
+      const response = syncResponse() as unknown as Record<string, unknown>;
+      response.results = [];
+      const changes = response.changes as Array<Record<string, unknown>>;
+      const settings = changes[1].payload as Record<string, unknown>;
+      delete settings.incomeForecast;
+      settings._legacyMonthlySalaryMinor = legacySalary;
+      const fetcher = mockFetch(jsonResponse(response));
+
+      await expect(createSyncApiClient(fetcher).sync({
+        schemaVersion: SYNC_SCHEMA_VERSION,
+        cursor: "0",
+        mutations: [],
+      }, 3)).rejects.toMatchObject({ code: "invalid-response" });
+    },
+  );
 
   it("sends and receives planning settings without changing integer values", async () => {
     const settingsChange = syncResponse().changes[1];
@@ -341,8 +402,12 @@ describe("sync API client", () => {
         monthEndBalanceGoalMinor: 25_000,
         payCycle: {
           paydayDay: 10,
-          monthlySalaryMinor: 800_000,
           cycleEndBalanceGoalMinor: 100_000,
+        },
+        incomeForecast: {
+          targetPaydayDateKey: "2026-08-10",
+          minimumIncomeMinor: 600_000,
+          expectedIncomeMinor: 800_000,
         },
       } }],
     });
@@ -350,15 +415,61 @@ describe("sync API client", () => {
 
   it.each([
     null,
-    { paydayDay: 0, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, monthlySalaryMinor: 0, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 1.5 },
-    { paydayDay: 10, monthlySalaryMinor: 1 },
+    { paydayDay: 0, cycleEndBalanceGoalMinor: 0 },
+    { paydayDay: 10, cycleEndBalanceGoalMinor: 1.5 },
+    { paydayDay: 10 },
+    { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
   ])("rejects an invalid pay cycle in a settings change: %o", async (payCycle) => {
     const response = syncResponse() as unknown as Record<string, unknown>;
     const changes = response.changes as Array<Record<string, unknown>>;
     const settings = changes[1].payload as Record<string, unknown>;
     settings.payCycle = payCycle;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).rejects.toMatchObject({ code: "invalid-response" });
+  });
+
+  it.each([
+    null,
+    {
+      id: "forecast-1",
+      targetPaydayDateKey: "2026-02-30",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast-1",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 3,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast-1",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: -1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "forecast with spaces",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+    {
+      id: "f".repeat(129),
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 1,
+      expectedIncomeMinor: 2,
+    },
+  ])("rejects an invalid income forecast in a settings change: %o", async (forecast) => {
+    const response = syncResponse() as unknown as Record<string, unknown>;
+    const changes = response.changes as Array<Record<string, unknown>>;
+    const settings = changes[1].payload as Record<string, unknown>;
+    settings.incomeForecast = forecast;
     const fetcher = mockFetch(jsonResponse(response));
 
     await expect(createSyncApiClient(fetcher).sync({

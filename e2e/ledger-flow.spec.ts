@@ -33,48 +33,73 @@ test("编辑、初始余额和删除撤销会准确重算", async ({ page }, tes
   await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥92.00");
 });
 
-test("工资周期配置后会开启资金分析", async ({ page }) => {
+test("发薪周期和双收入场景可设置，并在发薪日确认实际收入", async ({ page }) => {
   await openLedger(page);
 
-  await page.getByRole("button", { name: "设置工资周期" }).click();
+  await page.getByRole("button", { name: "设置发薪周期" }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
-  const planToggle = settings.getByRole("switch", { name: /打开工资周期规划/ });
+  const planToggle = settings.getByRole("switch", { name: /打开发薪周期/ });
   const payday = settings.locator("#payday-day");
-  const salary = settings.locator("#monthly-salary");
   const goalAmount = settings.locator("#cycle-end-balance-goal");
+  const todayDay = await page.evaluate(() => new Date().getDate());
 
   await expect(planToggle).not.toBeChecked();
   await expect(payday).toBeDisabled();
-  await expect(salary).toBeDisabled();
   await expect(goalAmount).toBeDisabled();
   await planToggle.check();
-  await settings.getByRole("button", { name: "保存工资周期" }).click();
-  await expect(settings.getByText("工资和底线请输入有效金额，最多保留两位小数"))
+  await goalAmount.fill("100.001");
+  await settings.getByRole("button", { name: "保存发薪周期" }).click();
+  await expect(settings.getByText("周期底线请输入有效金额，最多保留两位小数"))
     .toBeVisible();
-  await payday.fill("10");
-  await salary.fill("1000.00");
+  await payday.fill(String(todayDay));
   await goalAmount.fill("100.00");
-  await settings.getByRole("button", { name: "保存工资周期" }).click();
-  await expect(settings.getByText("工资周期已更新", { exact: true })).toBeVisible();
-  await settings.getByRole("button", { name: "关闭设置" }).click();
+  await settings.getByRole("button", { name: "保存发薪周期" }).click();
+  await expect(settings.getByText("发薪周期已更新", { exact: true })).toBeVisible();
+  await settings.getByRole("button", { name: "填写下次收入" }).click();
+
+  const forecastDialog = page.getByRole("dialog", { name: "填写下次收入" });
+  await expect(forecastDialog).toBeVisible();
+  await forecastDialog.getByLabel("最低收入").fill("1200.00");
+  await forecastDialog.getByLabel("预计收入").fill("1000.00");
+  await forecastDialog.getByRole("button", { name: "保存收入预期" }).click();
+  await expect(forecastDialog.getByText("最低收入不能高于预计收入", { exact: true }))
+    .toBeVisible();
+  await forecastDialog.getByLabel("最低收入").fill("600.00");
+  await forecastDialog.getByRole("button", { name: "保存收入预期" }).click();
+  await expect(forecastDialog).toBeHidden();
+  await expect(page.getByText("下次收入预期已保存", { exact: true })).toBeVisible();
 
   const outlook = page.locator(".summary-panel");
   await expect(outlook).toContainText("到发薪日");
   await expect(outlook).toContainText("下个工资周期");
+  await expect(outlook).toContainText("最低收入 ¥600.00");
+  await expect(outlook).toContainText("预计收入 ¥1,000.00");
   await expect(outlook).toContainText("暂不判断");
   await expect(outlook).toContainText("每日可花");
+  const reminder = page.locator(".income-reminder");
+  await expect(reminder).toContainText("今天是发薪日，记一下实际收入");
   expect(await page.evaluate(() => (
     document.documentElement.scrollWidth <= document.documentElement.clientWidth
   ))).toBe(true);
 
+  await reminder.getByRole("button", { name: "填写实际收入" }).click();
+  const actualDialog = page.getByRole("dialog", { name: "填写实际收入" });
+  await expect(actualDialog.getByLabel("实际到账总额")).toHaveValue("1000.00");
+  await actualDialog.getByRole("button", { name: "记入实际收入" }).click();
+  await expect(actualDialog).toBeHidden();
+  await expect(page.getByText("本次实际收入", { exact: true })).toBeVisible();
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥1,000.00");
+  await expect(reminder).toHaveCount(0);
+  await expect(outlook.getByRole("button", { name: /填写下次收入/ })).toBeVisible();
+
   await page.getByRole("link", { name: "查看详细分析" }).click();
   await expect(page).toHaveURL(/#analysis$/);
   await expect(page.getByRole("heading", { level: 2, name: "够不够花" })).toBeVisible();
-  await expect(page.getByText("还没有支出记录")).toBeVisible();
+  await expect(page.getByText("还差 14 个完整日", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "记账" }).click();
 
   await addTextEntry(page, { amount: "40.00", note: "目标测试收入", kind: "income" });
-  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥40.00");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥1,040.00");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { level: 1, name: "记一笔" })).toBeVisible();

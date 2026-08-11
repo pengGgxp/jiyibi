@@ -1,5 +1,12 @@
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
-import type { AppSettings, Attachment, LedgerEntry, PayCyclePlan } from "../domain/types";
+import { resolveNextPaydayDateKey } from "../domain/date";
+import type {
+  AppSettings,
+  Attachment,
+  IncomeForecast,
+  LedgerEntry,
+  PayCyclePlan,
+} from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
   API_SCHEMA_VERSION,
@@ -11,6 +18,10 @@ import {
   type SyncRequest,
   type SyncResponse,
 } from "./contracts";
+
+type SyncSettingsResponsePayload = AppSettings & {
+  _legacyMonthlySalaryMinor?: number;
+};
 
 export type SyncApiErrorCode =
   | "unauthorized"
@@ -84,6 +95,7 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 const MAX_CLOUD_GENERATION = 9_000_000_000_000_000;
+const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function isCloudGeneration(value: unknown, allowZero = true): value is number {
   return (
@@ -171,13 +183,18 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
   return hasConsistentLocalDate(value as unknown as LedgerEntry);
 }
 
-function isAppSettings(value: unknown): value is AppSettings {
+function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
   return (
     isRecord(value) &&
     hasExactKeys(
       value,
       ["id", "currency", "initialBalanceMinor", "schemaVersion", "updatedAt"],
-      ["monthEndBalanceGoalMinor", "payCycle"],
+      [
+        "monthEndBalanceGoalMinor",
+        "payCycle",
+        "incomeForecast",
+        "_legacyMonthlySalaryMinor",
+      ],
     ) &&
     value.id === "primary" &&
     value.currency === "CNY" &&
@@ -187,6 +204,15 @@ function isAppSettings(value: unknown): value is AppSettings {
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
     (value.payCycle === undefined || isPayCyclePlan(value.payCycle)) &&
+    (value.incomeForecast === undefined ||
+      (value.payCycle !== undefined && isIncomeForecast(value.incomeForecast))) &&
+    (value._legacyMonthlySalaryMinor === undefined || (
+      Number.isSafeInteger(value._legacyMonthlySalaryMinor) &&
+      Number(value._legacyMonthlySalaryMinor) > 0 &&
+      Number(value._legacyMonthlySalaryMinor) <= MAX_AMOUNT_MINOR &&
+      value.payCycle !== undefined &&
+      value.incomeForecast === undefined
+    )) &&
     value.schemaVersion === 1 &&
     isIsoDate(value.updatedAt)
   );
@@ -195,15 +221,34 @@ function isAppSettings(value: unknown): value is AppSettings {
 function isPayCyclePlan(value: unknown): value is PayCyclePlan {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ["paydayDay", "monthlySalaryMinor", "cycleEndBalanceGoalMinor"]) &&
+    hasExactKeys(value, ["paydayDay", "cycleEndBalanceGoalMinor"]) &&
     Number.isInteger(value.paydayDay) &&
     Number(value.paydayDay) >= 1 &&
     Number(value.paydayDay) <= 31 &&
-    Number.isSafeInteger(value.monthlySalaryMinor) &&
-    Number(value.monthlySalaryMinor) > 0 &&
-    Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR &&
     Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
     Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function isIncomeForecast(value: unknown): value is IncomeForecast {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, [
+      "id",
+      "targetPaydayDateKey",
+      "minimumIncomeMinor",
+      "expectedIncomeMinor",
+    ]) &&
+    typeof value.id === "string" &&
+    SYNC_ID_PATTERN.test(value.id) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.minimumIncomeMinor) &&
+    Number(value.minimumIncomeMinor) >= 0 &&
+    Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.expectedIncomeMinor) &&
+    Number(value.expectedIncomeMinor) >= 0 &&
+    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor)
   );
 }
 
@@ -331,6 +376,40 @@ function isSyncResponse(value: unknown): value is SyncResponse {
     typeof value.nextCursor === "string" &&
     typeof value.hasMore === "boolean"
   );
+}
+
+function normalizeLegacyIncomeChange(change: SyncChange, now: Date): SyncChange {
+  if (change.entityType !== "settings") return change;
+  const raw = change.payload as SyncSettingsResponsePayload;
+  const legacySalary = raw._legacyMonthlySalaryMinor;
+  if (legacySalary === undefined) return change;
+
+  const settings = { ...raw };
+  delete settings._legacyMonthlySalaryMinor;
+  const targetPaydayDateKey = resolveNextPaydayDateKey(settings.payCycle!.paydayDay, now);
+  return {
+    ...change,
+    payload: {
+      ...settings,
+      incomeForecast: {
+        id: `legacy-income-${targetPaydayDateKey}`,
+        targetPaydayDateKey,
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: legacySalary,
+      },
+    },
+    claimLegacyIncomeForecast: true,
+  };
+}
+
+function normalizeLegacyIncomeResponse(response: SyncResponse, now: Date): SyncResponse {
+  return {
+    ...response,
+    results: response.results.map((result) => result.status === "conflict"
+      ? { ...result, remote: normalizeLegacyIncomeChange(result.remote, now) }
+      : result),
+    changes: response.changes.map((change) => normalizeLegacyIncomeChange(change, now)),
+  };
 }
 
 function validateSyncResponseForRequest(
@@ -509,6 +588,7 @@ async function request(
 export function createSyncApiClient(
   fetcher: SyncFetch = globalThis.fetch.bind(globalThis),
   wait: SyncWait = waitForRetry,
+  now: () => Date = () => new Date(),
 ): SyncApiClient {
   return {
     async getSession() {
@@ -580,10 +660,10 @@ export function createSyncApiClient(
         },
         body: JSON.stringify(syncRequest),
       });
-      return validateSyncResponseForRequest(
+      return validateSyncResponseForRequest(normalizeLegacyIncomeResponse(
         await parseJsonResponse(response, isSyncResponse),
-        syncRequest,
-      );
+        now(),
+      ), syncRequest);
     },
 
     async putAttachment(attachment, expectedGeneration) {

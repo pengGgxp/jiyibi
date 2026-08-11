@@ -3,6 +3,7 @@ import {
   currentLocalDateKey,
   localCalendarDayDifference,
   localDateFromKey,
+  resolveNextPaydayDateKey,
   resolvePayCycleRange,
 } from "./date";
 import type {
@@ -12,6 +13,8 @@ import type {
   DailyExpensePoint,
   ForecastConfidence,
   ForecastOutcome,
+  IncomeForecast,
+  IncomeScenarioAnalysis,
   LedgerEntry,
   LedgerSummary,
   PayCyclePlan,
@@ -64,12 +67,35 @@ function assertAnalysisInputs(balanceMinor: number, plan: PayCyclePlan): void {
     !Number.isInteger(plan.paydayDay) ||
     plan.paydayDay < 1 ||
     plan.paydayDay > 31 ||
-    !Number.isSafeInteger(plan.monthlySalaryMinor) ||
-    plan.monthlySalaryMinor <= 0 ||
     !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
   ) {
     throw new RangeError("分析金额和工资周期必须使用有效的整数分");
   }
+}
+
+function assertIncomeForecast(forecast: IncomeForecast): void {
+  localDateFromKey(forecast.targetPaydayDateKey);
+  if (
+    forecast.id.trim().length === 0 ||
+    !Number.isSafeInteger(forecast.minimumIncomeMinor) ||
+    forecast.minimumIncomeMinor < 0 ||
+    !Number.isSafeInteger(forecast.expectedIncomeMinor) ||
+    forecast.expectedIncomeMinor < forecast.minimumIncomeMinor
+  ) {
+    throw new RangeError("收入预期必须使用有效的非负整数分，且最低收入不能高于预计收入");
+  }
+}
+
+function incomeScenario(
+  incomeMinor: number,
+  referenceSpendMinor: number,
+): IncomeScenarioAnalysis {
+  const differenceMinor = BigInt(incomeMinor) - BigInt(referenceSpendMinor);
+  return {
+    incomeMinor,
+    differenceMinor,
+    affordability: outcomeFromDifference(differenceMinor),
+  };
 }
 
 interface AnalysisEntries {
@@ -255,8 +281,6 @@ export function payCyclePlanFromSettings(
     !Number.isInteger(plan.paydayDay) ||
     plan.paydayDay < 1 ||
     plan.paydayDay > 31 ||
-    !Number.isSafeInteger(plan.monthlySalaryMinor) ||
-    plan.monthlySalaryMinor <= 0 ||
     !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
   ) {
     return undefined;
@@ -272,8 +296,6 @@ export function calculatePayCycleStatus(
 ): PayCycleStatus {
   if (
     !Number.isSafeInteger(balanceMinor) ||
-    !Number.isSafeInteger(plan.monthlySalaryMinor) ||
-    plan.monthlySalaryMinor <= 0 ||
     !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
   ) {
     throw new RangeError("工资周期金额必须使用整数分");
@@ -298,11 +320,6 @@ export function calculatePayCycleStatus(
 
   const targetMinor = plan.cycleEndBalanceGoalMinor;
   const balanceHeadroomMinor = BigInt(balanceMinor) - BigInt(targetMinor);
-  const salaryRemainingMinor = BigInt(plan.monthlySalaryMinor) - BigInt(cycleExpenseMinor);
-  const availableMinor = salaryRemainingMinor < balanceHeadroomMinor
-    ? salaryRemainingMinor
-    : balanceHeadroomMinor;
-  const rawSpentPercent = BigInt(cycleExpenseMinor) * 100n / BigInt(plan.monthlySalaryMinor);
   return {
     ...plan,
     targetMinor,
@@ -310,9 +327,7 @@ export function calculatePayCycleStatus(
     isCurrentlyAtOrAboveGoal: balanceHeadroomMinor >= 0n,
     cycleExpenseMinor,
     cycleIncomeMinor,
-    salaryRemainingMinor,
-    safeToSpendMinor: availableMinor > 0n ? availableMinor : 0n,
-    salarySpentPercent: Number(rawSpentPercent > 999n ? 999n : rawSpentPercent),
+    safeToSpendMinor: balanceHeadroomMinor > 0n ? balanceHeadroomMinor : 0n,
     ...range,
   };
 }
@@ -326,9 +341,11 @@ export function calculateSpendingAnalysis(
   entries: readonly LedgerEntry[],
   balanceMinor: number,
   plan: PayCyclePlan,
+  incomeForecast: IncomeForecast | undefined,
   now = new Date(),
 ): SpendingAnalysis {
   assertAnalysisInputs(balanceMinor, plan);
+  if (incomeForecast) assertIncomeForecast(incomeForecast);
   if (!Number.isFinite(now.getTime())) throw new RangeError("分析日期无效");
 
   const todayDateKey = currentLocalDateKey(now);
@@ -370,12 +387,9 @@ export function calculateSpendingAnalysis(
     todayDateKey,
   );
   const currentBalanceHeadroomMinor = BigInt(balanceMinor) - BigInt(plan.cycleEndBalanceGoalMinor);
-  const currentSalaryRemainingMinor = BigInt(plan.monthlySalaryMinor)
-    - BigInt(currentActualExpenseMinor);
-  const currentAvailableMinor = currentSalaryRemainingMinor < currentBalanceHeadroomMinor
-    ? currentSalaryRemainingMinor
-    : currentBalanceHeadroomMinor;
-  const currentSafeToSpendMinor = currentAvailableMinor > 0n ? currentAvailableMinor : 0n;
+  const currentSafeToSpendMinor = currentBalanceHeadroomMinor > 0n
+    ? currentBalanceHeadroomMinor
+    : 0n;
   const dailySafeToSpendMinor = currentSafeToSpendMinor / BigInt(currentRange.daysUntilPayday);
 
   const forecastIsAvailable = confidence !== "insufficient" && statisticsDayCount > 0;
@@ -393,20 +407,19 @@ export function calculateSpendingAnalysis(
     ? undefined
     : projectedEndBalanceMinor - BigInt(plan.cycleEndBalanceGoalMinor);
 
+  const upcomingPaydayDateKey = resolveNextPaydayDateKey(plan.paydayDay, now);
   const nextRange = resolvePayCycleRange(
     plan.paydayDay,
-    localDateFromKey(currentRange.nextPaydayDateKey),
+    localDateFromKey(upcomingPaydayDateKey),
   );
   const nextCycleDayCount = localCalendarDayDifference(
     nextRange.cycleStartDateKey,
     nextRange.nextPaydayDateKey,
   );
-  const estimatedNextExpenseMinor = forecastIsAvailable
+  const referenceSpendMinor = forecastIsAvailable
     ? scaledExpense(statisticsTotalExpenseMinor, nextCycleDayCount, statisticsDayCount)
     : undefined;
-  const salaryDifferenceMinor = estimatedNextExpenseMinor === undefined
-    ? undefined
-    : BigInt(plan.monthlySalaryMinor) - BigInt(estimatedNextExpenseMinor);
+  const incomeForecastIsUpcoming = incomeForecast?.targetPaydayDateKey === upcomingPaydayDateKey;
 
   const currentCycle: SpendingAnalysis["currentCycle"] = {
     cycleStartDateKey: currentRange.cycleStartDateKey,
@@ -415,7 +428,6 @@ export function calculateSpendingAnalysis(
     daysUntilPayday: currentRange.daysUntilPayday,
     actualExpenseMinor: currentActualExpenseMinor,
     balanceHeadroomMinor: currentBalanceHeadroomMinor,
-    salaryRemainingMinor: currentSalaryRemainingMinor,
     safeToSpendMinor: currentSafeToSpendMinor,
     dailySafeToSpendMinor,
     ...(estimatedRemainingExpenseMinor !== undefined
@@ -432,11 +444,21 @@ export function calculateSpendingAnalysis(
     cycleEndDateKey: nextRange.cycleEndDateKey,
     nextPaydayDateKey: nextRange.nextPaydayDateKey,
     days: nextCycleDayCount,
-    ...(estimatedNextExpenseMinor !== undefined
+    ...(referenceSpendMinor !== undefined
       ? {
-        estimatedExpenseMinor: estimatedNextExpenseMinor,
-        salaryDifferenceMinor,
-        affordability: outcomeFromDifference(salaryDifferenceMinor!),
+        referenceSpendMinor,
+        ...(incomeForecastIsUpcoming
+          ? {
+            minimumIncomeScenario: incomeScenario(
+              incomeForecast.minimumIncomeMinor,
+              referenceSpendMinor,
+            ),
+            expectedIncomeScenario: incomeScenario(
+              incomeForecast.expectedIncomeMinor,
+              referenceSpendMinor,
+            ),
+          }
+          : {}),
       }
       : {}),
   };
@@ -445,7 +467,6 @@ export function calculateSpendingAnalysis(
     asOfDateKey: todayDateKey,
     confidence,
     window: statisticsWindow,
-    salaryReferenceMinor: plan.monthlySalaryMinor,
     cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
     currentCycle,
     nextCycle,

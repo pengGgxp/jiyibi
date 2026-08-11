@@ -1,11 +1,18 @@
 import Dexie, { type EntityTable } from "dexie";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
-import { currentLocalMonthKey } from "../domain/date";
+import {
+  currentLocalDateKey,
+  currentLocalDateTimeInput,
+  currentLocalMonthKey,
+  parseLocalDateTime,
+  resolveNextPaydayDateKey,
+} from "../domain/date";
 import { calculateLedgerSummary } from "../domain/stats";
 import type {
   AppSettings,
   Attachment,
   EntryDraft,
+  IncomeForecast,
   LedgerEntry,
   LedgerSummary,
   PayCyclePlan,
@@ -24,7 +31,9 @@ import {
 
 export const DATABASE_NAME = "jiyibi";
 export const DATABASE_SCHEMA_VERSION = 1 as const;
-export const INDEXED_DB_VERSION = 2 as const;
+export const INDEXED_DB_VERSION = 3 as const;
+
+const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type EntitySyncStatus = "clean" | "pending" | "conflict";
 
@@ -62,6 +71,7 @@ export interface SyncOutboxRecord {
   payload: LedgerEntry | AppSettings;
   clearMonthEndBalanceGoal?: true;
   clearPayCycle?: true;
+  clearIncomeForecast?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -73,6 +83,7 @@ export interface SyncConflict {
   localPayload: LedgerEntry | AppSettings;
   remotePayload: LedgerEntry | AppSettings;
   remoteVersion: number;
+  claimLegacyIncomeForecast?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -120,6 +131,56 @@ export function createDefaultSettings(now = new Date()): AppSettings {
   };
 }
 
+interface LegacyPayCyclePlan extends PayCyclePlan {
+  monthlySalaryMinor: number;
+}
+
+type LegacyAppSettings = Omit<AppSettings, "payCycle" | "incomeForecast"> & {
+  payCycle?: PayCyclePlan | LegacyPayCyclePlan;
+  incomeForecast?: IncomeForecast;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLegacyPayCyclePlan(value: unknown): value is LegacyPayCyclePlan {
+  return isRecord(value) && Object.prototype.hasOwnProperty.call(value, "monthlySalaryMinor");
+}
+
+/** Normalizes settings written by the v2 database or the v1 backup payload. */
+export function migrateLegacyIncomeSettings(
+  settings: AppSettings | LegacyAppSettings,
+  now = new Date(),
+): AppSettings {
+  const next = structuredClone(settings) as LegacyAppSettings;
+  if (!isLegacyPayCyclePlan(next.payCycle)) return next as AppSettings;
+
+  const legacyPayCycle = next.payCycle;
+  next.payCycle = {
+    paydayDay: legacyPayCycle.paydayDay,
+    cycleEndBalanceGoalMinor: legacyPayCycle.cycleEndBalanceGoalMinor,
+  };
+  if (
+    next.incomeForecast === undefined &&
+    Number.isInteger(legacyPayCycle.paydayDay) &&
+    legacyPayCycle.paydayDay >= 1 &&
+    legacyPayCycle.paydayDay <= 31 &&
+    Number.isSafeInteger(legacyPayCycle.monthlySalaryMinor) &&
+    legacyPayCycle.monthlySalaryMinor > 0 &&
+    legacyPayCycle.monthlySalaryMinor <= MAX_AMOUNT_MINOR
+  ) {
+    const targetPaydayDateKey = resolveNextPaydayDateKey(legacyPayCycle.paydayDay, now);
+    next.incomeForecast = {
+      id: `legacy-income-${targetPaydayDateKey}`,
+      targetPaydayDateKey,
+      minimumIncomeMinor: 0,
+      expectedIncomeMinor: legacyPayCycle.monthlySalaryMinor,
+    };
+  }
+  return next as AppSettings;
+}
+
 export class LedgerDatabase extends Dexie {
   entries!: EntityTable<LedgerEntry, "id">;
   attachments!: EntityTable<Attachment, "id">;
@@ -129,7 +190,7 @@ export class LedgerDatabase extends Dexie {
   syncOutbox!: EntityTable<SyncOutboxRecord, "entityKey">;
   syncConflicts!: EntityTable<SyncConflict, "id">;
 
-  constructor(name = DATABASE_NAME) {
+  constructor(name = DATABASE_NAME, migrationNow?: Date) {
     super(name);
     this.version(DATABASE_SCHEMA_VERSION).stores({
       entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
@@ -144,6 +205,41 @@ export class LedgerDatabase extends Dexie {
       entitySyncState: "id, [entityType+entityId], status",
       syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
       syncConflicts: "id, [entityType+entityId], createdAt",
+    }).upgrade(async (transaction) => {
+      const now = migrationNow ? new Date(migrationNow) : new Date();
+      const settingsTable = transaction.table("settings");
+      for (const settings of await settingsTable.toArray() as LegacyAppSettings[]) {
+        await settingsTable.put(migrateLegacyIncomeSettings(settings, now));
+      }
+
+      const outboxTable = transaction.table("syncOutbox");
+      for (const record of await outboxTable.toArray() as SyncOutboxRecord[]) {
+        if (record.entityType !== "settings") continue;
+        await outboxTable.put({
+          ...record,
+          payload: migrateLegacyIncomeSettings(
+            record.payload as AppSettings | LegacyAppSettings,
+            now,
+          ),
+          ...(record.clearPayCycle ? { clearIncomeForecast: true as const } : {}),
+        });
+      }
+
+      const conflictsTable = transaction.table("syncConflicts");
+      for (const conflict of await conflictsTable.toArray() as SyncConflict[]) {
+        if (conflict.entityType !== "settings") continue;
+        await conflictsTable.put({
+          ...conflict,
+          localPayload: migrateLegacyIncomeSettings(
+            conflict.localPayload as AppSettings | LegacyAppSettings,
+            now,
+          ),
+          remotePayload: migrateLegacyIncomeSettings(
+            conflict.remotePayload as AppSettings | LegacyAppSettings,
+            now,
+          ),
+        });
+      }
     });
     this.on("populate", (transaction) =>
       transaction.table<AppSettings>("settings").add(createDefaultSettings()),
@@ -164,7 +260,8 @@ function isDefaultSettings(settings: AppSettings): boolean {
     settings.schemaVersion === DATABASE_SCHEMA_VERSION &&
     settings.initialBalanceMinor === 0 &&
     settings.monthEndBalanceGoalMinor === undefined &&
-    settings.payCycle === undefined
+    settings.payCycle === undefined &&
+    settings.incomeForecast === undefined
   );
 }
 
@@ -185,7 +282,11 @@ async function queueSyncMutation(
   payload: LedgerEntry | AppSettings,
   database: LedgerDatabase,
   nowIso: string,
-  options: { clearMonthEndBalanceGoal?: boolean; clearPayCycle?: boolean } = {},
+  options: {
+    clearMonthEndBalanceGoal?: boolean;
+    clearPayCycle?: boolean;
+    clearIncomeForecast?: boolean;
+  } = {},
 ): Promise<SyncOutboxRecord | undefined> {
   const link = await database.syncState.get("primary");
   if (!link?.uploadApproved) return undefined;
@@ -202,6 +303,9 @@ async function queueSyncMutation(
   const clearsPayCycle = entityType === "settings" &&
     !Object.prototype.hasOwnProperty.call(payload, "payCycle") &&
     (options.clearPayCycle || existing?.clearPayCycle);
+  const clearsIncomeForecast = entityType === "settings" &&
+    !Object.prototype.hasOwnProperty.call(payload, "incomeForecast") &&
+    (options.clearIncomeForecast || existing?.clearIncomeForecast);
   const outbox: SyncOutboxRecord = {
     entityKey,
     id: createId("mutation"),
@@ -211,6 +315,7 @@ async function queueSyncMutation(
     payload: syncPayloadFor(entityType, payload),
     ...(clearsMonthEndBalanceGoal ? { clearMonthEndBalanceGoal: true } : {}),
     ...(clearsPayCycle ? { clearPayCycle: true } : {}),
+    ...(clearsIncomeForecast ? { clearIncomeForecast: true } : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
   };
@@ -466,9 +571,6 @@ export async function setPayCyclePlan(
       !Number.isInteger(payCycle.paydayDay) ||
       payCycle.paydayDay < 1 ||
       payCycle.paydayDay > 31 ||
-      !Number.isSafeInteger(payCycle.monthlySalaryMinor) ||
-      payCycle.monthlySalaryMinor <= 0 ||
-      payCycle.monthlySalaryMinor > MAX_AMOUNT_MINOR ||
       !Number.isSafeInteger(payCycle.cycleEndBalanceGoalMinor) ||
       Math.abs(payCycle.cycleEndBalanceGoalMinor) > MAX_AMOUNT_MINOR
     )
@@ -492,15 +594,175 @@ export async function setPayCyclePlan(
       delete next.monthEndBalanceGoalMinor;
       if (payCycle === undefined) {
         delete next.payCycle;
+        delete next.incomeForecast;
       } else {
-        next.payCycle = structuredClone(payCycle);
+        next.payCycle = {
+          paydayDay: payCycle.paydayDay,
+          cycleEndBalanceGoalMinor: payCycle.cycleEndBalanceGoalMinor,
+        };
       }
       await database.settings.put(next);
       await queueSyncMutation("settings", next.id, next, database, nowIso, {
         clearMonthEndBalanceGoal: true,
         clearPayCycle: payCycle === undefined,
+        clearIncomeForecast: payCycle === undefined,
       });
       return next;
+    },
+  );
+}
+
+export type IncomeForecastInput = Omit<IncomeForecast, "id"> & { id?: string };
+
+function isValidIncomeForecastInput(value: IncomeForecastInput): boolean {
+  return (
+    (value.id === undefined || (
+      typeof value.id === "string" &&
+      SYNC_ID_PATTERN.test(value.id)
+    )) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.minimumIncomeMinor) &&
+    value.minimumIncomeMinor >= 0 &&
+    value.minimumIncomeMinor <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.expectedIncomeMinor) &&
+    value.expectedIncomeMinor >= 0 &&
+    value.expectedIncomeMinor <= MAX_AMOUNT_MINOR &&
+    value.minimumIncomeMinor <= value.expectedIncomeMinor
+  );
+}
+
+export async function setIncomeForecast(
+  incomeForecast: IncomeForecastInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (!isValidIncomeForecastInput(incomeForecast)) {
+    throw new LedgerDataError("收入预期设置无效", "invalid-settings");
+  }
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      if (
+        !current.payCycle ||
+        resolveNextPaydayDateKey(current.payCycle.paydayDay, now) !==
+          incomeForecast.targetPaydayDateKey
+      ) {
+        throw new LedgerDataError("收入预期必须对应下一次发薪日", "invalid-settings");
+      }
+      const nowIso = now.toISOString();
+      const next: AppSettings = {
+        ...current,
+        incomeForecast: {
+          ...structuredClone(incomeForecast),
+          id: incomeForecast.id ?? (
+            current.incomeForecast?.targetPaydayDateKey === incomeForecast.targetPaydayDateKey
+              ? current.incomeForecast.id
+              : createId("income-forecast")
+          ),
+        },
+        updatedAt: nowIso,
+      };
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso);
+      return next;
+    },
+  );
+}
+
+export async function clearIncomeForecast(
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const nowIso = now.toISOString();
+      const next: AppSettings = {
+        ...((await database.settings.get("primary")) ?? createDefaultSettings(now)),
+        updatedAt: nowIso,
+      };
+      delete next.incomeForecast;
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso, {
+        clearIncomeForecast: true,
+      });
+      return next;
+    },
+  );
+}
+
+export interface ActualIncomeResult {
+  entry?: LedgerEntry;
+  settings: AppSettings;
+}
+
+export async function recordActualIncome(
+  amountMinor: number,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<ActualIncomeResult> {
+  if (
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < 0 ||
+    amountMinor > MAX_AMOUNT_MINOR
+  ) {
+    throw new LedgerDataError("实际收入金额无效", "invalid-settings");
+  }
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      const forecast = current.incomeForecast;
+      if (!forecast || currentLocalDateKey(now) < forecast.targetPaydayDateKey) {
+        throw new LedgerDataError("当前没有可确认的到期收入预期", "invalid-settings");
+      }
+
+      const nowIso = now.toISOString();
+      let entry: LedgerEntry | undefined;
+      if (amountMinor > 0) {
+        const localTime = currentLocalDateTimeInput(now).slice(11);
+        const occurred = parseLocalDateTime(`${forecast.targetPaydayDateKey}T${localTime}`);
+        entry = {
+          id: createId("entry"),
+          amountMinor,
+          note: "本次实际收入",
+          occurredAt: occurred.occurredAt,
+          localDateKey: occurred.localDateKey,
+          localMonthKey: occurred.localMonthKey,
+          timezoneOffsetMinutes: occurred.timezoneOffsetMinutes,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        await database.entries.add(entry);
+        await queueSyncMutation("entry", entry.id, entry, database, nowIso);
+      }
+
+      const settings: AppSettings = { ...current, updatedAt: nowIso };
+      delete settings.incomeForecast;
+      await database.settings.put(settings);
+      await queueSyncMutation("settings", settings.id, settings, database, nowIso, {
+        clearIncomeForecast: true,
+      });
+      return { entry, settings };
     },
   );
 }
@@ -895,6 +1157,9 @@ async function recordConflict(
     localPayload: structuredClone(localPayload),
     remotePayload: structuredClone(change.payload),
     remoteVersion: change.version,
+    ...(change.entityType === "settings" && change.claimLegacyIncomeForecast
+      ? { claimLegacyIncomeForecast: true as const }
+      : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
   });
@@ -965,6 +1230,15 @@ async function applyRemoteChangesInTransaction(
           : false,
       updatedAt: nowIso,
     });
+    if (change.entityType === "settings" && change.claimLegacyIncomeForecast) {
+      await queueSyncMutation(
+        "settings",
+        change.entityId,
+        change.payload,
+        database,
+        nowIso,
+      );
+    }
   }
 
   for (const attachment of remoteAttachments) {
@@ -1183,6 +1457,15 @@ export async function resolveSyncConflict(
               : false,
           updatedAt: nowIso,
         });
+        if (entityType === "settings" && conflict.claimLegacyIncomeForecast) {
+          await queueSyncMutation(
+            "settings",
+            entityId,
+            conflict.remotePayload,
+            database,
+            nowIso,
+          );
+        }
         return;
       }
 
@@ -1211,6 +1494,10 @@ export async function resolveSyncConflict(
         ...(entityType === "settings" &&
           !Object.prototype.hasOwnProperty.call(localPayload, "payCycle")
           ? { clearPayCycle: true as const }
+          : {}),
+        ...(entityType === "settings" &&
+          !Object.prototype.hasOwnProperty.call(localPayload, "incomeForecast")
+          ? { clearIncomeForecast: true as const }
           : {}),
         createdAt: existingOutbox?.createdAt ?? nowIso,
         updatedAt: nowIso,

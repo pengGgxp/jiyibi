@@ -15,7 +15,9 @@ export async function addTextEntry(
   page: Page,
   options: { amount: string; note: string; kind?: "expense" | "income" },
 ): Promise<void> {
-  if (options.kind === "income") await page.getByLabel("收入").click();
+  if (options.kind === "income") {
+    await page.getByRole("radio", { name: "收入", exact: true }).click();
+  }
   const amountInput = page.getByLabel("金额");
   const noteInput = page.getByLabel("这笔是什么");
   const saveButton = page.locator(".save-entry-button");
@@ -50,6 +52,13 @@ export async function seedAnalysisLedger(
       String(date.getDate()).padStart(2, "0"),
     ].join("-");
     const today = new Date();
+    const nextPayday = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate() + 1,
+      12,
+    );
+    const targetPaydayDateKey = dateKey(nextPayday);
     const updatedAt = today.toISOString();
     const entries = [dayCount, Math.max(1, Math.ceil(dayCount / 2)), 1].map((daysAgo, index) => {
       const localDate = new Date(
@@ -109,9 +118,14 @@ export async function seedAnalysisLedger(
           currency: "CNY",
           initialBalanceMinor: balanceMinor,
           payCycle: {
-            paydayDay: 10,
-            monthlySalaryMinor: 10_000,
+            paydayDay: nextPayday.getDate(),
             cycleEndBalanceGoalMinor: 100_000,
+          },
+          incomeForecast: {
+            id: "analysis-income-forecast",
+            targetPaydayDateKey,
+            minimumIncomeMinor: 10_000,
+            expectedIncomeMinor: 20_000,
           },
           schemaVersion: 1,
           updatedAt,

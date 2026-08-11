@@ -112,6 +112,21 @@ export interface PayCycleRange {
   daysUntilPayday: number;
 }
 
+/** Returns the configured payday on or after the provided local calendar day. */
+export function resolveNextPaydayDateKey(
+  paydayDay: number,
+  now = new Date(),
+): string {
+  assertPaydayDay(paydayDay);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("工资周期日期无效");
+
+  const currentPayday = paydayInMonth(now.getFullYear(), now.getMonth(), paydayDay);
+  const nextPayday = calendarDayNumber(now) <= calendarDayNumber(currentPayday)
+    ? currentPayday
+    : paydayInMonth(now.getFullYear(), now.getMonth() + 1, paydayDay);
+  return localDateKey(nextPayday);
+}
+
 export function resolvePayCycleRange(
   paydayDay: number,
   now = new Date(),

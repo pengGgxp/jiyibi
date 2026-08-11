@@ -17,7 +17,6 @@ import {
   CartesianGrid,
   Line,
   LineChart,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -26,6 +25,7 @@ import {
 import {
   formatCny,
   type AppSettings,
+  type IncomeScenarioAnalysis,
   type LedgerSummary,
   type PayCyclePlan,
   type SpendingAnalysis,
@@ -41,6 +41,7 @@ export interface AnalysisViewProps {
   loading?: boolean;
   error?: string;
   onOpenSettings(): void;
+  onOpenIncomeForecast(): void;
   onOpenLedger(): void;
 }
 
@@ -96,10 +97,10 @@ function confidenceDescription(analysis: SpendingAnalysis): string {
   return `满 ${daysNeeded} 个完整日后开始估算`;
 }
 
-function affordabilityLabel(value: "surplus" | "shortfall" | "exact" | undefined, next = false): string {
+function affordabilityLabel(value: "surplus" | "shortfall" | "exact" | undefined): string {
   if (!value) return "暂不预测";
-  if (value === "surplus") return next ? "工资预计够用" : "预计够用";
-  if (value === "shortfall") return next ? "工资预计不够" : "预计有缺口";
+  if (value === "surplus") return "预计够用";
+  if (value === "shortfall") return "预计有缺口";
   return "预计刚好覆盖";
 }
 
@@ -130,7 +131,7 @@ function Metric({
   );
 }
 
-function ChartKey({ kind, children }: { kind: "actual" | "predicted" | "salary" | "expense"; children: ReactNode }) {
+function ChartKey({ kind, children }: { kind: "actual" | "predicted" | "expense"; children: ReactNode }) {
   return (
     <span className="analysis-chart-key-item">
       <i className={`analysis-chart-key-line analysis-chart-key-line--${kind}`} aria-hidden="true" />
@@ -302,18 +303,15 @@ function currentCycleChartDescription(analysis: SpendingAnalysis): string {
   return `本周期已支出 ${displayAmount(cycle.actualExpenseMinor)}，预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}。`;
 }
 
-function nextCycleVerdict(analysis: SpendingAnalysis): string {
-  const cycle = analysis.nextCycle;
-  if (cycle.estimatedExpenseMinor === undefined || cycle.salaryDifferenceMinor === undefined) {
-    return "数据不足，暂不预测下个工资周期。";
+function scenarioVerdict(scenario: IncomeScenarioAnalysis | undefined): string {
+  if (!scenario) return "数据不足，暂不判断。";
+  if (scenario.affordability === "surplus") {
+    return `按当前花法可多 ${displayAmount(scenario.differenceMinor)}。`;
   }
-  if (cycle.affordability === "surplus") {
-    return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，月工资预计剩 ${displayAmount(cycle.salaryDifferenceMinor)}。`;
+  if (scenario.affordability === "shortfall") {
+    return `按当前花法还差 ${displayAmount(-scenario.differenceMinor)}。`;
   }
-  if (cycle.affordability === "shortfall") {
-    return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，月工资预计少 ${displayAmount(-cycle.salaryDifferenceMinor)}。`;
-  }
-  return `预计支出 ${displayAmount(cycle.estimatedExpenseMinor)}，刚好等于月工资。`;
+  return "按当前花法刚好覆盖。";
 }
 
 function dailyChartDescription(analysis: SpendingAnalysis): string {
@@ -365,9 +363,13 @@ export function AnalysisView({
   loading = false,
   error,
   onOpenSettings,
+  onOpenIncomeForecast,
   onOpenLedger,
 }: AnalysisViewProps) {
   const activePlan = payCycle ?? settings?.payCycle;
+  const activeForecast = analysis && settings?.incomeForecast?.targetPaydayDateKey === analysis.nextCycle.cycleStartDateKey
+    ? settings.incomeForecast
+    : undefined;
 
   return (
     <div className="analysis-view">
@@ -384,9 +386,9 @@ export function AnalysisView({
       ) : !activePlan ? (
         <StatePanel
           kind="empty"
-          title="先设置工资周期"
-          message="需要发薪日、月工资和周期底线。"
-          actionLabel="设置工资周期"
+          title="先设置发薪周期"
+          message="需要发薪日和周期底线。"
+          actionLabel="设置发薪周期"
           onAction={onOpenSettings}
         />
       ) : !analysis ? (
@@ -419,11 +421,27 @@ export function AnalysisView({
                 <p>{currentCycleVerdict(analysis)}</p>
                 <small>剩余 {analysis.currentCycle.daysUntilPayday} 天 · 每日可花 {displayAmount(analysis.currentCycle.dailySafeToSpendMinor)}</small>
               </article>
-              <article className={`analysis-verdict analysis-verdict--${analysis.nextCycle.affordability ?? "pending"}`}>
-                <div className="analysis-verdict-label"><StatusIcon value={analysis.nextCycle.affordability} /> 下个工资周期</div>
-                <strong>{affordabilityLabel(analysis.nextCycle.affordability, true)}</strong>
-                <p>{nextCycleVerdict(analysis)}</p>
-                <small>月工资 {displayAmount(activePlan.monthlySalaryMinor)} · 周期 {analysis.nextCycle.days} 天</small>
+              <article className={`analysis-verdict analysis-verdict--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
+                <div className="analysis-verdict-label"><StatusIcon value={analysis.nextCycle.expectedIncomeScenario?.affordability} /> 下个工资周期</div>
+                <small className="analysis-income-basis">按近 {analysis.window.observedDays} 个完整日的花法 · 周期 {analysis.nextCycle.days} 天</small>
+                {activeForecast ? (
+                  <div className="analysis-income-scenarios">
+                    <div>
+                      <span><StatusIcon value={analysis.nextCycle.minimumIncomeScenario?.affordability} /> 最低收入 {displayAmount(activeForecast.minimumIncomeMinor)}</span>
+                      <strong>{affordabilityLabel(analysis.nextCycle.minimumIncomeScenario?.affordability)}</strong>
+                      <p>{scenarioVerdict(analysis.nextCycle.minimumIncomeScenario)}</p>
+                    </div>
+                    <div>
+                      <span><StatusIcon value={analysis.nextCycle.expectedIncomeScenario?.affordability} /> 预计收入 {displayAmount(activeForecast.expectedIncomeMinor)}</span>
+                      <strong>{affordabilityLabel(analysis.nextCycle.expectedIncomeScenario?.affordability)}</strong>
+                      <p>{scenarioVerdict(analysis.nextCycle.expectedIncomeScenario)}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" className="secondary-button analysis-income-action" onClick={onOpenIncomeForecast}>
+                    填写下次收入
+                  </button>
+                )}
               </article>
             </div>
           </section>
@@ -446,10 +464,16 @@ export function AnalysisView({
                 tone={analysis.currentCycle.affordability === "shortfall" ? "negative" : analysis.currentCycle.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric
-                label="下个工资周期差额"
-                value={displaySignedAmount(analysis.nextCycle.salaryDifferenceMinor)}
-                detail="月工资 − 预计支出"
-                tone={analysis.nextCycle.affordability === "shortfall" ? "negative" : analysis.nextCycle.affordability === "surplus" ? "positive" : "pending"}
+                label="最低收入差额"
+                value={displaySignedAmount(analysis.nextCycle.minimumIncomeScenario?.differenceMinor)}
+                detail="最低收入与当前花法"
+                tone={analysis.nextCycle.minimumIncomeScenario?.affordability === "shortfall" ? "negative" : analysis.nextCycle.minimumIncomeScenario?.affordability === "surplus" ? "positive" : "pending"}
+              />
+              <Metric
+                label="预计收入差额"
+                value={displaySignedAmount(analysis.nextCycle.expectedIncomeScenario?.differenceMinor)}
+                detail="预计收入与当前花法"
+                tone={analysis.nextCycle.expectedIncomeScenario?.affordability === "shortfall" ? "negative" : analysis.nextCycle.expectedIncomeScenario?.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric label="近 30 天日均支出" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`近 ${analysis.window.observedDays} 个完整日`} />
               <Metric label="本周期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} detail="从发薪日开始" />
@@ -469,7 +493,7 @@ export function AnalysisView({
             id="current-cycle-chart"
             title="当前周期累计支出"
             description={currentCycleChartDescription(analysis)}
-            keys={<><ChartKey kind="actual">实际支出</ChartKey><ChartKey kind="predicted">预测支出</ChartKey><ChartKey kind="salary">当前月工资</ChartKey></>}
+            keys={<><ChartKey kind="actual">实际支出</ChartKey><ChartKey kind="predicted">预测支出</ChartKey></>}
             table={<CurrentCycleTable analysis={analysis} />}
           >
             {analysis.currentCycleSeries.length ? (
@@ -485,13 +509,6 @@ export function AnalysisView({
                   <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} minTickGap={18} />
                   <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                   <Tooltip formatter={(value) => tooltipAmount(value)} labelFormatter={(label) => `日期 ${label}`} />
-                  <ReferenceLine
-                    y={activePlan.monthlySalaryMinor}
-                    stroke="var(--brand)"
-                    strokeDasharray="2 4"
-                    ifOverflow="extendDomain"
-                    label={{ value: "当前月工资", position: "insideTopRight", fill: "var(--brand)" }}
-                  />
                   <Line type="monotone" dataKey="actualCumulativeMinor" name="实际支出" stroke="var(--focus)" strokeWidth={2.5} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
                   <Line type="monotone" dataKey="projectedCumulativeMinor" name="预测支出" stroke="var(--expense)" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls={false} isAnimationActive={false} />
                 </LineChart>
@@ -503,8 +520,8 @@ export function AnalysisView({
             <ChartFrame
               id="completed-cycle-chart"
               title="完整工资周期支出"
-              description={analysis.completedCycles.length ? `显示最近 ${analysis.completedCycles.length} 个完整周期；横线为当前月工资。` : undefined}
-              keys={<><ChartKey kind="expense">实际支出</ChartKey><ChartKey kind="salary">当前月工资</ChartKey></>}
+              description={analysis.completedCycles.length ? `显示最近 ${analysis.completedCycles.length} 个完整周期。` : undefined}
+              keys={<ChartKey kind="expense">实际支出</ChartKey>}
               table={<CompletedCyclesTable analysis={analysis} />}
             >
               {analysis.completedCycles.length ? (
@@ -520,7 +537,6 @@ export function AnalysisView({
                     <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} interval="preserveStartEnd" angle={-18} textAnchor="end" height={42} />
                     <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                     <Tooltip formatter={(value) => tooltipAmount(value)} />
-                    <ReferenceLine y={activePlan.monthlySalaryMinor} stroke="var(--brand)" strokeDasharray="2 4" ifOverflow="extendDomain" label={{ value: "当前月工资", position: "insideTopRight", fill: "var(--brand)" }} />
                     <Bar dataKey="expenseMinor" name="实际支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
                   </BarChart>
                 </ResponsiveContainer>

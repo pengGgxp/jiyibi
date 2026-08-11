@@ -13,6 +13,7 @@ import {
   formatCny,
   type AppSettings,
   type ForecastOutcome,
+  type IncomeScenarioAnalysis,
   type LedgerSummary,
   type PayCyclePlan,
   type SpendingAnalysis,
@@ -26,6 +27,7 @@ interface SummaryPanelProps {
   analysisError?: Error;
   loading: boolean;
   onOpenSettings(): void;
+  onOpenIncomeForecast(): void;
   onOpenAnalysis(): void;
 }
 
@@ -60,30 +62,31 @@ function currentCycleCopy(analysis: SpendingAnalysis): { title: string; detail: 
     : { title: "预计有缺口", detail: `预计短缺 ${formatCny(amountMagnitude(difference))}` };
 }
 
-function nextCycleCopy(analysis: SpendingAnalysis): { title: string; detail: string } {
-  const { nextCycle, confidence, window } = analysis;
-  if (confidence === "insufficient" || nextCycle.affordability === undefined) {
-    const remainingDays = Math.max(0, window.daysNeeded - window.observedDays);
+function scenarioCopy(scenario: IncomeScenarioAnalysis | undefined, analysis: SpendingAnalysis) {
+  if (!scenario) {
+    const remainingDays = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
     return {
       title: "暂不判断",
-      detail: remainingDays > 0
-        ? `还需积累 ${remainingDays} 个完整日`
-        : "历史记录还不足",
+      detail: remainingDays > 0 ? `还需积累 ${remainingDays} 个完整日` : "历史记录还不足",
     };
   }
-  if (nextCycle.affordability === "exact") {
-    return { title: "工资刚好覆盖", detail: "预计支出与工资相当" };
+  if (scenario.affordability === "exact") {
+    return { title: "刚好覆盖", detail: "与当前花法相当" };
   }
-  const difference = nextCycle.salaryDifferenceMinor ?? 0n;
-  return nextCycle.affordability === "surplus"
-    ? { title: "工资预计够用", detail: `预计结余 ${formatCny(difference)}` }
-    : { title: "工资预计不够", detail: `预计少 ${formatCny(amountMagnitude(difference))}` };
+  return scenario.affordability === "surplus"
+    ? { title: "预计够用", detail: `可多 ${formatCny(scenario.differenceMinor)}` }
+    : { title: "预计有缺口", detail: `还差 ${formatCny(amountMagnitude(scenario.differenceMinor))}` };
 }
 
 function confidenceLabel(analysis: SpendingAnalysis): string {
   if (analysis.confidence === "ready") return "按近 30 天估算";
   if (analysis.confidence === "preliminary") return "初步估算";
   return "数据积累中";
+}
+
+function readableDate(dateKey: string): string {
+  const [, month, day] = dateKey.split("-");
+  return month && day ? `${Number(month)} 月 ${Number(day)} 日` : dateKey;
 }
 
 export function SummaryPanel({
@@ -94,10 +97,15 @@ export function SummaryPanel({
   analysisError,
   loading,
   onOpenSettings,
+  onOpenIncomeForecast,
   onOpenAnalysis,
 }: SummaryPanelProps) {
   const currentCopy = analysis ? currentCycleCopy(analysis) : undefined;
-  const nextCopy = analysis ? nextCycleCopy(analysis) : undefined;
+  const activeForecast = analysis && settings?.incomeForecast?.targetPaydayDateKey === analysis.nextCycle.cycleStartDateKey
+    ? settings.incomeForecast
+    : undefined;
+  const minimumCopy = analysis ? scenarioCopy(analysis.nextCycle.minimumIncomeScenario, analysis) : undefined;
+  const expectedCopy = analysis ? scenarioCopy(analysis.nextCycle.expectedIncomeScenario, analysis) : undefined;
 
   return (
     <section className="summary-panel" aria-labelledby="summary-title" aria-busy={loading}>
@@ -118,11 +126,11 @@ export function SummaryPanel({
         <div className="summary-plan-empty">
           <Target aria-hidden="true" />
           <div>
-            <strong>先设置发薪日和工资</strong>
-            <p>设置后才能判断这次和下个工资周期够不够花。</p>
+            <strong>先设置发薪周期</strong>
+            <p>需要发薪日和周期底线，收入每个周期单独填写。</p>
           </div>
           <button type="button" className="summary-plan-action" onClick={onOpenSettings}>
-            设置工资周期 <ArrowRight aria-hidden="true" />
+            设置发薪周期 <ArrowRight aria-hidden="true" />
           </button>
         </div>
       ) : analysisError ? (
@@ -130,7 +138,7 @@ export function SummaryPanel({
           <CircleAlert aria-hidden="true" />
           <span><strong>分析暂时不可用</strong><small>{analysisError.message}</small></span>
         </div>
-      ) : analysis && currentCopy && nextCopy ? (
+      ) : analysis && currentCopy && minimumCopy && expectedCopy ? (
         <>
           <div className="summary-confidence">{confidenceLabel(analysis)}</div>
           <div className="summary-forecast-list" aria-live="polite" aria-atomic="true">
@@ -139,10 +147,30 @@ export function SummaryPanel({
               <span><small>到发薪日</small><strong>{currentCopy.title}</strong></span>
               <p>{currentCopy.detail}</p>
             </div>
-            <div className={`summary-forecast summary-forecast--${analysis.nextCycle.affordability ?? "pending"}`}>
-              <OutcomeIcon outcome={analysis.nextCycle.affordability} />
-              <span><small>下个工资周期</small><strong>{nextCopy.title}</strong></span>
-              <p>{nextCopy.detail}</p>
+            <div className="summary-forecast summary-forecast--income">
+              <Target aria-hidden="true" />
+              <span><small>下个工资周期</small><strong>{analysis.nextCycle.days} 天</strong></span>
+              {activeForecast ? (
+                <div className="summary-income-scenarios">
+                  <div className={`summary-income-scenario summary-forecast--${analysis.nextCycle.minimumIncomeScenario?.affordability ?? "pending"}`}>
+                    <OutcomeIcon outcome={analysis.nextCycle.minimumIncomeScenario?.affordability} />
+                    <span><small>最低收入 {formatCny(activeForecast.minimumIncomeMinor)}</small><strong>{minimumCopy.title}</strong></span>
+                    <p>{minimumCopy.detail}</p>
+                  </div>
+                  <div className={`summary-income-scenario summary-forecast--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
+                    <OutcomeIcon outcome={analysis.nextCycle.expectedIncomeScenario?.affordability} />
+                    <span><small>预计收入 {formatCny(activeForecast.expectedIncomeMinor)}</small><strong>{expectedCopy.title}</strong></span>
+                    <p>{expectedCopy.detail}</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="summary-income-empty">
+                  <p>{readableDate(analysis.nextCycle.cycleStartDateKey)}收入预期</p>
+                  <button type="button" className="summary-income-action" onClick={onOpenIncomeForecast}>
+                    填写下次收入 <ArrowRight aria-hidden="true" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
           <dl className="summary-allowance">

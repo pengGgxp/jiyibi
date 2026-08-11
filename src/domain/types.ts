@@ -27,8 +27,14 @@ export interface Attachment {
 
 export interface PayCyclePlan {
   paydayDay: number;
-  monthlySalaryMinor: number;
   cycleEndBalanceGoalMinor: number;
+}
+
+export interface IncomeForecast {
+  id: string;
+  targetPaydayDateKey: string;
+  minimumIncomeMinor: number;
+  expectedIncomeMinor: number;
 }
 
 export interface AppSettings {
@@ -38,6 +44,7 @@ export interface AppSettings {
   /** Legacy v2 natural-month goal. Kept only for sync and backup compatibility. */
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
+  incomeForecast?: IncomeForecast;
   schemaVersion: 1;
   updatedAt: string;
 }
@@ -71,9 +78,7 @@ export interface PayCycleStatus extends PayCyclePlan {
   isCurrentlyAtOrAboveGoal: boolean;
   cycleExpenseMinor: number;
   cycleIncomeMinor: number;
-  salaryRemainingMinor: bigint;
   safeToSpendMinor: bigint;
-  salarySpentPercent: number;
   cycleStartDateKey: string;
   cycleEndDateKey: string;
   nextPaydayDateKey: string;
@@ -120,7 +125,6 @@ export interface CurrentCycleAnalysis {
   daysUntilPayday: number;
   actualExpenseMinor: number;
   balanceHeadroomMinor: bigint;
-  salaryRemainingMinor: bigint;
   safeToSpendMinor: bigint;
   dailySafeToSpendMinor: bigint;
   estimatedRemainingExpenseMinor?: number;
@@ -129,14 +133,20 @@ export interface CurrentCycleAnalysis {
   affordability?: ForecastOutcome;
 }
 
+export interface IncomeScenarioAnalysis {
+  incomeMinor: number;
+  differenceMinor: bigint;
+  affordability: ForecastOutcome;
+}
+
 export interface NextCycleAnalysis {
   cycleStartDateKey: string;
   cycleEndDateKey: string;
   nextPaydayDateKey: string;
   days: number;
-  estimatedExpenseMinor?: number;
-  salaryDifferenceMinor?: bigint;
-  affordability?: ForecastOutcome;
+  referenceSpendMinor?: number;
+  minimumIncomeScenario?: IncomeScenarioAnalysis;
+  expectedIncomeScenario?: IncomeScenarioAnalysis;
 }
 
 /**
@@ -147,7 +157,6 @@ export interface SpendingAnalysis {
   asOfDateKey: string;
   confidence: ForecastConfidence;
   window: SpendingStatisticsWindow;
-  salaryReferenceMinor: number;
   cycleEndBalanceGoalMinor: number;
   currentCycle: CurrentCycleAnalysis;
   nextCycle: NextCycleAnalysis;

@@ -1,13 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { addLocalDays, localCalendarDayDifference, localDateFromKey } from "./date";
-import { calculateSpendingAnalysis } from "./stats";
-import type { LedgerEntry, PayCyclePlan } from "./types";
+import {
+  addLocalDays,
+  localCalendarDayDifference,
+  localDateFromKey,
+  resolveNextPaydayDateKey,
+} from "./date";
+import { calculateSpendingAnalysis as calculateSpendingAnalysisDomain } from "./stats";
+import type { IncomeForecast, LedgerEntry, PayCyclePlan } from "./types";
 
 const DEFAULT_PLAN: PayCyclePlan = {
   paydayDay: 10,
-  monthlySalaryMinor: 310_000,
   cycleEndBalanceGoalMinor: 50_000,
 };
+
+function forecastFor(
+  plan: PayCyclePlan,
+  now: Date,
+  overrides: Partial<IncomeForecast> = {},
+): IncomeForecast {
+  return {
+    id: "income-forecast",
+    targetPaydayDateKey: resolveNextPaydayDateKey(plan.paydayDay, now),
+    minimumIncomeMinor: 250_000,
+    expectedIncomeMinor: 310_000,
+    ...overrides,
+  };
+}
+
+function calculateSpendingAnalysis(
+  entries: readonly LedgerEntry[],
+  balanceMinor: number,
+  plan: PayCyclePlan,
+  now: Date,
+) {
+  return calculateSpendingAnalysisDomain(
+    entries,
+    balanceMinor,
+    plan,
+    forecastFor(plan, now),
+    now,
+  );
+}
 
 function entry(
   localDateKey: string,
@@ -39,6 +72,13 @@ describe("local calendar date helpers", () => {
     expect(() => localDateFromKey("2026-2-01")).toThrow();
     expect(() => localDateFromKey("2026-02-30")).toThrow();
   });
+
+  it("resolves the next payday on or after today with short-month clamping", () => {
+    expect(resolveNextPaydayDateKey(10, new Date(2026, 7, 10, 23, 59))).toBe("2026-08-10");
+    expect(resolveNextPaydayDateKey(31, new Date(2028, 1, 28, 12))).toBe("2028-02-29");
+    expect(resolveNextPaydayDateKey(31, new Date(2028, 1, 29, 12))).toBe("2028-02-29");
+    expect(resolveNextPaydayDateKey(31, new Date(2028, 2, 1, 12))).toBe("2028-03-31");
+  });
 });
 
 describe("spending forecast confidence", () => {
@@ -67,11 +107,12 @@ describe("spending forecast confidence", () => {
     if (observedDays < 14) {
       expect(analysis.currentCycle.estimatedRemainingExpenseMinor).toBeUndefined();
       expect(analysis.currentCycle.affordability).toBeUndefined();
-      expect(analysis.nextCycle.estimatedExpenseMinor).toBeUndefined();
-      expect(analysis.nextCycle.affordability).toBeUndefined();
+      expect(analysis.nextCycle.referenceSpendMinor).toBeUndefined();
+      expect(analysis.nextCycle.minimumIncomeScenario).toBeUndefined();
     } else {
       expect(analysis.currentCycle.estimatedRemainingExpenseMinor).toBeDefined();
-      expect(analysis.nextCycle.estimatedExpenseMinor).toBeDefined();
+      expect(analysis.nextCycle.referenceSpendMinor).toBeDefined();
+      expect(analysis.nextCycle.minimumIncomeScenario).toBeDefined();
     }
   });
 
@@ -144,7 +185,7 @@ describe("spending forecast inputs", () => {
     expect(analysis.currentCycle.affordability).toBe("exact");
     // 7 * 31 / 14 = 15.5, rounded once to 16 rather than using rounded daily spend.
     expect(analysis.nextCycle.days).toBe(31);
-    expect(analysis.nextCycle.estimatedExpenseMinor).toBe(16);
+    expect(analysis.nextCycle.referenceSpendMinor).toBe(16);
   });
 
   it.each([
@@ -167,16 +208,64 @@ describe("spending forecast inputs", () => {
     [3_100, "exact", 0n],
     [3_101, "surplus", 1n],
     [3_099, "shortfall", -1n],
-  ] as const)("classifies a next-cycle salary of %i as %s", (salary, affordability, difference) => {
-    const analysis = calculateSpendingAnalysis(
+  ] as const)("classifies a next-cycle income scenario of %i as %s", (income, affordability, difference) => {
+    const now = new Date(2026, 7, 9, 12);
+    const analysis = calculateSpendingAnalysisDomain(
       [entry("2026-07-26", -1_400)],
       100_000,
-      { ...DEFAULT_PLAN, monthlySalaryMinor: salary },
-      new Date(2026, 7, 9, 12),
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, {
+        minimumIncomeMinor: income,
+        expectedIncomeMinor: income,
+      }),
+      now,
     );
-    expect(analysis.nextCycle.estimatedExpenseMinor).toBe(3_100);
-    expect(analysis.nextCycle.salaryDifferenceMinor).toBe(difference);
-    expect(analysis.nextCycle.affordability).toBe(affordability);
+    expect(analysis.nextCycle.referenceSpendMinor).toBe(3_100);
+    expect(analysis.nextCycle.minimumIncomeScenario).toEqual({
+      incomeMinor: income,
+      differenceMinor: difference,
+      affordability,
+    });
+    expect(analysis.nextCycle.expectedIncomeScenario).toEqual(
+      analysis.nextCycle.minimumIncomeScenario,
+    );
+  });
+
+  it("keeps the spending reference but withholds conclusions without an upcoming forecast", () => {
+    const now = new Date(2026, 7, 9, 12);
+    const entries = [entry("2026-07-26", -1_400)];
+
+    const missing = calculateSpendingAnalysisDomain(entries, 100_000, DEFAULT_PLAN, undefined, now);
+    const stale = calculateSpendingAnalysisDomain(
+      entries,
+      100_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, { targetPaydayDateKey: "2026-07-10" }),
+      now,
+    );
+
+    expect(missing.nextCycle.referenceSpendMinor).toBe(3_100);
+    expect(missing.nextCycle.minimumIncomeScenario).toBeUndefined();
+    expect(missing.nextCycle.expectedIncomeScenario).toBeUndefined();
+    expect(stale.nextCycle.referenceSpendMinor).toBe(3_100);
+    expect(stale.nextCycle.minimumIncomeScenario).toBeUndefined();
+    expect(stale.nextCycle.expectedIncomeScenario).toBeUndefined();
+  });
+
+  it.each([
+    { id: "", minimumIncomeMinor: 0, expectedIncomeMinor: 1 },
+    { id: "forecast", minimumIncomeMinor: -1, expectedIncomeMinor: 1 },
+    { id: "forecast", minimumIncomeMinor: 2, expectedIncomeMinor: 1 },
+    { id: "forecast", minimumIncomeMinor: 0.5, expectedIncomeMinor: 1 },
+  ])("rejects an invalid income forecast %#", (values) => {
+    const now = new Date(2026, 7, 9, 12);
+    expect(() => calculateSpendingAnalysisDomain(
+      [entry("2026-07-26", -1_400)],
+      100_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, values),
+      now,
+    )).toThrow();
   });
 
   it("reports a negative balance shortfall and never exposes negative safe spending", () => {
@@ -204,6 +293,23 @@ describe("spending forecast inputs", () => {
     expect(analysis.currentCycle.daysUntilPayday).toBe(31);
     expect(analysis.currentCycle.safeToSpendMinor).toBe(1_000n);
     expect(analysis.currentCycle.dailySafeToSpendMinor).toBe(32n);
+  });
+
+  it("does not constrain current safe spending by either income scenario", () => {
+    const now = new Date(2026, 7, 10, 12);
+    const analysis = calculateSpendingAnalysisDomain(
+      [entry("2026-07-11", 100)],
+      60_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, {
+        minimumIncomeMinor: 0,
+        expectedIncomeMinor: 1,
+      }),
+      now,
+    );
+
+    expect(analysis.currentCycle.balanceHeadroomMinor).toBe(10_000n);
+    expect(analysis.currentCycle.safeToSpendMinor).toBe(10_000n);
   });
 
   it("keeps balance differences exact when two safe inputs exceed number range", () => {
@@ -283,7 +389,7 @@ describe("spending chart series", () => {
     expect(analysis.completedCycles).toEqual([]);
   });
 
-  it("uses clamped payday boundaries to derive the next full cycle length", () => {
+  it("uses the payday on or after today to derive the forecast cycle", () => {
     const analysis = calculateSpendingAnalysis(
       [entry("2028-01-30", -3_000)],
       100_000,
@@ -298,10 +404,10 @@ describe("spending chart series", () => {
       daysUntilPayday: 31,
     });
     expect(analysis.nextCycle).toMatchObject({
-      cycleStartDateKey: "2028-03-31",
-      cycleEndDateKey: "2028-04-29",
-      nextPaydayDateKey: "2028-04-30",
-      days: 30,
+      cycleStartDateKey: "2028-02-29",
+      cycleEndDateKey: "2028-03-30",
+      nextPaydayDateKey: "2028-03-31",
+      days: 31,
     });
   });
 });

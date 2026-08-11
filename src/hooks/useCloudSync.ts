@@ -141,11 +141,14 @@ function formatEntryConflict(entry: LedgerEntry): string {
 
 function formatSettingsConflict(settings: AppSettings): string {
   const plan = settings.payCycle
-    ? `每月 ${settings.payCycle.paydayDay} 日发薪，工资 ${formatCny(settings.payCycle.monthlySalaryMinor)}，周期底线 ${formatCny(settings.payCycle.cycleEndBalanceGoalMinor)}`
+    ? `每月 ${settings.payCycle.paydayDay} 日发薪，周期底线 ${formatCny(settings.payCycle.cycleEndBalanceGoalMinor)}`
     : settings.monthEndBalanceGoalMinor === undefined
-      ? "工资周期未设置"
+      ? "发薪周期未设置"
       : `旧版自然月底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;
-  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${plan}`;
+  const income = settings.incomeForecast
+    ? `；${settings.incomeForecast.targetPaydayDateKey} 收入预期：最低 ${formatCny(settings.incomeForecast.minimumIncomeMinor)}，预计 ${formatCny(settings.incomeForecast.expectedIncomeMinor)}`
+    : "；下次收入未填写";
+  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${plan}${income}`;
 }
 
 function conflictView(conflict: SyncConflict): CloudConflictView {

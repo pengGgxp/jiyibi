@@ -20,9 +20,18 @@ import {
   undoDeleteEntry,
   updateEntry,
 } from "./data";
-import { payCyclePlanFromSettings, type EntryDraft, type LedgerEntry } from "./domain";
+import {
+  currentLocalDateKey,
+  payCyclePlanFromSettings,
+  type EntryDraft,
+  type LedgerEntry,
+} from "./domain";
 import { EditEntryDialog } from "./components/EditEntryDialog";
 import { EntryComposer } from "./components/EntryComposer";
+import {
+  IncomeForecastDialog,
+  type IncomeDialogMode,
+} from "./components/IncomeForecastDialog";
 import { PrimaryNavigation } from "./components/PrimaryNavigation";
 import { RecordList } from "./components/RecordList";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -88,11 +97,18 @@ export default function App() {
   const [view, navigate] = useHashView();
   const [editingEntry, setEditingEntry] = useState<LedgerEntry>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [incomeDialogMode, setIncomeDialogMode] = useState<IncomeDialogMode>();
+  const [incomeReminderDismissed, setIncomeReminderDismissed] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState<PendingDeletion[]>([]);
   const [notice, setNotice] = useState<Notice>();
   const deletionTimers = useRef(new Map<string, number>());
   const noticeTimer = useRef<number | undefined>(undefined);
   const previousView = useRef(view);
+  const incomeForecast = ledger.settings?.incomeForecast;
+  const todayDateKey = currentLocalDateKey();
+  const dueIncomeForecast = incomeForecast && incomeForecast.targetPaydayDateKey <= todayDateKey
+    ? incomeForecast
+    : undefined;
 
   const showNotice = (next: Notice) => {
     window.clearTimeout(noticeTimer.current);
@@ -120,6 +136,10 @@ export default function App() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [view]);
+
+  useEffect(() => {
+    setIncomeReminderDismissed(false);
+  }, [incomeForecast?.id]);
 
   const create = async (draft: EntryDraft) => {
     try {
@@ -190,6 +210,11 @@ export default function App() {
     document.getElementById("main-content")?.focus();
   };
 
+  const openIncomeDialog = (mode: IncomeDialogMode) => {
+    setSettingsOpen(false);
+    setIncomeDialogMode(mode);
+  };
+
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content" onClick={skipToMain}>跳到主要内容</a>
@@ -239,6 +264,25 @@ export default function App() {
       <main id="main-content" tabIndex={-1}>
         {view === "ledger" ? (
           <>
+            {dueIncomeForecast && !incomeReminderDismissed ? (
+              <section className="income-reminder" aria-labelledby="income-reminder-title">
+                <div>
+                  <CircleAlert aria-hidden="true" />
+                  <span>
+                    <strong id="income-reminder-title">
+                      {dueIncomeForecast.targetPaydayDateKey === todayDateKey
+                        ? "今天是发薪日，记一下实际收入"
+                        : "这次发薪日已到，记一下实际收入"}
+                    </strong>
+                    <small>确认后才会计入余额，并结束本次提醒。</small>
+                  </span>
+                </div>
+                <div className="income-reminder-actions">
+                  <button type="button" className="text-button" onClick={() => setIncomeReminderDismissed(true)}>稍后</button>
+                  <button type="button" className="primary-button" onClick={() => openIncomeDialog("actual")}>填写实际收入</button>
+                </div>
+              </section>
+            ) : null}
             <div className="workspace-grid">
               <SummaryPanel
                 summary={ledger.summary}
@@ -248,6 +292,7 @@ export default function App() {
                 analysisError={ledger.analysisError}
                 loading={ledger.loading}
                 onOpenSettings={() => setSettingsOpen(true)}
+                onOpenIncomeForecast={() => openIncomeDialog("forecast")}
                 onOpenAnalysis={() => navigate("analysis")}
               />
               <EntryComposer
@@ -286,6 +331,7 @@ export default function App() {
               loading={ledger.loading}
               error={ledger.analysisError?.message ?? ledger.error?.message}
               onOpenSettings={() => setSettingsOpen(true)}
+              onOpenIncomeForecast={() => openIncomeDialog("forecast")}
               onOpenLedger={() => navigate("ledger")}
             />
           </Suspense>
@@ -309,9 +355,23 @@ export default function App() {
         pwa={pwa}
         cloudSync={cloud.settingsProps}
         onClose={() => setSettingsOpen(false)}
+        onOpenIncomeForecast={() => openIncomeDialog("forecast")}
         onDataChanged={() => {
           cloud.requestSync();
           showNotice({ kind: "success", message: cloud.linked ? "本机数据已更新，正在同步" : "本机数据已更新" });
+        }}
+      />
+      <IncomeForecastDialog
+        open={incomeDialogMode !== undefined}
+        mode={incomeDialogMode ?? "forecast"}
+        settings={ledger.settings}
+        onClose={() => setIncomeDialogMode(undefined)}
+        onSaved={(message) => {
+          cloud.requestSync();
+          showNotice({
+            kind: "success",
+            message: cloud.linked ? `${message}，正在同步` : message,
+          });
         }}
       />
 

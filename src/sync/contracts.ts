@@ -1,8 +1,13 @@
-import type { AppSettings, LedgerEntry, PayCyclePlan } from "../domain/types";
+import type {
+  AppSettings,
+  IncomeForecast,
+  LedgerEntry,
+  PayCyclePlan,
+} from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 3 as const;
-export type SyncProtocolVersion = 1 | 2 | typeof SYNC_SCHEMA_VERSION;
+export const SYNC_SCHEMA_VERSION = 4 as const;
+export type SyncProtocolVersion = 1 | 2 | 3 | typeof SYNC_SCHEMA_VERSION;
 
 export type SyncEntityType = "entry" | "settings";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
@@ -41,9 +46,13 @@ export interface EntrySyncMutation extends SyncMutationBase {
   payload: LedgerEntry;
 }
 
-export interface SettingsSyncPayload extends Omit<AppSettings, "monthEndBalanceGoalMinor" | "payCycle"> {
+export interface SettingsSyncPayload extends Omit<
+  AppSettings,
+  "monthEndBalanceGoalMinor" | "payCycle" | "incomeForecast"
+> {
   monthEndBalanceGoalMinor?: number | null;
   payCycle?: PayCyclePlan | null;
+  incomeForecast?: IncomeForecast | null;
 }
 
 export interface SettingsSyncMutation extends SyncMutationBase {
@@ -73,6 +82,8 @@ export interface EntrySyncChange extends SyncChangeBase {
 export interface SettingsSyncChange extends SyncChangeBase {
   entityType: "settings";
   payload: AppSettings;
+  /** The response carried a legacy salary that was normalized locally. */
+  claimLegacyIncomeForecast?: true;
 }
 
 export type SyncChange = EntrySyncChange | SettingsSyncChange;

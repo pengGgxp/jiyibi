@@ -1,11 +1,14 @@
 import { ApiError } from "./errors";
 import { cleanupPendingAttachments } from "./cleanup";
 import type {
-  AppSettingsPayload,
+  IncomeForecastPayload,
+  LegacyAppSettingsPayload,
+  LegacyPayCyclePlanPayload,
   LedgerEntryPayload,
   MutationResult,
   RemoteChange,
   SettingsMutationPayload,
+  SyncAppSettingsPayload,
   SyncMutation,
   SyncProtocolVersion,
   SyncRequestBody,
@@ -22,7 +25,43 @@ interface ChangeRow {
   entity_version: number;
   mutation_hash: string;
   payload_json: string;
+  settings_id?: string | null;
+  settings_currency?: string | null;
+  settings_initial_balance_minor?: number | null;
+  settings_month_end_balance_goal_minor?: number | null;
+  settings_payday_day?: number | null;
+  settings_monthly_salary_minor?: number | null;
+  settings_cycle_end_balance_goal_minor?: number | null;
+  settings_income_forecast_id?: string | null;
+  settings_income_forecast_target_payday_date_key?: string | null;
+  settings_minimum_income_minor?: number | null;
+  settings_expected_income_minor?: number | null;
+  settings_schema_version?: number | null;
+  settings_updated_at?: string | null;
 }
+
+const SETTINGS_PROJECTION_COLUMNS = `
+  current_settings.id AS settings_id,
+  current_settings.currency AS settings_currency,
+  current_settings.initial_balance_minor AS settings_initial_balance_minor,
+  current_settings.month_end_balance_goal_minor AS settings_month_end_balance_goal_minor,
+  current_settings.payday_day AS settings_payday_day,
+  current_settings.monthly_salary_minor AS settings_monthly_salary_minor,
+  current_settings.cycle_end_balance_goal_minor AS settings_cycle_end_balance_goal_minor,
+  current_settings.income_forecast_id AS settings_income_forecast_id,
+  current_settings.income_forecast_target_payday_date_key
+    AS settings_income_forecast_target_payday_date_key,
+  current_settings.minimum_income_minor AS settings_minimum_income_minor,
+  current_settings.expected_income_minor AS settings_expected_income_minor,
+  current_settings.schema_version AS settings_schema_version,
+  current_settings.updated_at AS settings_updated_at`;
+
+const SETTINGS_PROJECTION_JOIN = `
+  LEFT JOIN ledger_settings AS current_settings
+    ON current_change.entity_type = 'settings'
+   AND current_settings.user_id = current_change.user_id
+   AND current_settings.account_generation = current_change.account_generation
+   AND current_settings.id = current_change.entity_id`;
 
 interface VersionRow {
   version: number;
@@ -31,21 +70,117 @@ interface VersionRow {
 function payloadFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
-): LedgerEntryPayload | AppSettingsPayload {
+): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload {
   try {
-    const payload = JSON.parse(row.payload_json) as LedgerEntryPayload | AppSettingsPayload;
-    if (row.entity_type === "settings") {
-      if (protocolVersion === 1) {
-        delete (payload as AppSettingsPayload).monthEndBalanceGoalMinor;
-      }
-      if (protocolVersion < 3) {
-        delete (payload as AppSettingsPayload).payCycle;
-      }
-    }
-    return payload;
+    const payload = JSON.parse(row.payload_json) as unknown;
+    if (row.entity_type === "entry") return payload as LedgerEntryPayload;
+    return projectSettingsPayload(
+      settingsPayloadFromRow(row) ?? payload,
+      protocolVersion,
+    );
   } catch {
     throw new Error("Stored sync payload is invalid");
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function settingsPayloadFromRow(row: ChangeRow): Record<string, unknown> | null {
+  // Unit-test doubles and pre-v4 code paths may not include the joined columns.
+  // In production a settings change always has a current ledger_settings row.
+  if (typeof row.settings_id !== "string") return null;
+  const payload: Record<string, unknown> = {
+    id: row.settings_id,
+    currency: row.settings_currency,
+    initialBalanceMinor: row.settings_initial_balance_minor,
+    schemaVersion: row.settings_schema_version,
+    updatedAt: row.settings_updated_at,
+  };
+  if (row.settings_month_end_balance_goal_minor !== null &&
+      row.settings_month_end_balance_goal_minor !== undefined) {
+    payload.monthEndBalanceGoalMinor = row.settings_month_end_balance_goal_minor;
+  }
+  if (row.settings_payday_day !== null && row.settings_payday_day !== undefined &&
+      row.settings_cycle_end_balance_goal_minor !== null &&
+      row.settings_cycle_end_balance_goal_minor !== undefined) {
+    payload.payCycle = {
+      paydayDay: row.settings_payday_day,
+      cycleEndBalanceGoalMinor: row.settings_cycle_end_balance_goal_minor,
+    };
+  }
+  const hasForecast = row.settings_income_forecast_id !== null &&
+    row.settings_income_forecast_id !== undefined;
+  if (hasForecast) {
+    payload.incomeForecast = {
+      id: row.settings_income_forecast_id,
+      targetPaydayDateKey: row.settings_income_forecast_target_payday_date_key,
+      minimumIncomeMinor: row.settings_minimum_income_minor,
+      expectedIncomeMinor: row.settings_expected_income_minor,
+    };
+  }
+  if (row.settings_monthly_salary_minor !== null &&
+      row.settings_monthly_salary_minor !== undefined) {
+    payload._legacyMonthlySalaryMinor = row.settings_monthly_salary_minor;
+  }
+  return payload;
+}
+
+/**
+ * Settings changes written before v4 contain the old salary inside payCycle.
+ * Normalize every stored shape here so a full protocol refresh never exposes a
+ * stale v3 payload as canonical v4 settings.
+ */
+function projectSettingsPayload(
+  value: unknown,
+  protocolVersion: SyncProtocolVersion,
+): SyncAppSettingsPayload | LegacyAppSettingsPayload {
+  if (!isRecord(value)) throw new Error("Stored settings payload is invalid");
+  const base: SyncAppSettingsPayload = {
+    id: value.id as "primary",
+    currency: value.currency as "CNY",
+    initialBalanceMinor: value.initialBalanceMinor as number,
+    schemaVersion: value.schemaVersion as 1,
+    updatedAt: value.updatedAt as string,
+  };
+  if (protocolVersion >= 2 && value.monthEndBalanceGoalMinor !== undefined) {
+    base.monthEndBalanceGoalMinor = value.monthEndBalanceGoalMinor as number;
+  }
+
+  const storedCycle = isRecord(value.payCycle) ? value.payCycle : undefined;
+  const canonicalCycle = storedCycle
+    ? {
+        paydayDay: storedCycle.paydayDay as number,
+        cycleEndBalanceGoalMinor: storedCycle.cycleEndBalanceGoalMinor as number,
+      }
+    : undefined;
+  const forecast = isRecord(value.incomeForecast)
+    ? value.incomeForecast as unknown as IncomeForecastPayload
+    : undefined;
+
+  const hasLegacySalary = Object.hasOwn(value, "_legacyMonthlySalaryMinor");
+  const legacySalary = hasLegacySalary
+    ? value._legacyMonthlySalaryMinor
+    : storedCycle?.monthlySalaryMinor;
+
+  if (protocolVersion === 3 && canonicalCycle) {
+    if (Number.isSafeInteger(legacySalary) && Number(legacySalary) > 0) {
+      (base as LegacyAppSettingsPayload).payCycle = {
+        ...canonicalCycle,
+        monthlySalaryMinor: Number(legacySalary),
+      } satisfies LegacyPayCyclePlanPayload;
+    }
+  }
+
+  if (protocolVersion >= 4) {
+    if (canonicalCycle) base.payCycle = canonicalCycle;
+    if (forecast) base.incomeForecast = forecast;
+    if (!forecast && Number.isSafeInteger(legacySalary) && Number(legacySalary) > 0) {
+      base._legacyMonthlySalaryMinor = Number(legacySalary);
+    }
+  }
+  return base;
 }
 
 function canonicalJson(value: unknown): string {
@@ -120,12 +255,21 @@ async function latestRemoteChange(
 ): Promise<RemoteChange> {
   const row = await db
     .prepare(
-      `SELECT CAST(seq AS TEXT) AS cursor, mutation_id, entity_type, entity_id,
-              entity_version, mutation_hash, payload_json
-       FROM sync_changes
-       WHERE user_id = ? AND account_generation = ?
-         AND entity_type = ? AND entity_id = ?
-       ORDER BY seq DESC
+      `SELECT CAST(current_change.seq AS TEXT) AS cursor,
+              current_change.mutation_id,
+              current_change.entity_type,
+              current_change.entity_id,
+              current_change.entity_version,
+              current_change.mutation_hash,
+              current_change.payload_json,
+              ${SETTINGS_PROJECTION_COLUMNS}
+       FROM sync_changes AS current_change
+       ${SETTINGS_PROJECTION_JOIN}
+       WHERE current_change.user_id = ?
+         AND current_change.account_generation = ?
+         AND current_change.entity_type = ?
+         AND current_change.entity_id = ?
+       ORDER BY current_change.seq DESC
        LIMIT 1`,
     )
     .bind(userId, generation, mutation.entityType, mutation.entityId)
@@ -311,19 +455,36 @@ async function writeSettings(
   const mutationHash = await syncMutationHash(mutation);
   const writesGoal = protocolVersion >= 2 &&
     Object.prototype.hasOwnProperty.call(settings, "monthEndBalanceGoalMinor");
-  const writesPayCycle = protocolVersion === 3 &&
+  const writesPayCycle = protocolVersion >= 3 &&
     Object.prototype.hasOwnProperty.call(settings, "payCycle");
   const payCycle = settings.payCycle ?? null;
+  const writesForecast = protocolVersion >= 4 &&
+    Object.prototype.hasOwnProperty.call(settings, "incomeForecast");
+  const incomeForecast = settings.incomeForecast ?? null;
+  const legacyPayCycle = protocolVersion === 3 && payCycle
+    ? payCycle as LegacyPayCyclePlanPayload
+    : null;
+  const writesCompatibilitySalary = (protocolVersion === 3 && writesPayCycle) ||
+    writesForecast ||
+    (protocolVersion >= 4 && writesPayCycle && payCycle === null);
+  const compatibilitySalary = protocolVersion === 3
+    ? legacyPayCycle?.monthlySalaryMinor ?? null
+    : incomeForecast && incomeForecast.expectedIncomeMinor > 0
+      ? incomeForecast.expectedIncomeMinor
+      : null;
+  const writesCanonicalPayCycle = protocolVersion >= 4 && writesPayCycle;
+  const suppliesCanonicalPayCycle = writesCanonicalPayCycle && payCycle !== null;
   if (mutation.baseVersion === 0) {
     return db
       .prepare(
         `INSERT INTO ledger_settings (
            user_id, account_generation, id, currency, initial_balance_minor,
            month_end_balance_goal_minor, payday_day, monthly_salary_minor,
-           cycle_end_balance_goal_minor, schema_version, updated_at, version,
-           last_mutation_id, last_mutation_hash,
-           server_updated_at
-         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
+           cycle_end_balance_goal_minor, income_forecast_id,
+           income_forecast_target_payday_date_key, minimum_income_minor,
+           expected_income_minor, schema_version, updated_at, version,
+           last_mutation_id, last_mutation_hash, server_updated_at
+         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id) DO NOTHING
          RETURNING version`,
       )
@@ -333,8 +494,12 @@ async function writeSettings(
         settings.initialBalanceMinor,
         writesGoal ? settings.monthEndBalanceGoalMinor ?? null : null,
         writesPayCycle ? payCycle?.paydayDay ?? null : null,
-        writesPayCycle ? payCycle?.monthlySalaryMinor ?? null : null,
+        writesCompatibilitySalary ? compatibilitySalary : null,
         writesPayCycle ? payCycle?.cycleEndBalanceGoalMinor ?? null : null,
+        writesForecast ? incomeForecast?.id ?? null : null,
+        writesForecast ? incomeForecast?.targetPaydayDateKey ?? null : null,
+        writesForecast ? incomeForecast?.minimumIncomeMinor ?? null : null,
+        writesForecast ? incomeForecast?.expectedIncomeMinor ?? null : null,
         settings.updatedAt,
         mutation.id,
         mutationHash,
@@ -349,9 +514,16 @@ async function writeSettings(
          month_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
            ELSE month_end_balance_goal_minor END,
          payday_day = CASE WHEN ? = 1 THEN ? ELSE payday_day END,
-         monthly_salary_minor = CASE WHEN ? = 1 THEN ? ELSE monthly_salary_minor END,
+         monthly_salary_minor = CASE
+           WHEN ? = 1 AND (? IS NULL OR ? = 1 OR payday_day IS NOT NULL) THEN ?
+           ELSE monthly_salary_minor END,
          cycle_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
            ELSE cycle_end_balance_goal_minor END,
+         income_forecast_id = CASE WHEN ? = 1 THEN ? ELSE income_forecast_id END,
+         income_forecast_target_payday_date_key = CASE WHEN ? = 1 THEN ?
+           ELSE income_forecast_target_payday_date_key END,
+         minimum_income_minor = CASE WHEN ? = 1 THEN ? ELSE minimum_income_minor END,
+         expected_income_minor = CASE WHEN ? = 1 THEN ? ELSE expected_income_minor END,
          schema_version = 1, updated_at = ?, version = version + 1, last_mutation_id = ?,
          last_mutation_hash = ?, server_updated_at = ?
        WHERE user_id = ? AND account_generation = ?
@@ -362,12 +534,22 @@ async function writeSettings(
       settings.initialBalanceMinor,
       writesGoal ? 1 : 0,
       settings.monthEndBalanceGoalMinor ?? null,
-      writesPayCycle ? 1 : 0,
+      writesCanonicalPayCycle ? 1 : 0,
       payCycle?.paydayDay ?? null,
-      writesPayCycle ? 1 : 0,
-      payCycle?.monthlySalaryMinor ?? null,
-      writesPayCycle ? 1 : 0,
+      writesCompatibilitySalary ? 1 : 0,
+      compatibilitySalary,
+      suppliesCanonicalPayCycle ? 1 : 0,
+      compatibilitySalary,
+      writesCanonicalPayCycle ? 1 : 0,
       payCycle?.cycleEndBalanceGoalMinor ?? null,
+      writesForecast ? 1 : 0,
+      incomeForecast?.id ?? null,
+      writesForecast ? 1 : 0,
+      incomeForecast?.targetPaydayDateKey ?? null,
+      writesForecast ? 1 : 0,
+      incomeForecast?.minimumIncomeMinor ?? null,
+      writesForecast ? 1 : 0,
+      incomeForecast?.expectedIncomeMinor ?? null,
       settings.updatedAt,
       mutation.id,
       mutationHash,
@@ -476,8 +658,10 @@ export async function pullChanges(
               current_change.entity_id,
               current_change.entity_version,
               current_change.mutation_hash,
-              current_change.payload_json
+              current_change.payload_json,
+              ${SETTINGS_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
+       ${SETTINGS_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
           AND current_change.account_generation = ?
          AND current_change.seq > CAST(? AS INTEGER)
