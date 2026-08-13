@@ -49,17 +49,17 @@ function currentCycleCopy(analysis: SpendingAnalysis): { title: string; detail: 
     return {
       title: "暂不判断",
       detail: remainingDays > 0
-        ? `还需积累 ${remainingDays} 个完整日`
+        ? `还需数据覆盖 ${remainingDays} 个完整日`
         : "历史记录还不足",
     };
   }
   if (currentCycle.affordability === "exact") {
-    return { title: "预计刚好达到", detail: "周期末余额达到底线" };
+    return { title: "预计刚好达到", detail: "按近期已记录花法估算，周期末余额达到底线" };
   }
   const difference = currentCycle.balanceGoalDifferenceMinor ?? 0n;
   return currentCycle.affordability === "surplus"
-    ? { title: "预计够用", detail: `预计高出底线 ${formatCny(difference)}` }
-    : { title: "预计有缺口", detail: `预计短缺 ${formatCny(amountMagnitude(difference))}` };
+    ? { title: "预计够用", detail: `按近期已记录花法估算，高出底线 ${formatCny(difference)}` }
+    : { title: "预计有缺口", detail: `按近期已记录花法估算，短缺 ${formatCny(amountMagnitude(difference))}` };
 }
 
 function scenarioCopy(scenario: IncomeScenarioAnalysis | undefined, analysis: SpendingAnalysis) {
@@ -67,21 +67,23 @@ function scenarioCopy(scenario: IncomeScenarioAnalysis | undefined, analysis: Sp
     const remainingDays = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
     return {
       title: "暂不判断",
-      detail: remainingDays > 0 ? `还需积累 ${remainingDays} 个完整日` : "历史记录还不足",
+      detail: remainingDays > 0 ? `还需数据覆盖 ${remainingDays} 个完整日` : "历史记录还不足",
     };
   }
   if (scenario.affordability === "exact") {
-    return { title: "刚好覆盖", detail: "与当前花法相当" };
+    return { title: "刚好覆盖", detail: "与近期已记录花法相当" };
   }
   return scenario.affordability === "surplus"
-    ? { title: "预计够用", detail: `可多 ${formatCny(scenario.differenceMinor)}` }
-    : { title: "预计有缺口", detail: `还差 ${formatCny(amountMagnitude(scenario.differenceMinor))}` };
+    ? { title: "预计够用", detail: `按近期已记录花法可多 ${formatCny(scenario.differenceMinor)}` }
+    : { title: "预计有缺口", detail: `按近期已记录花法还差 ${formatCny(amountMagnitude(scenario.differenceMinor))}` };
 }
 
 function confidenceLabel(analysis: SpendingAnalysis): string {
-  if (analysis.confidence === "ready") return "按近 30 天估算";
-  if (analysis.confidence === "preliminary") return "初步估算";
-  return "数据积累中";
+  if (analysis.confidence === "ready") return "按近 30 天已记录花法估算";
+  if (analysis.confidence === "preliminary") {
+    return `初步估算 · 数据覆盖 ${analysis.window.observedDays} 天`;
+  }
+  return "数据覆盖不足";
 }
 
 function readableDate(dateKey: string): string {

@@ -147,16 +147,16 @@ describe("SummaryPanel spending outlook", () => {
       analysis: spendingAnalysis("insufficient"),
     });
 
-    expect(panel.textContent).toContain("还需积累 9 个完整日");
+    expect(panel.textContent).toContain("还需数据覆盖 9 个完整日");
     expect(panel.textContent).toContain("暂不判断");
     expect(panel.textContent).toContain("填写下次收入");
     expect(panel.textContent).not.toContain("预计够用");
   });
 
   it.each([
-    ["surplus", "预计够用", "预计高出底线 ¥125.00"],
-    ["shortfall", "预计有缺口", "预计短缺 ¥25.00"],
-    ["exact", "预计刚好达到", "周期末余额达到底线"],
+    ["surplus", "预计够用", "按近期已记录花法估算，高出底线 ¥125.00"],
+    ["shortfall", "预计有缺口", "按近期已记录花法估算，短缺 ¥25.00"],
+    ["exact", "预计刚好达到", "按近期已记录花法估算，周期末余额达到底线"],
   ] as const)("shows the current-cycle %s outcome in words and figures", (outcome, current, detail) => {
     const panel = renderPanel({
       payCycle: plan,
@@ -166,6 +166,7 @@ describe("SummaryPanel spending outlook", () => {
 
     expect(panel.textContent).toContain(current);
     expect(panel.textContent).toContain(detail);
+    expect(panel.textContent).toContain("按近 30 天已记录花法估算");
     expect(panel.textContent).toContain("剩余天数21 天");
     expect(panel.textContent).toContain("每日可花¥33.33");
     expect(panel.querySelector<HTMLAnchorElement>(".summary-analysis-link")?.hash).toBe("#analysis");
@@ -179,9 +180,9 @@ describe("SummaryPanel spending outlook", () => {
     });
 
     expect(panel.textContent).toContain("最低收入 ¥800.00");
-    expect(panel.textContent).toContain("还差 ¥100.00");
+    expect(panel.textContent).toContain("按近期已记录花法还差 ¥100.00");
     expect(panel.textContent).toContain("预计收入 ¥1,000.00");
-    expect(panel.textContent).toContain("可多 ¥100.00");
+    expect(panel.textContent).toContain("按近期已记录花法可多 ¥100.00");
     expect(panel.textContent).not.toContain("月工资");
   });
 

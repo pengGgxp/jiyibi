@@ -39,7 +39,9 @@ test("稳定样本会生成三张可访问图表和完整数据表", async ({ pa
   }
 
   await page.getByRole("link", { name: "分析", exact: true }).click();
-  await expect(page.getByText("近 30 天估算", { exact: true })).toBeVisible();
+  await expect(page.locator(".analysis-confidence").getByText("按近 30 天估算", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "实际现金流" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "日常花法" })).toBeVisible();
   await expect(page.locator(".analysis-verdict").first().getByText("预计够用", { exact: true }))
     .toBeVisible();
   await expect(page.locator(".analysis-income-scenarios").getByText("预计够用", { exact: true }))
@@ -60,12 +62,13 @@ test("稳定样本会生成三张可访问图表和完整数据表", async ({ pa
   await expect(accessibleCharts.nth(1)).toHaveAccessibleName("完整工资周期支出");
   await expect(accessibleCharts.nth(1)).toHaveAccessibleDescription(/显示最近 \d+ 个完整周期。/);
   await expect(accessibleCharts.nth(2)).toHaveAccessibleName("近 30 个完整日的每日支出");
-  await expect(accessibleCharts.nth(2)).toHaveAccessibleDescription(/30 个完整日共支出.+包含 0 支出日。/);
+  await expect(accessibleCharts.nth(2)).toHaveAccessibleDescription(/数据覆盖 30 天，共支出.+包含 0 支出日。/);
   await expect(page.locator(".recharts-reference-line-line")).toHaveCount(0);
   await expect(page.locator("#daily-expense-chart-title")).toHaveText("近 30 个完整日的每日支出");
   await expect(page.locator(".analysis-insight-strip")).toHaveCount(1);
-  await expect(page.locator(".analysis-insight-strip")).toContainText("统计口径：截至昨天的 30 个完整日");
-  for (const oldCopy of ["两段钱，分别回答", "把依据摆在一起", "工资基线", "可绘制的支出点"]) {
+  await expect(page.locator(".analysis-insight-strip")).toContainText("日常花法数据覆盖截至昨天的 30 天");
+  await expect(page.locator(".analysis-insight-strip")).toContainText("不代表记录完整");
+  for (const oldCopy of ["两段钱，分别回答", "把依据摆在一起", "工资基线", "可绘制的支出点", "一定够用", "保证够用"]) {
     await expect(page.locator("body")).not.toContainText(oldCopy);
   }
   const renderedLines = await page.locator("#current-cycle-chart-title")
@@ -112,7 +115,8 @@ test("超长金额不会挤出首页或分析页", async ({ page }, testInfo) =>
   await openLedger(page);
   await seedAnalysisLedger(page, { initialBalanceMinor: 9_000_000_000_000_000 });
 
-  await expect(page.locator(".summary-panel .balance-value")).toContainText("89,999,999,999,940");
+  // Observation start is now a -1 expense (not +1 income), so the huge balance is 1 fen lower.
+  await expect(page.locator(".summary-panel .balance-value")).toContainText("89,999,999,999,939");
   await expectNoHorizontalOverflow(page);
   await page.getByRole("link", { name: "分析", exact: true }).click();
   await expect(page.locator(".analysis-metric dt").filter({ hasText: "预计周期末余额" })).toHaveCount(1);

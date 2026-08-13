@@ -95,7 +95,7 @@ test("发薪周期和双收入场景可设置，并在发薪日确认实际收�
   await page.getByRole("link", { name: "查看详细分析" }).click();
   await expect(page).toHaveURL(/#analysis$/);
   await expect(page.getByRole("heading", { level: 2, name: "够不够花" })).toBeVisible();
-  await expect(page.getByText("还差 14 个完整日", { exact: true })).toBeVisible();
+  await expect(page.getByText("数据覆盖还差 14 天", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: "记账" }).click();
 
   await addTextEntry(page, { amount: "40.00", note: "目标测试收入", kind: "income" });
