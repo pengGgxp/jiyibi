@@ -7,16 +7,24 @@ import {
   parseLocalDateTime,
   resolveNextPaydayDateKey,
 } from "../domain/date";
+import {
+  assertRecoveryAllocationValid,
+  defaultTreatmentFromAmount,
+  normalizeLedgerEntry,
+} from "../domain/entry-treatment";
 import { calculateLedgerSummary } from "../domain/stats";
 import type {
   AppSettings,
   Attachment,
+  ConfirmationStatus,
   EntryDraft,
+  EntryTreatment,
   IncomeForecast,
   LedgerEntry,
   LedgerSummary,
   PayCyclePlan,
   ProcessedImage,
+  RecoveryAllocation,
 } from "../domain/types";
 import { validateEntryDraft } from "../domain/validation";
 import { createId } from "../lib/id";
@@ -31,7 +39,9 @@ import {
 
 export const DATABASE_NAME = "jiyibi";
 export const DATABASE_SCHEMA_VERSION = 1 as const;
-export const INDEXED_DB_VERSION = 3 as const;
+/** v3: cloud sync tables. v4: entry treatment fields + recovery allocations. */
+export const INDEXED_DB_VERSION = 4 as const;
+export const INDEXED_DB_SYNC_VERSION = 3 as const;
 
 const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -185,6 +195,7 @@ export class LedgerDatabase extends Dexie {
   entries!: EntityTable<LedgerEntry, "id">;
   attachments!: EntityTable<Attachment, "id">;
   settings!: EntityTable<AppSettings, "id">;
+  recoveryAllocations!: EntityTable<RecoveryAllocation, "id">;
   syncState!: EntityTable<SyncState, "id">;
   entitySyncState!: EntityTable<EntitySyncState, "id">;
   syncOutbox!: EntityTable<SyncOutboxRecord, "entityKey">;
@@ -197,7 +208,7 @@ export class LedgerDatabase extends Dexie {
       attachments: "id, entryId, createdAt",
       settings: "id",
     });
-    this.version(INDEXED_DB_VERSION).stores({
+    this.version(INDEXED_DB_SYNC_VERSION).stores({
       entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
       attachments: "id, entryId, createdAt",
       settings: "id",
@@ -241,6 +252,40 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
+    this.version(INDEXED_DB_VERSION).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      recoveryAllocations: "id, refundEntryId, expenseEntryId, deletedAt, createdAt",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    }).upgrade(async (transaction) => {
+      const entriesTable = transaction.table("entries");
+      for (const raw of await entriesTable.toArray()) {
+        await entriesTable.put(normalizeLedgerEntry(raw as LedgerEntry));
+      }
+
+      const outboxTable = transaction.table("syncOutbox");
+      for (const record of await outboxTable.toArray() as SyncOutboxRecord[]) {
+        if (record.entityType !== "entry") continue;
+        await outboxTable.put({
+          ...record,
+          payload: normalizeLedgerEntry(record.payload as LedgerEntry),
+        });
+      }
+
+      const conflictsTable = transaction.table("syncConflicts");
+      for (const conflict of await conflictsTable.toArray() as SyncConflict[]) {
+        if (conflict.entityType !== "entry") continue;
+        await conflictsTable.put({
+          ...conflict,
+          localPayload: normalizeLedgerEntry(conflict.localPayload as LedgerEntry),
+          remotePayload: normalizeLedgerEntry(conflict.remotePayload as LedgerEntry),
+        });
+      }
+    });
     this.on("populate", (transaction) =>
       transaction.table<AppSettings>("settings").add(createDefaultSettings()),
     );
@@ -265,15 +310,180 @@ function isDefaultSettings(settings: AppSettings): boolean {
   );
 }
 
+/**
+ * Protocol v4 cannot carry treatment fields (P7 will introduce v5).
+ * Local IndexedDB keeps full LedgerEntry; the outbox wire payload strips
+ * analysis-only fields so old servers keep accepting mutations.
+ */
+type SyncWireEntry = Omit<
+  LedgerEntry,
+  "treatment" | "confirmationStatus" | "detectionRuleVersion" | "promptedRevision"
+>;
+
+function toSyncWireEntry(entry: LedgerEntry): SyncWireEntry {
+  const normalized = normalizeLedgerEntry(entry);
+  const {
+    treatment: _treatment,
+    confirmationStatus: _confirmationStatus,
+    detectionRuleVersion: _detectionRuleVersion,
+    promptedRevision: _promptedRevision,
+    ...wire
+  } = normalized;
+  if (wire.deletedAt) delete wire.attachmentId;
+  return wire;
+}
+
 function syncPayloadFor(
   entityType: SyncEntityType,
   payload: LedgerEntry | AppSettings,
 ): LedgerEntry | AppSettings {
-  const syncPayload = structuredClone(payload);
-  if (entityType === "entry" && "deletedAt" in syncPayload && syncPayload.deletedAt) {
-    delete syncPayload.attachmentId;
+  if (entityType === "entry") {
+    // Cast: wire shape is a v4 subset; local readers always re-normalize.
+    return toSyncWireEntry(payload as LedgerEntry) as LedgerEntry;
   }
-  return syncPayload;
+  return structuredClone(payload);
+}
+
+function treatmentMatchesAmountSafe(
+  treatment: EntryTreatment | undefined,
+  amountMinor: number,
+): boolean {
+  if (!treatment) return false;
+  if (treatment === "account_transfer") return amountMinor !== 0;
+  if (
+    treatment === "ordinary_expense"
+    || treatment === "one_time_expense"
+    || treatment === "reimbursable_expense"
+  ) {
+    return amountMinor < 0;
+  }
+  return amountMinor > 0;
+}
+
+export async function updateEntryTreatment(
+  entryId: string,
+  treatment: EntryTreatment,
+  options: {
+    confirmationStatus?: ConfirmationStatus;
+    detectionRuleVersion?: number;
+    promptedRevision?: string;
+  } = {},
+  database = ledgerDb,
+  now = new Date(),
+): Promise<LedgerEntry> {
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existing = await database.entries.get(entryId);
+      if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
+      if (existing.deletedAt) throw new LedgerDataError("已删除的记录不能编辑", "already-deleted");
+      if (!treatmentMatchesAmountSafe(treatment, existing.amountMinor)) {
+        throw new LedgerDataError("处理方式与金额方向不一致", "invalid-settings");
+      }
+      const nowIso = now.toISOString();
+      const updated: LedgerEntry = {
+        ...normalizeLedgerEntry(existing),
+        treatment,
+        confirmationStatus: options.confirmationStatus ?? "confirmed",
+        detectionRuleVersion: options.detectionRuleVersion ?? existing.detectionRuleVersion,
+        promptedRevision: options.promptedRevision ?? existing.promptedRevision,
+        updatedAt: nowIso,
+      };
+      await database.entries.put(updated);
+      await queueSyncMutation("entry", updated.id, updated, database, nowIso);
+      return updated;
+    },
+  );
+}
+
+export async function listRecoveryAllocations(
+  database = ledgerDb,
+): Promise<RecoveryAllocation[]> {
+  return database.recoveryAllocations.toArray();
+}
+
+export async function listActiveRecoveryAllocations(
+  database = ledgerDb,
+): Promise<RecoveryAllocation[]> {
+  const rows = await database.recoveryAllocations.toArray();
+  return rows.filter((row) => !row.deletedAt);
+}
+
+export async function upsertRecoveryAllocation(
+  input: {
+    id?: string;
+    refundEntryId: string;
+    expenseEntryId: string;
+    amountMinor: number;
+  },
+  database = ledgerDb,
+  now = new Date(),
+): Promise<RecoveryAllocation> {
+  return database.transaction(
+    "rw",
+    database.entries,
+    database.recoveryAllocations,
+    async () => {
+      const refund = await database.entries.get(input.refundEntryId);
+      const expense = await database.entries.get(input.expenseEntryId);
+      if (!refund || !expense) {
+        throw new LedgerDataError("找不到关联的账目", "not-found");
+      }
+      const existing = await database.recoveryAllocations.toArray();
+      assertRecoveryAllocationValid(input.amountMinor, {
+        refund: normalizeLedgerEntry(refund),
+        expense: normalizeLedgerEntry(expense),
+        existing,
+        ignoreAllocationId: input.id,
+      });
+      const nowIso = now.toISOString();
+      const previous = input.id
+        ? await database.recoveryAllocations.get(input.id)
+        : undefined;
+      const row: RecoveryAllocation = {
+        id: input.id ?? createId("recovery"),
+        refundEntryId: input.refundEntryId,
+        expenseEntryId: input.expenseEntryId,
+        amountMinor: input.amountMinor,
+        createdAt: previous?.createdAt ?? nowIso,
+        updatedAt: nowIso,
+      };
+      await database.recoveryAllocations.put(row);
+      return row;
+    },
+  );
+}
+
+export async function softDeleteRecoveryAllocation(
+  allocationId: string,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<void> {
+  const existing = await database.recoveryAllocations.get(allocationId);
+  if (!existing || existing.deletedAt) return;
+  const nowIso = now.toISOString();
+  await database.recoveryAllocations.put({
+    ...existing,
+    deletedAt: nowIso,
+    updatedAt: nowIso,
+  });
+}
+
+export async function purgeRecoveryAllocationsForEntry(
+  entryId: string,
+  database: LedgerDatabase,
+): Promise<void> {
+  const related = await database.recoveryAllocations
+    .filter((row) => row.refundEntryId === entryId || row.expenseEntryId === entryId)
+    .toArray();
+  await Promise.all(related.map((row) => database.recoveryAllocations.delete(row.id)));
 }
 
 async function queueSyncMutation(
@@ -749,6 +959,8 @@ export async function recordActualIncome(
           localDateKey: occurred.localDateKey,
           localMonthKey: occurred.localMonthKey,
           timezoneOffsetMinutes: occurred.timezoneOffsetMinutes,
+          treatment: "ordinary_income",
+          confirmationStatus: "not_needed",
           createdAt: nowIso,
           updatedAt: nowIso,
         };
@@ -820,6 +1032,8 @@ export async function createEntry(
     localMonthKey: valid.localMonthKey,
     timezoneOffsetMinutes: valid.timezoneOffsetMinutes,
     attachmentId: attachment?.id,
+    treatment: defaultTreatmentFromAmount(valid.amountMinor),
+    confirmationStatus: "not_needed",
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -884,6 +1098,16 @@ export async function updateEntry(
       attachmentId = undefined;
     }
 
+    const signFlipped = Math.sign(existing.amountMinor) !== Math.sign(valid.amountMinor);
+    const treatment = signFlipped
+      || !treatmentMatchesAmountSafe(existing.treatment, valid.amountMinor)
+      ? defaultTreatmentFromAmount(valid.amountMinor)
+      : existing.treatment;
+    const confirmationStatus = signFlipped
+      || existing.amountMinor !== valid.amountMinor
+      || existing.occurredAt !== valid.occurredAt
+      ? "not_needed"
+      : existing.confirmationStatus;
     const updated: LedgerEntry = {
       ...existing,
       amountMinor: valid.amountMinor,
@@ -893,6 +1117,14 @@ export async function updateEntry(
       localMonthKey: valid.localMonthKey,
       timezoneOffsetMinutes: valid.timezoneOffsetMinutes,
       attachmentId,
+      treatment,
+      confirmationStatus,
+      // Amount/time change invalidates a prior prompt for this revision.
+      promptedRevision: confirmationStatus === existing.confirmationStatus
+        && existing.amountMinor === valid.amountMinor
+        && existing.occurredAt === valid.occurredAt
+        ? existing.promptedRevision
+        : undefined,
       updatedAt: nowIso,
     };
     await database.entries.put(updated);
@@ -909,20 +1141,34 @@ export async function softDeleteEntry(
 ): Promise<LedgerEntry> {
   return database.transaction(
     "rw",
-    database.entries,
-    database.syncState,
-    database.entitySyncState,
-    database.syncOutbox,
-    database.syncConflicts,
+    [
+      database.entries,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
     async () => {
-    const existing = await database.entries.get(entryId);
-    if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
-    if (existing.deletedAt) throw new LedgerDataError("这条记录已经删除", "already-deleted");
-    const timestamp = now.toISOString();
-    const deleted = { ...existing, deletedAt: timestamp, updatedAt: timestamp };
-    await database.entries.put(deleted);
-    await queueSyncMutation("entry", deleted.id, deleted, database, timestamp);
-    return deleted;
+      const existing = await database.entries.get(entryId);
+      if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
+      if (existing.deletedAt) throw new LedgerDataError("这条记录已经删除", "already-deleted");
+      const timestamp = now.toISOString();
+      const deleted = { ...normalizeLedgerEntry(existing), deletedAt: timestamp, updatedAt: timestamp };
+      await database.entries.put(deleted);
+      const related = await database.recoveryAllocations
+        .filter((row) => row.refundEntryId === entryId || row.expenseEntryId === entryId)
+        .toArray();
+      for (const row of related) {
+        if (row.deletedAt) continue;
+        await database.recoveryAllocations.put({
+          ...row,
+          deletedAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      await queueSyncMutation("entry", deleted.id, deleted, database, timestamp);
+      return deleted;
     },
   );
 }
@@ -934,21 +1180,54 @@ export async function undoDeleteEntry(
 ): Promise<LedgerEntry> {
   return database.transaction(
     "rw",
-    database.entries,
-    database.syncState,
-    database.entitySyncState,
-    database.syncOutbox,
-    database.syncConflicts,
+    [
+      database.entries,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
     async () => {
-    const existing = await database.entries.get(entryId);
-    if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
-    if (!existing.deletedAt) throw new LedgerDataError("这条记录并未删除", "not-deleted");
-    const nowIso = now.toISOString();
-    const restored: LedgerEntry = { ...existing, updatedAt: nowIso };
-    delete restored.deletedAt;
-    await database.entries.put(restored);
-    await queueSyncMutation("entry", restored.id, restored, database, nowIso);
-    return restored;
+      const existing = await database.entries.get(entryId);
+      if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
+      if (!existing.deletedAt) throw new LedgerDataError("这条记录并未删除", "not-deleted");
+      const nowIso = now.toISOString();
+      const entryDeletedAt = existing.deletedAt;
+      const restored: LedgerEntry = {
+        ...normalizeLedgerEntry(existing),
+        updatedAt: nowIso,
+      };
+      delete restored.deletedAt;
+      await database.entries.put(restored);
+
+      // Re-activate allocations soft-deleted with this entry only if both ends are live.
+      const related = await database.recoveryAllocations
+        .filter((row) => row.refundEntryId === entryId || row.expenseEntryId === entryId)
+        .toArray();
+      for (const row of related) {
+        if (row.deletedAt !== entryDeletedAt) continue;
+        const refund = await database.entries.get(row.refundEntryId);
+        const expense = await database.entries.get(row.expenseEntryId);
+        if (!refund || !expense || refund.deletedAt || expense.deletedAt) continue;
+        try {
+          const others = await database.recoveryAllocations.toArray();
+          assertRecoveryAllocationValid(row.amountMinor, {
+            refund: normalizeLedgerEntry(refund),
+            expense: normalizeLedgerEntry(expense),
+            existing: others,
+            ignoreAllocationId: row.id,
+          });
+          const live: RecoveryAllocation = { ...row, updatedAt: nowIso };
+          delete live.deletedAt;
+          await database.recoveryAllocations.put(live);
+        } catch {
+          // Leave soft-deleted; user must re-link. Do not silently truncate.
+        }
+      }
+
+      await queueSyncMutation("entry", restored.id, restored, database, nowIso);
+      return restored;
     },
   );
 }
@@ -956,26 +1235,30 @@ export async function undoDeleteEntry(
 export async function purgeDeletedEntry(entryId: string, database = ledgerDb): Promise<void> {
   await database.transaction(
     "rw",
-    database.entries,
-    database.attachments,
-    database.syncState,
-    database.entitySyncState,
-    database.syncOutbox,
+    [
+      database.entries,
+      database.attachments,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+    ],
     async () => {
-    const existing = await database.entries.get(entryId);
-    if (!existing) return;
-    if (!existing.deletedAt) {
-      throw new LedgerDataError("只能永久清理已删除的记录", "not-deleted");
-    }
-    await assertDurableTombstone(existing, database);
-    if (existing.attachmentId) {
-      const attachment = await database.attachments.get(existing.attachmentId);
-      if (attachment) {
-        await assertExclusiveAttachmentOwner(attachment, entryId, database);
+      const existing = await database.entries.get(entryId);
+      if (!existing) return;
+      if (!existing.deletedAt) {
+        throw new LedgerDataError("只能永久清理已删除的记录", "not-deleted");
       }
-      await database.attachments.delete(existing.attachmentId);
-    }
-    await database.entries.delete(entryId);
+      await assertDurableTombstone(existing, database);
+      if (existing.attachmentId) {
+        const attachment = await database.attachments.get(existing.attachmentId);
+        if (attachment) {
+          await assertExclusiveAttachmentOwner(attachment, entryId, database);
+        }
+        await database.attachments.delete(existing.attachmentId);
+      }
+      await purgeRecoveryAllocationsForEntry(entryId, database);
+      await database.entries.delete(entryId);
     },
   );
 }
@@ -1010,11 +1293,14 @@ export async function purgeDeletedEntries(
   const cutoff = typeof deletedBefore === "string" ? deletedBefore : deletedBefore.toISOString();
   return database.transaction(
     "rw",
-    database.entries,
-    database.attachments,
-    database.syncState,
-    database.entitySyncState,
-    database.syncOutbox,
+    [
+      database.entries,
+      database.attachments,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+    ],
     async () => {
     const entries = await database.entries.filter((entry) => Boolean(entry.deletedAt && entry.deletedAt <= cutoff)).toArray();
     for (const entry of entries) await assertDurableTombstone(entry, database);
@@ -1044,6 +1330,9 @@ export async function purgeDeletedEntries(
       }
     }
     await database.attachments.bulkDelete(attachmentIds);
+    for (const entry of entries) {
+      await purgeRecoveryAllocationsForEntry(entry.id, database);
+    }
     await database.entries.bulkDelete(entries.map((entry) => entry.id));
     return entries.length;
     },
@@ -1052,11 +1341,12 @@ export async function purgeDeletedEntries(
 
 export async function listActiveEntries(database = ledgerDb): Promise<LedgerEntry[]> {
   const entries = await database.entries.orderBy("occurredAt").reverse().toArray();
-  return entries.filter((entry) => !entry.deletedAt);
+  return entries.filter((entry) => !entry.deletedAt).map(normalizeLedgerEntry);
 }
 
 export async function getEntry(entryId: string, database = ledgerDb): Promise<LedgerEntry | undefined> {
-  return database.entries.get(entryId);
+  const entry = await database.entries.get(entryId);
+  return entry ? normalizeLedgerEntry(entry) : undefined;
 }
 
 export async function getAttachment(
@@ -1109,7 +1399,7 @@ async function applyRemotePayload(
     return;
   }
 
-  const entry = change.payload as LedgerEntry;
+  const entry = normalizeLedgerEntry(change.payload as LedgerEntry);
   const existing = await database.entries.get(change.entityId);
   if (entry.deletedAt) {
     const attachmentId = existing?.attachmentId ?? entry.attachmentId;

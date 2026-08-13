@@ -450,7 +450,7 @@ describe("LedgerDatabase", () => {
       settings: "id",
     });
     await legacy.open();
-    const entry: LedgerEntry = {
+    const entry = {
       id: "legacy-entry",
       amountMinor: 100,
       note: "legacy",
@@ -473,7 +473,11 @@ describe("LedgerDatabase", () => {
       await upgraded.open();
       expect(upgraded.verno).toBe(INDEXED_DB_VERSION);
       expect(DATABASE_SCHEMA_VERSION).toBe(1);
-      await expect(upgraded.entries.get(entry.id)).resolves.toEqual(entry);
+      await expect(upgraded.entries.get(entry.id)).resolves.toEqual({
+        ...entry,
+        treatment: "ordinary_income",
+        confirmationStatus: "not_needed",
+      });
       expect((await getSettings(upgraded)).initialBalanceMinor).toBe(4321);
       await expect(upgraded.syncOutbox.count()).resolves.toBe(0);
     } finally {
@@ -687,6 +691,8 @@ describe("LedgerDatabase", () => {
       localDateKey: "2026-07-30",
       localMonthKey: "2026-07",
       timezoneOffsetMinutes: 0,
+      treatment: "ordinary_income",
+      confirmationStatus: "not_needed",
       createdAt: "2026-07-30T12:30:00.000Z",
       updatedAt: "2026-07-30T12:30:00.000Z",
     };

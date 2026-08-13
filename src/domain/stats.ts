@@ -6,6 +6,13 @@ import {
   resolveNextPaydayDateKey,
   resolvePayCycleRange,
 } from "./date";
+import {
+  affectsBookBalance,
+  affectsCashflow,
+  isDailySpendCandidate,
+  normalizeLedgerEntry,
+  ordinaryExpenseNetAnalysisMinor,
+} from "./entry-treatment";
 import type {
   AppSettings,
   CompletedPayCyclePoint,
@@ -19,6 +26,7 @@ import type {
   LedgerSummary,
   PayCyclePlan,
   PayCycleStatus,
+  RecoveryAllocation,
   SpendingAnalysis,
 } from "./types";
 
@@ -107,11 +115,13 @@ function prepareAnalysisEntries(
   entries: readonly LedgerEntry[],
   todayDateKey: string,
   yesterdayDateKey: string,
+  allocations: readonly RecoveryAllocation[] = [],
 ): AnalysisEntries {
   const expenseByDate = new Map<string, number>();
   let earliestCompletedEntryDateKey: string | undefined;
 
-  for (const entry of entries) {
+  for (const raw of entries) {
+    const entry = normalizeLedgerEntry(raw);
     if (entry.deletedAt) continue;
     // Parsing also prevents lexicographic comparisons from accepting malformed keys.
     localDateFromKey(entry.localDateKey);
@@ -119,8 +129,12 @@ function prepareAnalysisEntries(
       throw new RangeError("账目金额必须使用非零整数分");
     }
     if (entry.localDateKey > todayDateKey) continue;
-    // Income, refunds, and transfers must not open the expense observation window.
-    if (entry.amountMinor > 0) continue;
+    // Only daily-spend candidates open the window and enter the baseline.
+    // Income, transfers, one-offs, and reimbursable pads are excluded.
+    if (!isDailySpendCandidate(entry)) continue;
+
+    const expenseMinor = ordinaryExpenseNetAnalysisMinor(entry, allocations);
+    if (expenseMinor <= 0) continue;
 
     if (entry.localDateKey <= yesterdayDateKey) {
       earliestCompletedEntryDateKey = earliestCompletedEntryDateKey === undefined
@@ -129,7 +143,6 @@ function prepareAnalysisEntries(
         : earliestCompletedEntryDateKey;
     }
 
-    const expenseMinor = Math.abs(entry.amountMinor);
     expenseByDate.set(
       entry.localDateKey,
       safeAdd(expenseByDate.get(entry.localDateKey) ?? 0, expenseMinor),
@@ -137,6 +150,30 @@ function prepareAnalysisEntries(
   }
 
   return { expenseByDate, earliestCompletedEntryDateKey };
+}
+
+/** Gross external outflows by date (cashflow/charts), not the daily-spend baseline. */
+function prepareGrossExpenseByDate(
+  entries: readonly LedgerEntry[],
+  todayDateKey: string,
+): Map<string, number> {
+  const expenseByDate = new Map<string, number>();
+  for (const raw of entries) {
+    const entry = normalizeLedgerEntry(raw);
+    if (entry.deletedAt) continue;
+    localDateFromKey(entry.localDateKey);
+    if (!Number.isSafeInteger(entry.amountMinor) || entry.amountMinor === 0) {
+      throw new RangeError("账目金额必须使用非零整数分");
+    }
+    if (entry.localDateKey > todayDateKey) continue;
+    if (!affectsCashflow(entry) || entry.amountMinor >= 0) continue;
+    const expenseMinor = Math.abs(entry.amountMinor);
+    expenseByDate.set(
+      entry.localDateKey,
+      safeAdd(expenseByDate.get(entry.localDateKey) ?? 0, expenseMinor),
+    );
+  }
+  return expenseByDate;
 }
 
 function expenseInRange(
@@ -259,10 +296,14 @@ export function calculateLedgerSummary(
   let monthIncomeMinor = 0;
   let monthExpenseMinor = 0;
 
-  for (const entry of entries) {
+  for (const raw of entries) {
+    const entry = normalizeLedgerEntry(raw);
     if (entry.deletedAt) continue;
-    balanceMinor = safeAdd(balanceMinor, entry.amountMinor);
+    if (affectsBookBalance(entry)) {
+      balanceMinor = safeAdd(balanceMinor, entry.amountMinor);
+    }
     if (entry.localMonthKey !== monthKey) continue;
+    if (!affectsCashflow(entry)) continue;
     if (entry.amountMinor > 0) {
       monthIncomeMinor = safeAdd(monthIncomeMinor, entry.amountMinor);
     } else {
@@ -304,9 +345,11 @@ export function calculatePayCycleStatus(
   const range = resolvePayCycleRange(plan.paydayDay, now);
   let cycleExpenseMinor = 0;
   let cycleIncomeMinor = 0;
-  for (const entry of entries) {
+  for (const raw of entries) {
+    const entry = normalizeLedgerEntry(raw);
     if (
       entry.deletedAt ||
+      !affectsCashflow(entry) ||
       entry.localDateKey < range.cycleStartDateKey ||
       entry.localDateKey > range.cycleEndDateKey
     ) {
@@ -344,6 +387,7 @@ export function calculateSpendingAnalysis(
   plan: PayCyclePlan,
   incomeForecast: IncomeForecast | undefined,
   now = new Date(),
+  allocations: readonly RecoveryAllocation[] = [],
 ): SpendingAnalysis {
   assertAnalysisInputs(balanceMinor, plan);
   if (incomeForecast) assertIncomeForecast(incomeForecast);
@@ -351,7 +395,15 @@ export function calculateSpendingAnalysis(
 
   const todayDateKey = currentLocalDateKey(now);
   const yesterdayDateKey = addLocalDays(todayDateKey, -1);
-  const prepared = prepareAnalysisEntries(entries, todayDateKey, yesterdayDateKey);
+  // Daily-spend baseline (ordinary expenses net of recovery).
+  const prepared = prepareAnalysisEntries(
+    entries,
+    todayDateKey,
+    yesterdayDateKey,
+    allocations,
+  );
+  // Gross external outflows for cycle actuals / completed-cycle charts.
+  const grossExpenseByDate = prepareGrossExpenseByDate(entries, todayDateKey);
   const windowStartCandidate = addLocalDays(yesterdayDateKey, -29);
   const statisticsStartDateKey = prepared.earliestCompletedEntryDateKey === undefined
     ? undefined
@@ -383,7 +435,7 @@ export function calculateSpendingAnalysis(
 
   const currentRange = resolvePayCycleRange(plan.paydayDay, now);
   const currentActualExpenseMinor = expenseInRange(
-    prepared.expenseByDate,
+    grossExpenseByDate,
     currentRange.cycleStartDateKey,
     todayDateKey,
   );
@@ -471,20 +523,23 @@ export function calculateSpendingAnalysis(
     cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
     currentCycle,
     nextCycle,
+    // Daily chart uses the baseline window (ordinary net amounts).
     dailyExpenses: buildDailyExpenses(
       prepared.expenseByDate,
       statisticsStartDateKey,
       yesterdayDateKey,
     ),
+    // Current-cycle series: actuals are gross external outflows; projection
+    // adds remaining daily-spend baseline only.
     currentCycleSeries: currentCycleSpendingSeries(
-      prepared.expenseByDate,
+      grossExpenseByDate,
       currentRange.cycleStartDateKey,
       todayDateKey,
       currentRange.nextPaydayDateKey,
       estimatedRemainingExpenseMinor,
     ),
     completedCycles: completedPayCycles(
-      prepared.expenseByDate,
+      grossExpenseByDate,
       plan.paydayDay,
       currentRange.cycleStartDateKey,
       prepared.earliestCompletedEntryDateKey,

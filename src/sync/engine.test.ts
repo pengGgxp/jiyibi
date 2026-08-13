@@ -125,6 +125,8 @@ describe("sync engine", () => {
       localMonthKey: "2026-07",
       timezoneOffsetMinutes: 0,
       attachmentId: "attachment_remote",
+      treatment: "ordinary_income",
+      confirmationStatus: "not_needed",
       createdAt: "2026-07-30T12:30:00.000Z",
       updatedAt: "2026-07-30T12:30:00.000Z",
     };

@@ -55,6 +55,8 @@ function entry(
     localDateKey,
     localMonthKey: localDateKey.slice(0, 7),
     timezoneOffsetMinutes: -480,
+    treatment: amountMinor < 0 ? "ordinary_expense" : "ordinary_income",
+    confirmationStatus: "not_needed",
     createdAt: `${localDateKey}T04:00:00.000Z`,
     updatedAt: `${localDateKey}T04:00:00.000Z`,
     ...overrides,

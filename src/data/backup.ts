@@ -6,6 +6,7 @@ import type {
   PayCyclePlan,
 } from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
+import { normalizeLedgerEntry } from "../domain/entry-treatment";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
   DATABASE_SCHEMA_VERSION,
@@ -415,6 +416,10 @@ function validateEntry(value: unknown): value is LedgerEntry {
   );
 }
 
+function normalizeBackupEntry(value: LedgerEntry): LedgerEntry {
+  return normalizeLedgerEntry(value);
+}
+
 function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
@@ -449,12 +454,15 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
 
   const entryIds = new Set<string>();
   const entriesById = new Map<string, LedgerEntry>();
+  const normalizedEntries: LedgerEntry[] = [];
   for (const entry of value.entries) {
     if (entryIds.has(entry.id)) {
       throw new BackupError("备份中存在重复账目", "invalid-payload");
     }
     entryIds.add(entry.id);
-    entriesById.set(entry.id, entry);
+    const normalized = normalizeBackupEntry(entry);
+    entriesById.set(entry.id, normalized);
+    normalizedEntries.push(normalized);
   }
 
   const attachmentsById = new Map<string, SerializedAttachment>();
@@ -520,10 +528,13 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
     ? migrateLegacyIncomeSettings((value as unknown as BackupPayloadV1).settings, now)
     : structuredClone(value.settings as AppSettings);
   return {
-    ...value,
+    format: BACKUP_PAYLOAD_FORMAT,
     schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
+    exportedAt: typeof value.exportedAt === "string" ? value.exportedAt : now.toISOString(),
     settings,
-  } as unknown as BackupPayloadV2;
+    entries: normalizedEntries,
+    attachments: value.attachments as BackupPayloadV2["attachments"],
+  };
 }
 
 async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV2> {

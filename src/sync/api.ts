@@ -140,6 +140,8 @@ function hasConsistentLocalDate(entry: LedgerEntry): boolean {
 }
 
 function isLedgerEntry(value: unknown): value is LedgerEntry {
+  // treatment* fields are local/v5 analysis attributes. v4 peers omit them;
+  // accept them as optional so a newer client can still parse mixed payloads.
   if (
     !isRecord(value) ||
     !hasExactKeys(
@@ -155,7 +157,14 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
         "createdAt",
         "updatedAt",
       ],
-      ["attachmentId", "deletedAt"],
+      [
+        "attachmentId",
+        "deletedAt",
+        "treatment",
+        "confirmationStatus",
+        "detectionRuleVersion",
+        "promptedRevision",
+      ],
     )
   ) {
     return false;
@@ -177,7 +186,11 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
     (value.attachmentId === undefined || isNonEmptyString(value.attachmentId)) &&
     isIsoDate(value.createdAt) &&
     isIsoDate(value.updatedAt) &&
-    (value.deletedAt === undefined || isIsoDate(value.deletedAt));
+    (value.deletedAt === undefined || isIsoDate(value.deletedAt)) &&
+    (value.treatment === undefined || typeof value.treatment === "string") &&
+    (value.confirmationStatus === undefined || typeof value.confirmationStatus === "string") &&
+    (value.detectionRuleVersion === undefined || Number.isInteger(value.detectionRuleVersion)) &&
+    (value.promptedRevision === undefined || typeof value.promptedRevision === "string");
 
   if (!structurallyValid) return false;
   return hasConsistentLocalDate(value as unknown as LedgerEntry);

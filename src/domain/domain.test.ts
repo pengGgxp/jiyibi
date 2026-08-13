@@ -21,6 +21,8 @@ function entry(overrides: Partial<LedgerEntry>): LedgerEntry {
     localDateKey: "2026-07-30",
     localMonthKey: "2026-07",
     timezoneOffsetMinutes: -480,
+    treatment: "ordinary_expense",
+    confirmationStatus: "not_needed",
     createdAt: "2026-07-30T04:00:00.000Z",
     updatedAt: "2026-07-30T04:00:00.000Z",
     ...overrides,

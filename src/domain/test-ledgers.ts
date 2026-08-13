@@ -23,6 +23,8 @@ export function testEntry(
     localDateKey,
     localMonthKey: localDateKey.slice(0, 7),
     timezoneOffsetMinutes: overrides.timezoneOffsetMinutes ?? -480,
+    treatment: amountMinor < 0 ? "ordinary_expense" : "ordinary_income",
+    confirmationStatus: "not_needed",
     createdAt: overrides.createdAt ?? `${localDateKey}T04:00:00.000Z`,
     updatedAt: overrides.updatedAt ?? `${localDateKey}T04:00:00.000Z`,
     ...overrides,

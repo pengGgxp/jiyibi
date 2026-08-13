@@ -1,6 +1,10 @@
 import { liveQuery } from "dexie";
 import { useEffect, useMemo, useState } from "react";
-import { getSettings, listActiveEntries } from "../data";
+import {
+  getSettings,
+  listActiveEntries,
+  listActiveRecoveryAllocations,
+} from "../data";
 import {
   calculateLedgerSummary,
   calculatePayCycleStatus,
@@ -11,12 +15,14 @@ import {
   type LedgerEntry,
   type LedgerSummary,
   type PayCycleStatus,
+  type RecoveryAllocation,
   type SpendingAnalysis,
 } from "../domain";
 
 interface LedgerSnapshot {
   entries: LedgerEntry[];
   settings: AppSettings;
+  allocations: RecoveryAllocation[];
 }
 
 export interface LedgerState {
@@ -37,8 +43,12 @@ export function useLedger(): LedgerState {
 
   useEffect(() => {
     const subscription = liveQuery(async () => {
-      const [entries, settings] = await Promise.all([listActiveEntries(), getSettings()]);
-      return { entries, settings };
+      const [entries, settings, allocations] = await Promise.all([
+        listActiveEntries(),
+        getSettings(),
+        listActiveRecoveryAllocations(),
+      ]);
+      return { entries, settings, allocations };
     }).subscribe({
       next: (nextSnapshot) => {
         setSnapshot(nextSnapshot);
@@ -118,6 +128,7 @@ export function useLedger(): LedgerState {
           plan,
           snapshot.settings.incomeForecast,
           new Date(year, month - 1, day, 12),
+          snapshot.allocations,
         ),
       };
     } catch (reason) {

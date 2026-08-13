@@ -1,5 +1,19 @@
 export type EntryKind = "expense" | "income";
 
+/** Analysis semantics for a ledger entry — not a spend category. */
+export type EntryTreatment =
+  | "ordinary_expense"
+  | "one_time_expense"
+  | "reimbursable_expense"
+  | "ordinary_income"
+  | "refund_reimbursement"
+  | "account_transfer";
+
+export type ConfirmationStatus = "not_needed" | "pending" | "confirmed";
+
+/** Bump when exception-detection heuristics change. */
+export const CURRENT_DETECTION_RULE_VERSION = 1 as const;
+
 export interface LedgerEntry {
   id: string;
   amountMinor: number;
@@ -9,6 +23,27 @@ export interface LedgerEntry {
   localMonthKey: string;
   timezoneOffsetMinutes: number;
   attachmentId?: string;
+  /** How this entry participates in balance / cashflow / daily spend. */
+  treatment: EntryTreatment;
+  confirmationStatus: ConfirmationStatus;
+  detectionRuleVersion?: number;
+  /** Entry updatedAt (or other revision token) when the user was last prompted. */
+  promptedRevision?: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+/**
+ * Single source of truth for refund/reimbursement → original expense recovery.
+ * Never store mirrored copies on both entries.
+ */
+export interface RecoveryAllocation {
+  id: string;
+  refundEntryId: string;
+  expenseEntryId: string;
+  /** Positive minor units allocated from the refund to the expense. */
+  amountMinor: number;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
