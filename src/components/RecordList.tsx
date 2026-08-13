@@ -55,6 +55,22 @@ function signedAmount(entry: LedgerEntry): string {
   return `${entry.amountMinor < 0 ? "−" : "+"}${absolute}`;
 }
 
+function treatmentBadge(entry: LedgerEntry): string | undefined {
+  if (entry.confirmationStatus === "pending") return "待确认";
+  switch (entry.treatment) {
+    case "one_time_expense":
+      return "一次性";
+    case "reimbursable_expense":
+      return "报销";
+    case "refund_reimbursement":
+      return "退款";
+    case "account_transfer":
+      return "账户转账";
+    default:
+      return undefined;
+  }
+}
+
 function AttachmentThumbnail({
   entry,
   loadAttachment,
@@ -188,13 +204,17 @@ export function RecordList({
               <ul className="record-list">
                 {dateEntries.map((entry) => {
                   const isExpense = entry.amountMinor < 0;
+                  const badge = treatmentBadge(entry);
                   return (
                     <li key={entry.id}>
                       <article className="record-row">
                         <AttachmentThumbnail entry={entry} loadAttachment={loadAttachment} />
                         <div className="record-copy">
                           <p>{entry.note || "截图记录"}</p>
-                          <span>{entryTime(entry)} · {isExpense ? "支出" : "收入"}</span>
+                          <span>
+                            {entryTime(entry)} · {isExpense ? "支出" : "收入"}
+                            {badge ? ` · ${badge}` : ""}
+                          </span>
                         </div>
                         <strong className={isExpense ? "expense-amount" : "income-amount"}>
                           <span className="sr-only">{isExpense ? "支出" : "收入"}</span>

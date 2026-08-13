@@ -474,6 +474,20 @@ export function calculateSpendingAnalysis(
     : undefined;
   const incomeForecastIsUpcoming = incomeForecast?.targetPaydayDateKey === upcomingPaydayDateKey;
 
+  let excludedExpenseMinor = 0;
+  let pendingConfirmationCount = 0;
+  for (const raw of entries) {
+    const entry = normalizeLedgerEntry(raw);
+    if (entry.deletedAt) continue;
+    if (entry.confirmationStatus === "pending") pendingConfirmationCount += 1;
+    if (entry.localDateKey > todayDateKey) continue;
+    if (statisticsStartDateKey && entry.localDateKey < statisticsStartDateKey) continue;
+    if (entry.localDateKey > yesterdayDateKey) continue;
+    if (!affectsCashflow(entry) || entry.amountMinor >= 0) continue;
+    if (isDailySpendCandidate(entry)) continue;
+    excludedExpenseMinor = safeAdd(excludedExpenseMinor, Math.abs(entry.amountMinor));
+  }
+
   const currentCycle: SpendingAnalysis["currentCycle"] = {
     cycleStartDateKey: currentRange.cycleStartDateKey,
     cycleEndDateKey: currentRange.cycleEndDateKey,
@@ -520,6 +534,9 @@ export function calculateSpendingAnalysis(
     asOfDateKey: todayDateKey,
     confidence,
     window: statisticsWindow,
+    includedExpenseMinor: statisticsTotalExpenseMinor,
+    excludedExpenseMinor,
+    pendingConfirmationCount,
     cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
     currentCycle,
     nextCycle,

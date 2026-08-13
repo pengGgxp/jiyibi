@@ -503,6 +503,22 @@ export function AnalysisView({
                 detail={`数据覆盖 ${analysis.window.observedDays} 天`}
               />
               <Metric
+                label="纳入日常花法"
+                value={displayAmount(analysis.includedExpenseMinor)}
+                detail="普通支出净分析金额"
+              />
+              <Metric
+                label="已排除金额"
+                value={displayAmount(analysis.excludedExpenseMinor)}
+                detail="一次性/可报销等，仍在现金流中"
+              />
+              <Metric
+                label="待确认"
+                value={`${analysis.pendingConfirmationCount} 笔`}
+                detail={analysis.pendingConfirmationCount > 0 ? "确认后估算可能变化" : "无待确认交易"}
+                tone={analysis.pendingConfirmationCount > 0 ? "pending" : "neutral"}
+              />
+              <Metric
                 label="数据覆盖"
                 value={`${analysis.window.observedDays} 天`}
                 detail={analysis.confidence === "ready" ? "满 30 天可标为按近 30 天估算" : analysis.confidence === "preliminary" ? "14–29 天为初步估算" : "不足 14 天不给结论"}
@@ -515,7 +531,14 @@ export function AnalysisView({
               <ListChecks aria-hidden="true" />
               <p>
                 日常花法数据覆盖截至昨天的 {analysis.window.observedDays} 天（含 0 支出日），不代表记录完整；
-                今天按完整一天估算，结论不是现金流保证。
+                纳入 {displayAmount(analysis.includedExpenseMinor)}
+                {analysis.excludedExpenseMinor > 0
+                  ? `，另有 ${displayAmount(analysis.excludedExpenseMinor)} 非日常支出只计入实际现金流`
+                  : ""}
+                {analysis.pendingConfirmationCount > 0
+                  ? `；有 ${analysis.pendingConfirmationCount} 笔待确认`
+                  : ""}
+                。今天按完整一天估算，结论不是现金流保证。
               </p>
             </section>
           ) : null}

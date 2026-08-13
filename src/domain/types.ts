@@ -192,6 +192,12 @@ export interface SpendingAnalysis {
   asOfDateKey: string;
   confidence: ForecastConfidence;
   window: SpendingStatisticsWindow;
+  /** Ordinary-expense net amounts included in the daily-spend baseline. */
+  includedExpenseMinor: number;
+  /** Gross outflows present in the window but excluded from daily-spend (one-time, reimbursable, etc.). */
+  excludedExpenseMinor: number;
+  /** Entries still waiting on treatment confirmation. */
+  pendingConfirmationCount: number;
   cycleEndBalanceGoalMinor: number;
   currentCycle: CurrentCycleAnalysis;
   nextCycle: NextCycleAnalysis;

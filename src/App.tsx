@@ -19,11 +19,14 @@ import {
   softDeleteEntry,
   undoDeleteEntry,
   updateEntry,
+  updateEntryTreatment,
 } from "./data";
 import {
   currentLocalDateKey,
+  evaluateExceptionPrompt,
   payCyclePlanFromSettings,
   type EntryDraft,
+  type EntryTreatment,
   type LedgerEntry,
 } from "./domain";
 import { EditEntryDialog } from "./components/EditEntryDialog";
@@ -36,12 +39,14 @@ import { PrimaryNavigation } from "./components/PrimaryNavigation";
 import { RecordList } from "./components/RecordList";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SummaryPanel } from "./components/SummaryPanel";
+import { TreatmentConfirmationDialog } from "./components/TreatmentConfirmationDialog";
 import { UndoToasts, type PendingDeletion } from "./components/UndoToasts";
 import { useLedger } from "./hooks/useLedger";
 import { useCloudSync } from "./hooks/useCloudSync";
 import { usePwa } from "./hooks/usePwa";
 import { useHashView } from "./hooks/useHashView";
 import type { CloudSyncPhase } from "./components/CloudSyncSection";
+import type { ExceptionPromptKind } from "./domain/exception-prompt";
 
 const AnalysisView = lazy(async () => {
   const module = await import("./components/AnalysisView");
@@ -101,6 +106,12 @@ export default function App() {
   const [incomeReminderDismissed, setIncomeReminderDismissed] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState<PendingDeletion[]>([]);
   const [notice, setNotice] = useState<Notice>();
+  const [treatmentPrompt, setTreatmentPrompt] = useState<{
+    entry: LedgerEntry;
+    kind: ExceptionPromptKind;
+  }>();
+  const [treatmentBusy, setTreatmentBusy] = useState(false);
+  const [treatmentError, setTreatmentError] = useState<string>();
   const deletionTimers = useRef(new Map<string, number>());
   const noticeTimer = useRef<number | undefined>(undefined);
   const previousView = useRef(view);
@@ -109,6 +120,9 @@ export default function App() {
   const dueIncomeForecast = incomeForecast && incomeForecast.targetPaydayDateKey <= todayDateKey
     ? incomeForecast
     : undefined;
+  const pendingConfirmations = ledger.entries.filter(
+    (entry) => entry.confirmationStatus === "pending",
+  );
 
   const showNotice = (next: Notice) => {
     window.clearTimeout(noticeTimer.current);
@@ -141,23 +155,98 @@ export default function App() {
     setIncomeReminderDismissed(false);
   }, [incomeForecast?.id]);
 
+  const maybePromptTreatment = (entry: LedgerEntry) => {
+    const decision = evaluateExceptionPrompt(entry, ledger.entries, ledger.analysis);
+    if (!decision.shouldPrompt) return false;
+    setTreatmentError(undefined);
+    setTreatmentPrompt({ entry, kind: decision.kind });
+    return true;
+  };
+
   const create = async (draft: EntryDraft) => {
     try {
-      await createEntry(draft);
+      const entry = await createEntry(draft);
       cloud.requestSync();
+      return entry;
     } catch (reason) {
       throw mutationError(reason, "没有保存成功，请检查本机存储后重试");
     }
   };
 
+  const handleCreated = (entry?: LedgerEntry) => {
+    if (entry && maybePromptTreatment(entry)) {
+      showNotice({
+        kind: "success",
+        message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
+      });
+      return;
+    }
+    showNotice({
+      kind: "success",
+      message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
+    });
+  };
+
   const saveEdit = async (id: string, draft: EntryDraft) => {
     try {
-      await updateEntry(id, draft);
+      const updated = await updateEntry(id, draft);
       cloud.requestSync();
       showNotice({ kind: "success", message: "记录已更新，余额已重算" });
+      maybePromptTreatment(updated);
     } catch (reason) {
       throw mutationError(reason, "修改没有保存，请重试");
     }
+  };
+
+  const confirmTreatment = async (treatment: EntryTreatment) => {
+    if (!treatmentPrompt) return;
+    setTreatmentBusy(true);
+    setTreatmentError(undefined);
+    try {
+      await updateEntryTreatment(treatmentPrompt.entry.id, treatment, {
+        confirmationStatus: "confirmed",
+        detectionRuleVersion: treatmentPrompt.entry.detectionRuleVersion,
+        promptedRevision: treatmentPrompt.entry.updatedAt,
+      });
+      cloud.requestSync();
+      setTreatmentPrompt(undefined);
+      showNotice({ kind: "success", message: "处理方式已更新，分析已重算" });
+    } catch (reason) {
+      setTreatmentError(reason instanceof Error ? reason.message : "处理方式没有保存，请重试");
+    } finally {
+      setTreatmentBusy(false);
+    }
+  };
+
+  const deferTreatment = async () => {
+    if (!treatmentPrompt) return;
+    setTreatmentBusy(true);
+    setTreatmentError(undefined);
+    try {
+      await updateEntryTreatment(
+        treatmentPrompt.entry.id,
+        treatmentPrompt.entry.treatment,
+        {
+          confirmationStatus: "pending",
+          detectionRuleVersion: treatmentPrompt.entry.detectionRuleVersion,
+          promptedRevision: treatmentPrompt.entry.updatedAt,
+        },
+      );
+      cloud.requestSync();
+      setTreatmentPrompt(undefined);
+    } catch (reason) {
+      setTreatmentError(reason instanceof Error ? reason.message : "未能标记稍后处理，请重试");
+    } finally {
+      setTreatmentBusy(false);
+    }
+  };
+
+  const openPendingConfirmation = (entry: LedgerEntry) => {
+    setTreatmentError(undefined);
+    setTreatmentPrompt({
+      entry,
+      kind: entry.amountMinor < 0 ? "expense" : "income",
+    });
   };
 
   const deleteEntry = async (entry: LedgerEntry) => {
@@ -283,6 +372,30 @@ export default function App() {
                 </div>
               </section>
             ) : null}
+            {pendingConfirmations.length > 0 ? (
+              <section className="income-reminder treatment-pending-reminder" aria-labelledby="treatment-pending-title">
+                <div>
+                  <CircleAlert aria-hidden="true" />
+                  <span>
+                    <strong id="treatment-pending-title">
+                      {pendingConfirmations.length === 1
+                        ? "有一笔交易待确认，估算可能变化"
+                        : `有 ${pendingConfirmations.length} 笔交易待确认，估算可能变化`}
+                    </strong>
+                    <small>先按日常默认计入；确认后会立即重算余额与分析。</small>
+                  </span>
+                </div>
+                <div className="income-reminder-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => openPendingConfirmation(pendingConfirmations[0]!)}
+                  >
+                    去确认
+                  </button>
+                </div>
+              </section>
+            ) : null}
             <div className="workspace-grid">
               <SummaryPanel
                 summary={ledger.summary}
@@ -297,10 +410,7 @@ export default function App() {
               />
               <EntryComposer
                 onCreate={create}
-                onSaved={() => showNotice({
-                  kind: "success",
-                  message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
-                })}
+                onSaved={handleCreated}
               />
             </div>
 
@@ -348,6 +458,20 @@ export default function App() {
         loadAttachment={cloud.loadAttachment}
         onClose={() => setEditingEntry(undefined)}
         onSave={saveEdit}
+        onTreatmentChange={async (id, treatment) => {
+          await updateEntryTreatment(id, treatment, { confirmationStatus: "confirmed" });
+          cloud.requestSync();
+          showNotice({ kind: "success", message: "处理方式已更新，分析已重算" });
+        }}
+      />
+      <TreatmentConfirmationDialog
+        entry={treatmentPrompt?.entry}
+        kind={treatmentPrompt?.kind ?? "expense"}
+        busy={treatmentBusy}
+        error={treatmentError}
+        onConfirm={confirmTreatment}
+        onDefer={deferTreatment}
+        onClose={() => void deferTreatment()}
       />
       <SettingsDialog
         open={settingsOpen}

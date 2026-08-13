@@ -86,6 +86,9 @@ function analysis(
       totalExpenseMinor: 300_000,
       averageDailyExpenseMinor: 10_000,
     },
+    includedExpenseMinor: 300_000,
+    excludedExpenseMinor: 0,
+    pendingConfirmationCount: 0,
     cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
     currentCycle: {
       cycleStartDateKey: "2026-08-10",

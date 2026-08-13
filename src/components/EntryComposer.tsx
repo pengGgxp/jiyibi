@@ -6,13 +6,14 @@ import {
   validateEntryDraft,
   type EntryDraft,
   type EntryKind,
+  type LedgerEntry,
 } from "../domain";
 import { useImageAttachment } from "../hooks/useImageAttachment";
 import { EntryFormFields, type EntryFieldErrors } from "./EntryFormFields";
 
 interface EntryComposerProps {
-  onCreate(draft: EntryDraft): Promise<void>;
-  onSaved(): void;
+  onCreate(draft: EntryDraft): Promise<LedgerEntry | void>;
+  onSaved(entry?: LedgerEntry): void;
 }
 
 function validationErrors(reason: unknown): EntryFieldErrors {
@@ -58,14 +59,14 @@ export function EntryComposer({ onCreate, onSaved }: EntryComposerProps) {
 
     setSaving(true);
     try {
-      await onCreate(draft);
+      const created = await onCreate(draft);
       setKind("expense");
       setAmount("");
       setNote("");
       setOccurredAt(currentLocalDateTimeInput());
       imageState.reset();
       setErrors({});
-      onSaved();
+      onSaved(created ?? undefined);
     } catch (reason) {
       setErrors({ form: reason instanceof Error ? reason.message : "保存失败，请重试" });
     } finally {
