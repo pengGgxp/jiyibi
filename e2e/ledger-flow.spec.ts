@@ -33,6 +33,66 @@ test("编辑、初始余额和删除撤销会准确重算", async ({ page }, tes
   await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥92.00");
 });
 
+test("大额支出保存后可稍后确认，并在刷新后保持处理方式", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-chrome", "确认流只需在移动端执行一次");
+  await openLedger(page);
+
+  await page.getByRole("button", { name: "打开设置" }).click();
+  const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByRole("switch", { name: /打开发薪周期/ }).check();
+  await settings.locator("#payday-day").fill(String(await page.evaluate(() => new Date().getDate())));
+  await settings.locator("#cycle-end-balance-goal").fill("0.00");
+  await settings.getByRole("button", { name: "保存发薪周期" }).click();
+  await expect(settings.getByText("发薪周期已更新", { exact: true })).toBeVisible();
+  await settings.getByRole("button", { name: "关闭设置" }).click();
+
+  await addTextEntry(page, { amount: "800.00", note: "一次性设备" });
+  const prompt = page.getByRole("dialog", { name: "这笔支出会明显影响估算" });
+  await expect(prompt).toBeVisible();
+  await expect(page.getByText("一次性设备", { exact: true })).toBeVisible();
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥800.00");
+
+  await prompt.getByRole("button", { name: "稍后处理" }).click();
+  await expect(prompt).toBeHidden();
+  const pending = page.locator(".income-reminder").filter({ hasText: "交易待确认" });
+  await expect(pending).toBeVisible();
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await dismissOfflineReady(page);
+  await expect(prompt).toHaveCount(0);
+  await expect(pending).toBeVisible();
+  await pending.getByRole("button", { name: "去确认" }).click();
+  await expect(prompt).toBeVisible();
+  await prompt.getByRole("radio", { name: /仅这一次/ }).check();
+  await prompt.getByRole("button", { name: "确认" }).click();
+  await expect(prompt).toBeHidden();
+  await expect(pending).toHaveCount(0);
+
+  await expect(page.getByRole("link", { name: "查看详细分析" })).toBeVisible();
+  await page.getByRole("link", { name: "查看详细分析" }).click();
+  await expect(page.getByRole("heading", { level: 3, name: "实际现金流" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "日常花法" })).toBeVisible();
+  const cashflow = page.locator(".analysis-metrics-section").filter({ has: page.getByRole("heading", { name: "实际现金流" }) });
+  const baseline = page.locator(".analysis-metrics-section").filter({ has: page.getByRole("heading", { name: "日常花法" }) });
+  await expect(cashflow).toContainText("本月支出");
+  await expect(cashflow).toContainText("¥800.00");
+  const includedBaseline = baseline.locator(".analysis-metric").filter({ hasText: "纳入日常花法" });
+  await expect(includedBaseline.locator("dt")).toHaveText("纳入日常花法");
+  await expect(includedBaseline.locator("dd").first()).toHaveText("¥0.00");
+  await page.getByRole("link", { name: "记账" }).click();
+
+  const record = page.getByRole("article").filter({ hasText: "一次性设备" });
+  await expect(record).toContainText("支出 · 一次性");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥800.00");
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await dismissOfflineReady(page);
+  await expect(prompt).toHaveCount(0);
+  const reloadedRecord = page.getByRole("article").filter({ hasText: "一次性设备" });
+  await expect(reloadedRecord).toContainText("支出 · 一次性");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥800.00");
+});
+
 test("发薪周期和双收入场景可设置，并在发薪日确认实际收入", async ({ page }) => {
   await openLedger(page);
 

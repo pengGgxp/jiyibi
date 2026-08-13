@@ -25,6 +25,16 @@ export interface CloudSyncState {
   lastDeletedGeneration: number | null;
 }
 
+export type EntryTreatment =
+  | "ordinary_expense"
+  | "one_time_expense"
+  | "reimbursable_expense"
+  | "ordinary_income"
+  | "refund_reimbursement"
+  | "account_transfer";
+
+export type ConfirmationStatus = "not_needed" | "pending" | "confirmed";
+
 export interface LedgerEntryPayload {
   id: string;
   amountMinor: number;
@@ -34,6 +44,20 @@ export interface LedgerEntryPayload {
   localMonthKey: string;
   timezoneOffsetMinutes: number;
   attachmentId?: string;
+  treatment?: EntryTreatment;
+  confirmationStatus?: ConfirmationStatus;
+  detectionRuleVersion?: number;
+  promptedRevision?: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface RecoveryAllocationPayload {
+  id: string;
+  refundEntryId: string;
+  expenseEntryId: string;
+  amountMinor: number;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
@@ -90,8 +114,8 @@ export interface SettingsMutationPayload
   incomeForecast?: IncomeForecastPayload | null;
 }
 
-export type SyncEntityType = "entry" | "settings";
-export type SyncProtocolVersion = 1 | 2 | 3 | 4;
+export type SyncEntityType = "entry" | "settings" | "recoveryAllocation";
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5;
 
 interface SyncMutationBase {
   id: string;
@@ -101,7 +125,11 @@ interface SyncMutationBase {
 
 export type SyncMutation =
   | SyncMutationBase & { entityType: "entry"; payload: LedgerEntryPayload }
-  | SyncMutationBase & { entityType: "settings"; payload: SettingsMutationPayload };
+  | SyncMutationBase & { entityType: "settings"; payload: SettingsMutationPayload }
+  | SyncMutationBase & {
+      entityType: "recoveryAllocation";
+      payload: RecoveryAllocationPayload;
+    };
 
 export interface SyncRequestBody {
   schemaVersion: SyncProtocolVersion;
@@ -114,7 +142,11 @@ export interface RemoteChange {
   entityType: SyncEntityType;
   entityId: string;
   version: number;
-  payload: LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload;
+  payload:
+    | LedgerEntryPayload
+    | SyncAppSettingsPayload
+    | LegacyAppSettingsPayload
+    | RecoveryAllocationPayload;
 }
 
 export type MutationResult =

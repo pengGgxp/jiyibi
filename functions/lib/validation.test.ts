@@ -439,6 +439,67 @@ describe("validateSyncRequest", () => {
     );
   });
 
+  it("requires valid analysis fields on version-five entries", () => {
+    const request = validRequest() as {
+      schemaVersion: number;
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    request.schemaVersion = 5;
+    request.mutations[0].payload.treatment = "ordinary_expense";
+    request.mutations[0].payload.confirmationStatus = "pending";
+    request.mutations[0].payload.detectionRuleVersion = 1;
+    request.mutations[0].payload.promptedRevision = "2026-07-30T04:02:00.000Z";
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      treatment: "ordinary_expense",
+      confirmationStatus: "pending",
+      detectionRuleVersion: 1,
+    });
+
+    const missing = structuredClone(request);
+    delete missing.mutations[0].payload.treatment;
+    expect(() => validateSyncRequest(missing)).toThrowError("invalid fields");
+
+    request.mutations[0].payload.treatment = "ordinary_income";
+    expect(() => validateSyncRequest(request)).toThrowError("Entry payload is invalid");
+  });
+
+  it("accepts strict version-five recovery allocation mutations only", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 5;
+    request.mutations = [{
+      id: "mutation_recovery_1",
+      entityType: "recoveryAllocation",
+      entityId: "recovery_1",
+      baseVersion: 0,
+      payload: {
+        id: "recovery_1",
+        refundEntryId: "entry_refund",
+        expenseEntryId: "entry_expense",
+        amountMinor: 500,
+        createdAt: "2026-07-30T04:01:00.000Z",
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0]).toMatchObject({
+      entityType: "recoveryAllocation",
+      payload: { amountMinor: 500 },
+    });
+
+    const old = structuredClone(request);
+    old.schemaVersion = 4;
+    expect(() => validateSyncRequest(old)).toThrowError("Mutation is invalid");
+
+    const overdrawn = structuredClone(request) as {
+      mutations: Array<{ payload: { amountMinor: number } }>;
+    };
+    overdrawn.mutations[0].payload.amountMinor = 0;
+    expect(() => validateSyncRequest(overdrawn)).toThrowError(
+      "Recovery allocation payload is invalid",
+    );
+  });
+
   it("accepts a create-then-delete tombstone without requiring its local attachment", () => {
     const request = validRequest() as {
       mutations: Array<{ payload: Record<string, unknown> }>;

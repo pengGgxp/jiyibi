@@ -1,11 +1,17 @@
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import { resolveNextPaydayDateKey } from "../domain/date";
+import {
+  isConfirmationStatus,
+  isEntryTreatment,
+  treatmentMatchesAmount,
+} from "../domain/entry-treatment";
 import type {
   AppSettings,
   Attachment,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
+  RecoveryAllocation,
 } from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
@@ -30,7 +36,8 @@ export type SyncApiErrorCode =
   | "quota"
   | "stale_cloud_generation"
   | "cloud_sync_disabled"
-  | "account_deletion_in_progress";
+  | "account_deletion_in_progress"
+  | "upgrade_required";
 
 export class SyncApiError extends Error {
   constructor(
@@ -140,8 +147,6 @@ function hasConsistentLocalDate(entry: LedgerEntry): boolean {
 }
 
 function isLedgerEntry(value: unknown): value is LedgerEntry {
-  // treatment* fields are local/v5 analysis attributes. v4 peers omit them;
-  // accept them as optional so a newer client can still parse mixed payloads.
   if (
     !isRecord(value) ||
     !hasExactKeys(
@@ -154,24 +159,19 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
         "localDateKey",
         "localMonthKey",
         "timezoneOffsetMinutes",
+        "treatment",
+        "confirmationStatus",
         "createdAt",
         "updatedAt",
       ],
-      [
-        "attachmentId",
-        "deletedAt",
-        "treatment",
-        "confirmationStatus",
-        "detectionRuleVersion",
-        "promptedRevision",
-      ],
+      ["attachmentId", "deletedAt", "detectionRuleVersion", "promptedRevision"],
     )
   ) {
     return false;
   }
 
   const structurallyValid =
-    isNonEmptyString(value.id) &&
+    typeof value.id === "string" && SYNC_ID_PATTERN.test(value.id) &&
     Number.isSafeInteger(value.amountMinor) &&
     value.amountMinor !== 0 &&
     Math.abs(Number(value.amountMinor)) <= MAX_AMOUNT_MINOR &&
@@ -183,14 +183,22 @@ function isLedgerEntry(value: unknown): value is LedgerEntry {
     /^\d{4}-\d{2}$/.test(value.localMonthKey) &&
     Number.isInteger(value.timezoneOffsetMinutes) &&
     Math.abs(Number(value.timezoneOffsetMinutes)) <= 14 * 60 &&
-    (value.attachmentId === undefined || isNonEmptyString(value.attachmentId)) &&
+    (value.attachmentId === undefined || (
+      typeof value.attachmentId === "string" && SYNC_ID_PATTERN.test(value.attachmentId)
+    )) &&
+    isEntryTreatment(value.treatment) &&
+    treatmentMatchesAmount(value.treatment, Number(value.amountMinor)) &&
+    isConfirmationStatus(value.confirmationStatus) &&
+    (value.detectionRuleVersion === undefined || (
+      Number.isSafeInteger(value.detectionRuleVersion) && Number(value.detectionRuleVersion) >= 0
+    )) &&
+    (value.promptedRevision === undefined || isIsoDate(value.promptedRevision)) &&
     isIsoDate(value.createdAt) &&
     isIsoDate(value.updatedAt) &&
-    (value.deletedAt === undefined || isIsoDate(value.deletedAt)) &&
-    (value.treatment === undefined || typeof value.treatment === "string") &&
-    (value.confirmationStatus === undefined || typeof value.confirmationStatus === "string") &&
-    (value.detectionRuleVersion === undefined || Number.isInteger(value.detectionRuleVersion)) &&
-    (value.promptedRevision === undefined || typeof value.promptedRevision === "string");
+    new Date(value.updatedAt).getTime() >= new Date(value.createdAt).getTime() &&
+    (value.deletedAt === undefined || (
+      isIsoDate(value.deletedAt) && value.deletedAt === value.updatedAt
+    ));
 
   if (!structurallyValid) return false;
   return hasConsistentLocalDate(value as unknown as LedgerEntry);
@@ -265,6 +273,30 @@ function isIncomeForecast(value: unknown): value is IncomeForecast {
   );
 }
 
+function isRecoveryAllocation(value: unknown): value is RecoveryAllocation {
+  return (
+    isRecord(value) &&
+    hasExactKeys(
+      value,
+      ["id", "refundEntryId", "expenseEntryId", "amountMinor", "createdAt", "updatedAt"],
+      ["deletedAt"],
+    ) &&
+    typeof value.id === "string" && SYNC_ID_PATTERN.test(value.id) &&
+    typeof value.refundEntryId === "string" && SYNC_ID_PATTERN.test(value.refundEntryId) &&
+    typeof value.expenseEntryId === "string" && SYNC_ID_PATTERN.test(value.expenseEntryId) &&
+    value.refundEntryId !== value.expenseEntryId &&
+    Number.isSafeInteger(value.amountMinor) &&
+    Number(value.amountMinor) > 0 &&
+    Number(value.amountMinor) <= MAX_AMOUNT_MINOR &&
+    isIsoDate(value.createdAt) &&
+    isIsoDate(value.updatedAt) &&
+    new Date(value.updatedAt).getTime() >= new Date(value.createdAt).getTime() &&
+    (value.deletedAt === undefined || (
+      isIsoDate(value.deletedAt) && value.deletedAt === value.updatedAt
+    ))
+  );
+}
+
 function isSyncChange(value: unknown): value is SyncChange {
   if (
     !isRecord(value) ||
@@ -282,6 +314,9 @@ function isSyncChange(value: unknown): value is SyncChange {
   }
   if (value.entityType === "settings") {
     return isAppSettings(value.payload) && value.payload.id === value.entityId;
+  }
+  if (value.entityType === "recoveryAllocation") {
+    return isRecoveryAllocation(value.payload) && value.payload.id === value.entityId;
   }
   return false;
 }
@@ -565,7 +600,8 @@ async function requestError(response: Response): Promise<SyncApiError> {
         if (
           code === "stale_cloud_generation" ||
           code === "cloud_sync_disabled" ||
-          code === "account_deletion_in_progress"
+          code === "account_deletion_in_progress" ||
+          code === "upgrade_required"
         ) {
           const message = typeof value.error.message === "string"
             ? value.error.message

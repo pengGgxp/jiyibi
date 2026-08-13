@@ -44,9 +44,9 @@ function dailyExpenses(
 }
 
 /**
- * Spec §7 scenes as pure data. Expectation comments document current MVP
- * rules (all negatives enter daily spend) and the P0 window rule (income
- * does not open coverage). Layer 2 will re-assert treatment-aware outcomes.
+ * Spec §7 scenes as pure data. Expectation comments describe treatment-aware
+ * analysis: default ordinary expenses enter daily spend, while income never
+ * opens coverage and deleted or future rows are ignored.
  */
 export const testLedgers = {
   /** Stable daily spend across a full 30-day window. */
@@ -93,10 +93,9 @@ export const testLedgers = {
     ],
   },
 
-  /** One large expense mixed with small daily spend (MVP still includes it). */
+  /** One large ordinary expense mixed with small daily spend. */
   oneOffLargeExpense: {
-    // Expect MVP: large expense counted in baseline total.
-    // Layer 2 one_time_expense will exclude it from daily spend only.
+    // Expect: the large row stays in daily spend until confirmed as one-time.
     now: TEST_LEDGER_NOW,
     plan: TEST_LEDGER_PLAN,
     balanceMinor: 100_000,

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateExceptionPrompt } from "./exception-prompt";
+import {
+  EXCEPTION_ABSOLUTE_MINOR,
+  evaluateExceptionPrompt,
+} from "./exception-prompt";
 import { testEntry, TEST_LEDGER_NOW, TEST_LEDGER_PLAN } from "./test-ledgers";
 import { calculateSpendingAnalysis } from "./stats";
 import type { IncomeForecast, SpendingAnalysis } from "./types";
@@ -23,6 +26,21 @@ function analysisFor(entries: ReturnType<typeof testEntry>[]): SpendingAnalysis 
     forecast(),
     TEST_LEDGER_NOW,
   );
+}
+
+function thresholdAnalysis(overrides: Partial<SpendingAnalysis> = {}): SpendingAnalysis {
+  const base = analysisFor([]);
+  return {
+    ...base,
+    window: {
+      ...base.window,
+      observedDays: 20,
+      daysNeeded: 14,
+      totalExpenseMinor: 100_000,
+      averageDailyExpenseMinor: 5_000,
+    },
+    ...overrides,
+  };
 }
 
 describe("evaluateExceptionPrompt", () => {
@@ -72,5 +90,138 @@ describe("evaluateExceptionPrompt", () => {
     });
     const decision = evaluateExceptionPrompt(large, [large], undefined);
     expect(decision.shouldPrompt).toBe(false);
+  });
+
+  it.each([
+    [EXCEPTION_ABSOLUTE_MINOR - 1, false],
+    [EXCEPTION_ABSOLUTE_MINOR, true],
+    [EXCEPTION_ABSOLUTE_MINOR + 1, true],
+  ])("uses the inclusive absolute threshold for sparse history: %i", (amount, expected) => {
+    const expense = testEntry("2026-08-10", -amount, { id: `expense-${amount}` });
+    const decision = evaluateExceptionPrompt(expense, [expense], undefined);
+    expect(decision.reasons.includes("large_expense")).toBe(expected);
+  });
+
+  it.each([
+    [49_999, false],
+    [50_000, true],
+    [50_001, true],
+  ])("uses the inclusive 25-percent window-share threshold: %i", (amount, expected) => {
+    const expense = testEntry("2026-08-10", -amount, { id: `share-${amount}` });
+    const analysis = thresholdAnalysis({
+      window: {
+        endDateKey: "2026-08-09",
+        observedDays: 20,
+        daysNeeded: 14,
+        totalExpenseMinor: 200_000,
+        averageDailyExpenseMinor: 1_000,
+      },
+    });
+    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
+    expect(decision.reasons.includes("large_expense")).toBe(expected);
+  });
+
+  it.each([
+    [74_999, false],
+    [75_000, true],
+    [75_001, true],
+  ])("uses the inclusive five-times-daily threshold: %i", (amount, expected) => {
+    const expense = testEntry("2026-08-10", -amount, { id: `daily-${amount}` });
+    const analysis = thresholdAnalysis({
+      window: {
+        endDateKey: "2026-08-09",
+        observedDays: 5,
+        daysNeeded: 14,
+        totalExpenseMinor: 100_000,
+        averageDailyExpenseMinor: 15_000,
+      },
+    });
+    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
+    expect(decision.reasons.includes("large_expense")).toBe(expected);
+  });
+
+  it.each([
+    [199_999, false],
+    [200_000, true],
+    [200_001, true],
+  ])("uses the largest of share, daily and absolute thresholds: %i", (amount, expected) => {
+    const expense = testEntry("2026-08-10", -amount, { id: `expense-${amount}` });
+    const analysis = thresholdAnalysis({
+      window: {
+        endDateKey: "2026-08-09",
+        observedDays: 20,
+        daysNeeded: 14,
+        totalExpenseMinor: 800_000,
+        averageDailyExpenseMinor: 30_000,
+      },
+    });
+    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
+    expect(decision.reasons.includes("large_expense")).toBe(expected);
+  });
+
+  it("prompts when excluding the expense would reverse a shortfall", () => {
+    const expense = testEntry("2026-08-10", -20_000, { id: "flip" });
+    const base = thresholdAnalysis();
+    const analysis: SpendingAnalysis = {
+      ...base,
+      currentCycle: {
+        ...base.currentCycle,
+        affordability: "shortfall",
+        estimatedRemainingExpenseMinor: 100_000,
+        balanceGoalDifferenceMinor: -15_000n,
+      },
+    };
+    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
+    expect(decision.reasons).toContain("flips_affordability");
+    expect(decision.reasons).not.toContain("large_expense");
+  });
+
+  it.each([
+    [99, true],
+    [100, true],
+    [101, false],
+  ])("uses an inclusive one-yuan refund tolerance: %i", (difference, expected) => {
+    const expense = testEntry("2026-07-15", -12_345, { id: "expense" });
+    const refund = testEntry("2026-08-01", 12_345 + difference, { id: "refund" });
+    const decision = evaluateExceptionPrompt(refund, [expense, refund], undefined);
+    expect(decision.reasons.includes("possible_refund")).toBe(expected);
+  });
+
+  it.each([
+    [59, true],
+    [60, true],
+    [61, false],
+  ])("uses an inclusive sixty-day refund lookback: %i", (days, expected) => {
+    const refund = testEntry("2026-08-10", 12_345, { id: "refund" });
+    const expenseDate = addLocalDays("2026-08-10", -days);
+    const expense = testEntry(expenseDate, -12_345, { id: `expense-${days}` });
+    const decision = evaluateExceptionPrompt(refund, [refund, expense], undefined);
+    expect(decision.reasons.includes("possible_refund")).toBe(expected);
+  });
+
+  it("ignores deleted, future and later-listed refund candidates", () => {
+    const refund = testEntry("2026-08-10", 12_345, { id: "refund" });
+    const deleted = testEntry("2026-08-01", -12_345, {
+      id: "deleted",
+      deletedAt: "2026-08-02T04:00:00.000Z",
+    });
+    const future = testEntry("2026-08-11", -12_345, { id: "future" });
+    const decision = evaluateExceptionPrompt(refund, [future, refund, deleted], undefined);
+    expect(decision.reasons).not.toContain("possible_refund");
+  });
+
+  it("does not depend on same-day entry order", () => {
+    const expense = testEntry("2026-08-01", -12_345, {
+      id: "expense",
+      occurredAt: "2026-08-01T03:00:00.000Z",
+    });
+    const refund = testEntry("2026-08-01", 12_345, {
+      id: "refund",
+      occurredAt: "2026-08-01T04:00:00.000Z",
+    });
+    const forward = evaluateExceptionPrompt(refund, [expense, refund], undefined);
+    const reverse = evaluateExceptionPrompt(refund, [refund, expense], undefined);
+    expect(forward).toEqual(reverse);
+    expect(forward.reasons).toContain("possible_refund");
   });
 });

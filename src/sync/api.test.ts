@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { LedgerEntry } from "../domain/types";
+import type { LedgerEntry, RecoveryAllocation } from "../domain/types";
 import { SyncApiError, createSyncApiClient, type SyncFetch } from "./api";
 import {
   API_SCHEMA_VERSION,
@@ -29,6 +29,18 @@ function entry(overrides: Partial<LedgerEntry> = {}): LedgerEntry {
     confirmationStatus: "not_needed",
     createdAt: "2026-07-30T04:00:00.000Z",
     updatedAt: "2026-07-30T04:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function allocation(overrides: Partial<RecoveryAllocation> = {}): RecoveryAllocation {
+  return {
+    id: "recovery-1",
+    refundEntryId: "entry-refund",
+    expenseEntryId: "entry-expense",
+    amountMinor: 500,
+    createdAt: "2026-07-30T05:00:00.000Z",
+    updatedAt: "2026-07-30T05:00:00.000Z",
     ...overrides,
   };
 }
@@ -300,6 +312,71 @@ describe("sync API client", () => {
       },
       body: JSON.stringify(request),
     });
+  });
+
+  it("accepts recovery allocation changes and conflicts", async () => {
+    const response = syncResponse();
+    const change = {
+      seq: "9",
+      entityType: "recoveryAllocation" as const,
+      entityId: "recovery-1",
+      version: 2,
+      payload: allocation(),
+    };
+    response.results = [{ id: "mutation-recovery", status: "conflict", remote: change }];
+    response.changes = [change];
+    response.nextCursor = "9";
+    const fetcher = mockFetch(jsonResponse(response));
+    const request = {
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "8",
+      mutations: [{
+        id: "mutation-recovery",
+        entityType: "recoveryAllocation" as const,
+        entityId: "recovery-1",
+        baseVersion: 1,
+        payload: allocation({ amountMinor: 400 }),
+      }],
+    };
+
+    await expect(createSyncApiClient(fetcher).sync(request, 3)).resolves.toEqual(response);
+  });
+
+  it.each([
+    allocation({ id: "different-id" }),
+    allocation({ amountMinor: 0 }),
+    allocation({ refundEntryId: "same", expenseEntryId: "same" }),
+    allocation({ updatedAt: "2026-07-30T04:59:59.000Z" }),
+    { ...allocation(), unexpected: true },
+  ])("rejects an invalid recovery allocation change: %o", async (payload) => {
+    const response = syncResponse() as unknown as Record<string, unknown>;
+    response.results = [];
+    response.changes = [{
+      seq: "9",
+      entityType: "recoveryAllocation",
+      entityId: "recovery-1",
+      version: 1,
+      payload,
+    }];
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).rejects.toMatchObject({ code: "invalid-response" });
+  });
+
+  it("preserves upgrade_required without treating it as a network failure", async () => {
+    const fetcher = mockFetch(jsonResponse({
+      error: { code: "upgrade_required", message: "upgrade" },
+    }, { status: 409 }));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).rejects.toMatchObject({ code: "upgrade_required" });
   });
 
   it("accepts legacy settings changes without optional planning fields", async () => {

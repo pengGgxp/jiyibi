@@ -6,7 +6,7 @@ import {
 } from "./types";
 import { normalizeLedgerEntry } from "./entry-treatment";
 
-/** First-pass heuristics; calibrated later with test ledgers (P8). */
+/** Calibrated high-signal thresholds for synthetic representative ledgers. */
 export const EXCEPTION_SHARE_OF_WINDOW = 0.25;
 export const EXCEPTION_DAILY_MULTIPLIER = 5;
 export const EXCEPTION_ABSOLUTE_MINOR = 50_000;

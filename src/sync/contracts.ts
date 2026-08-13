@@ -3,13 +3,14 @@ import type {
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
+  RecoveryAllocation,
 } from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 4 as const;
-export type SyncProtocolVersion = 1 | 2 | 3 | typeof SYNC_SCHEMA_VERSION;
+export const SYNC_SCHEMA_VERSION = 5 as const;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | typeof SYNC_SCHEMA_VERSION;
 
-export type SyncEntityType = "entry" | "settings";
+export type SyncEntityType = "entry" | "settings" | "recoveryAllocation";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
 
 export interface SessionResponse {
@@ -60,7 +61,15 @@ export interface SettingsSyncMutation extends SyncMutationBase {
   payload: SettingsSyncPayload;
 }
 
-export type SyncMutation = EntrySyncMutation | SettingsSyncMutation;
+export interface RecoveryAllocationSyncMutation extends SyncMutationBase {
+  entityType: "recoveryAllocation";
+  payload: RecoveryAllocation;
+}
+
+export type SyncMutation =
+  | EntrySyncMutation
+  | SettingsSyncMutation
+  | RecoveryAllocationSyncMutation;
 
 export interface SyncRequest {
   schemaVersion: typeof SYNC_SCHEMA_VERSION;
@@ -86,7 +95,12 @@ export interface SettingsSyncChange extends SyncChangeBase {
   claimLegacyIncomeForecast?: true;
 }
 
-export type SyncChange = EntrySyncChange | SettingsSyncChange;
+export interface RecoveryAllocationSyncChange extends SyncChangeBase {
+  entityType: "recoveryAllocation";
+  payload: RecoveryAllocation;
+}
+
+export type SyncChange = EntrySyncChange | SettingsSyncChange | RecoveryAllocationSyncChange;
 
 export interface SyncAppliedResult {
   id: string;

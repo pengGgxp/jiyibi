@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { formatCny, type EntryTreatment, type LedgerEntry } from "../domain";
 import {
   expenseTreatmentOptions,
@@ -25,7 +25,10 @@ export function TreatmentConfirmationDialog({
   onConfirm,
   onDefer,
 }: TreatmentConfirmationDialogProps) {
-  const options = kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions();
+  const options = useMemo(
+    () => kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions(),
+    [kind],
+  );
   const defaultTreatment = kind === "expense" ? "ordinary_expense" : "ordinary_income";
   const [selected, setSelected] = useState<EntryTreatment>(defaultTreatment);
 
@@ -33,7 +36,7 @@ export function TreatmentConfirmationDialog({
     setSelected(entry?.treatment && options.some((option) => option.value === entry.treatment)
       ? entry.treatment
       : defaultTreatment);
-  }, [entry?.id, entry?.treatment, defaultTreatment, kind]);
+  }, [entry?.id, entry?.treatment, defaultTreatment, options]);
 
   if (!entry) return null;
 

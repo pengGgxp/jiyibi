@@ -1,7 +1,13 @@
 import { Blob as NodeBlob } from "node:buffer";
 import { webcrypto } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { Attachment, EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
+import type {
+  Attachment,
+  EntryDraft,
+  LedgerEntry,
+  ProcessedImage,
+  RecoveryAllocation,
+} from "../domain/types";
 import {
   BACKUP_FORMAT,
   BACKUP_PAYLOAD_SCHEMA_VERSION,
@@ -22,6 +28,8 @@ import {
   setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
+  upsertRecoveryAllocation,
+  updateEntryTreatment,
 } from "./database";
 
 interface TestEnvelope {
@@ -119,7 +127,11 @@ function validEntry(index: number, attachmentId?: string): LedgerEntry {
   };
 }
 
-function preparedWith(entries: LedgerEntry[], attachments: Attachment[]): PreparedBackup {
+function preparedWith(
+  entries: LedgerEntry[],
+  attachments: Attachment[],
+  recoveryAllocations: RecoveryAllocation[] = [],
+): PreparedBackup {
   return {
     preview: {
       exportedAt: "2026-07-30T10:00:00.000Z",
@@ -138,6 +150,7 @@ function preparedWith(entries: LedgerEntry[], attachments: Attachment[]): Prepar
       },
       entries,
       attachments,
+      recoveryAllocations,
     },
   };
 }
@@ -242,6 +255,88 @@ describe("encrypted backups", () => {
       payCycle,
       incomeForecast,
     });
+  });
+
+  it("round trips treatment metadata and recovery allocations", async () => {
+    const expense = await createEntry({
+      ...draft(),
+      kind: "expense",
+      amount: "100.00",
+      note: "可报销支出",
+      image: undefined,
+    }, source, new Date("2026-07-30T08:30:00.000Z"));
+    const refund = await createEntry({
+      ...draft(),
+      amount: "60.00",
+      note: "报销到账",
+      image: undefined,
+    }, source, new Date("2026-07-30T08:31:00.000Z"));
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {
+      confirmationStatus: "confirmed",
+      detectionRuleVersion: 1,
+      markPrompted: true,
+    }, source, new Date("2026-07-30T09:00:00.000Z"));
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {
+      confirmationStatus: "confirmed",
+    }, source, new Date("2026-07-30T09:01:00.000Z"));
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 6_000,
+    }, source, new Date("2026-07-30T09:02:00.000Z"));
+
+    const backup = await createEncryptedBackup("treatment-password", source);
+    const prepared = await decryptBackup(backup, "treatment-password");
+    expect(prepared.replacement.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: expense.id, treatment: "reimbursable_expense" }),
+      expect.objectContaining({ id: refund.id, treatment: "refund_reimbursement" }),
+    ]));
+    expect(prepared.replacement.recoveryAllocations).toEqual([allocation]);
+
+    await restorePreparedBackup(prepared, target);
+    expect(await target.recoveryAllocations.toArray()).toEqual([allocation]);
+  });
+
+  it("normalizes v2 entries conservatively and restores no allocations", async () => {
+    const backup = await createEncryptedBackup("legacy-v2-password", source);
+    const legacy = await rewriteEncryptedPayload(backup, "legacy-v2-password", (payload) => {
+      payload.schemaVersion = 2;
+      delete payload.recoveryAllocations;
+      payload.entries = [{
+        ...validEntry(1),
+        amountMinor: -100,
+        note: "旧支出",
+        treatment: undefined,
+        confirmationStatus: undefined,
+      }];
+    });
+
+    const prepared = await decryptBackup(legacy, "legacy-v2-password");
+    expect(prepared.replacement.entries[0]).toMatchObject({
+      treatment: "ordinary_expense",
+      confirmationStatus: "not_needed",
+    });
+    expect(prepared.replacement.recoveryAllocations).toEqual([]);
+  });
+
+  it("rejects invalid recovery allocations before replacing existing data", async () => {
+    const refund = { ...validEntry(1), amountMinor: 5_000, treatment: "refund_reimbursement" as const };
+    const expense = { ...validEntry(2), amountMinor: -10_000, treatment: "ordinary_expense" as const };
+    const existing = await createEntry({ ...draft(), note: "现有记录", image: undefined }, target);
+    const invalidAllocation: RecoveryAllocation = {
+      id: "recovery-invalid",
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 5_001,
+      createdAt: "2026-07-30T09:00:00.000Z",
+      updatedAt: "2026-07-30T09:00:00.000Z",
+    };
+
+    await expect(restorePreparedBackup(
+      preparedWith([refund, expense], [], [invalidAllocation]),
+      target,
+    )).rejects.toMatchObject({ code: "invalid-payload" });
+    expect(await target.entries.get(existing.id)).toBeDefined();
   });
 
   it("restores a legacy backup whose settings omit the month-end goal", async () => {

@@ -1,10 +1,14 @@
-import type { AppSettings, Attachment, LedgerEntry } from "../domain/types";
+import type {
+  AppSettings,
+  Attachment,
+  LedgerEntry,
+  RecoveryAllocation,
+} from "../domain/types";
 import {
   assertSyncAccount,
   commitSyncBatch,
   getSyncOverview,
   ledgerDb,
-  syncEntityKey,
   type LedgerDatabase,
   type SyncOutboxRecord,
   type SyncOverview,
@@ -86,7 +90,7 @@ async function prepareSyncProtocolRefresh(
         cursor: "0",
         syncProtocolRefreshPending: true,
       });
-      await database.entitySyncState.delete(syncEntityKey("settings", "primary"));
+      await database.entitySyncState.clear();
       return true;
     },
   );
@@ -126,9 +130,24 @@ async function listPushableMutations(
       }
       if (!link?.uploadApproved) return [];
       const conflicts = new Set((await database.syncConflicts.toArray()).map(({ id }) => id));
-      const outbox = await database.syncOutbox.orderBy("createdAt").toArray();
+      const outbox = await database.syncOutbox.toArray();
       return outbox
         .filter((mutation) => !conflicts.has(mutation.entityKey))
+        .sort((left, right) => {
+          const priority = (mutation: SyncOutboxRecord): number => {
+            const deleted = "deletedAt" in mutation.payload && Boolean(mutation.payload.deletedAt);
+            if (mutation.entityType === "entry" && mutation.baseVersion === 0) return 0;
+            if (mutation.entityType === "recoveryAllocation" && deleted && mutation.baseVersion > 0) {
+              return 1;
+            }
+            if (mutation.entityType === "entry" && deleted) return 3;
+            if (mutation.entityType === "recoveryAllocation") return 2;
+            return 0;
+          };
+          return priority(left) - priority(right)
+            || left.createdAt.localeCompare(right.createdAt)
+            || left.entityKey.localeCompare(right.entityKey);
+        })
         .slice(0, MAX_MUTATIONS_PER_ROUND);
     },
   );
@@ -142,6 +161,15 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
       entityId: record.entityId,
       baseVersion: record.baseVersion,
       payload: record.payload as LedgerEntry,
+    };
+  }
+  if (record.entityType === "recoveryAllocation") {
+    return {
+      id: record.id,
+      entityType: "recoveryAllocation",
+      entityId: record.entityId,
+      baseVersion: record.baseVersion,
+      payload: record.payload as RecoveryAllocation,
     };
   }
   const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload;

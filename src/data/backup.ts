@@ -4,9 +4,16 @@ import type {
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
+  RecoveryAllocation,
 } from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
-import { normalizeLedgerEntry } from "../domain/entry-treatment";
+import {
+  assertRecoveryAllocationValid,
+  isConfirmationStatus,
+  isEntryTreatment,
+  normalizeLedgerEntry,
+  treatmentMatchesAmount,
+} from "../domain/entry-treatment";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
   DATABASE_SCHEMA_VERSION,
@@ -20,10 +27,11 @@ import {
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
-export const BACKUP_PAYLOAD_SCHEMA_VERSION = 2 as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 3 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
+export const MAX_BACKUP_RECOVERY_ALLOCATIONS = 25_000;
 export const MAX_BACKUP_ATTACHMENTS = 2_500;
 export const MAX_BACKUP_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -86,11 +94,21 @@ interface BackupPayloadV1 {
 
 interface BackupPayloadV2 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
+  schemaVersion: 2;
+  exportedAt: string;
+  settings: AppSettings;
+  entries: LedgerEntry[];
+  attachments: SerializedAttachment[];
+}
+
+interface BackupPayloadV3 {
+  format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
   settings: AppSettings;
   entries: LedgerEntry[];
   attachments: SerializedAttachment[];
+  recoveryAllocations: RecoveryAllocation[];
 }
 
 export interface BackupPreview {
@@ -382,11 +400,11 @@ function validateLegacySettings(value: unknown): value is LegacyAppSettings {
   );
 }
 
-function validateEntry(value: unknown): value is LedgerEntry {
+function validateEntry(value: unknown, requireAnalysisFields: boolean): value is LedgerEntry {
   const structurallyValid = (
     isRecord(value) &&
     typeof value.id === "string" &&
-    value.id.length > 0 &&
+    SYNC_ID_PATTERN.test(value.id) &&
     Number.isSafeInteger(value.amountMinor) &&
     value.amountMinor !== 0 &&
     Math.abs(Number(value.amountMinor)) <= MAX_AMOUNT_MINOR &&
@@ -400,9 +418,20 @@ function validateEntry(value: unknown): value is LedgerEntry {
     Number.isInteger(value.timezoneOffsetMinutes) &&
     Math.abs(Number(value.timezoneOffsetMinutes)) <= 14 * 60 &&
     (value.attachmentId === undefined ||
-      (typeof value.attachmentId === "string" && value.attachmentId.length > 0)) &&
+      (typeof value.attachmentId === "string" && SYNC_ID_PATTERN.test(value.attachmentId))) &&
+    (!requireAnalysisFields || (
+      isEntryTreatment(value.treatment) &&
+      treatmentMatchesAmount(value.treatment, Number(value.amountMinor)) &&
+      isConfirmationStatus(value.confirmationStatus) &&
+      (value.detectionRuleVersion === undefined || (
+        Number.isSafeInteger(value.detectionRuleVersion) &&
+        Number(value.detectionRuleVersion) >= 0
+      )) &&
+      (value.promptedRevision === undefined || isIsoDate(value.promptedRevision))
+    )) &&
     isIsoDate(value.createdAt) &&
     isIsoDate(value.updatedAt) &&
+    new Date(value.updatedAt).getTime() >= new Date(value.createdAt).getTime() &&
     value.deletedAt === undefined
   );
   return (
@@ -420,14 +449,72 @@ function normalizeBackupEntry(value: LedgerEntry): LedgerEntry {
   return normalizeLedgerEntry(value);
 }
 
-function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
+function validateRecoveryAllocationShape(value: unknown): value is RecoveryAllocation {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    SYNC_ID_PATTERN.test(value.id) &&
+    typeof value.refundEntryId === "string" &&
+    SYNC_ID_PATTERN.test(value.refundEntryId) &&
+    typeof value.expenseEntryId === "string" &&
+    SYNC_ID_PATTERN.test(value.expenseEntryId) &&
+    value.refundEntryId !== value.expenseEntryId &&
+    Number.isSafeInteger(value.amountMinor) &&
+    Number(value.amountMinor) > 0 &&
+    Number(value.amountMinor) <= MAX_AMOUNT_MINOR &&
+    isIsoDate(value.createdAt) &&
+    isIsoDate(value.updatedAt) &&
+    new Date(value.updatedAt).getTime() >= new Date(value.createdAt).getTime() &&
+    value.deletedAt === undefined
+  );
+}
+
+function validateRecoveryAllocations(
+  values: unknown[],
+  entriesById: ReadonlyMap<string, LedgerEntry>,
+): RecoveryAllocation[] {
+  if (values.length > MAX_BACKUP_RECOVERY_ALLOCATIONS) {
+    throw new BackupError(
+      `备份恢复分摊不能超过 ${MAX_BACKUP_RECOVERY_ALLOCATIONS} 条`,
+      "limit-exceeded",
+    );
+  }
+  const allocations: RecoveryAllocation[] = [];
+  const ids = new Set<string>();
+  for (const value of values) {
+    if (!validateRecoveryAllocationShape(value) || ids.has(value.id)) {
+      throw new BackupError("备份中的恢复分摊无效", "invalid-payload");
+    }
+    const refund = entriesById.get(value.refundEntryId);
+    const expense = entriesById.get(value.expenseEntryId);
+    if (!refund || !expense) {
+      throw new BackupError("备份中的恢复分摊引用了不存在的账目", "invalid-payload");
+    }
+    try {
+      assertRecoveryAllocationValid(value.amountMinor, {
+        refund,
+        expense,
+        existing: allocations,
+      });
+    } catch (error) {
+      throw new BackupError("备份中的恢复分摊金额或关联无效", "invalid-payload", {
+        cause: error,
+      });
+    }
+    ids.add(value.id);
+    allocations.push(structuredClone(value));
+  }
+  return allocations;
+}
+
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV3 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
-  if (
-    value.schemaVersion !== DATABASE_SCHEMA_VERSION &&
-    value.schemaVersion !== BACKUP_PAYLOAD_SCHEMA_VERSION
-  ) {
+  const supportedSchema = value.schemaVersion === DATABASE_SCHEMA_VERSION
+    || value.schemaVersion === 2
+    || value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
+  if (!supportedSchema) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
   }
   const settingsAreValid = value.schemaVersion === DATABASE_SCHEMA_VERSION
@@ -437,7 +524,9 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
     !isIsoDate(value.exportedAt) ||
     !settingsAreValid ||
     !Array.isArray(value.entries) ||
-    !Array.isArray(value.attachments)
+    !Array.isArray(value.attachments) ||
+    (value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
+      && !Array.isArray(value.recoveryAllocations))
   ) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
@@ -448,7 +537,8 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
   if (value.attachments.length > MAX_BACKUP_ATTACHMENTS) {
     throw new BackupError(`备份截图不能超过 ${MAX_BACKUP_ATTACHMENTS} 张`, "limit-exceeded");
   }
-  if (!value.entries.every(validateEntry)) {
+  const requireAnalysisFields = value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
+  if (!value.entries.every((entry) => validateEntry(entry, requireAnalysisFields))) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
 
@@ -524,6 +614,12 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
     }
   }
 
+  const recoveryAllocations = validateRecoveryAllocations(
+    value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
+      ? value.recoveryAllocations as unknown[]
+      : [],
+    entriesById,
+  );
   const settings = value.schemaVersion === DATABASE_SCHEMA_VERSION
     ? migrateLegacyIncomeSettings((value as unknown as BackupPayloadV1).settings, now)
     : structuredClone(value.settings as AppSettings);
@@ -534,21 +630,29 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV2 {
     settings,
     entries: normalizedEntries,
     attachments: value.attachments as BackupPayloadV2["attachments"],
+    recoveryAllocations,
   };
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV2> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV3> {
   const snapshot = await database.transaction(
     "r",
     database.settings,
     database.entries,
     database.attachments,
+    database.recoveryAllocations,
     async () => {
       const settings = await database.settings.get("primary");
       const entries = (await database.entries.toArray()).filter((entry) => !entry.deletedAt);
+      const entryIds = new Set(entries.map((entry) => entry.id));
       const attachmentIds = new Set(entries.flatMap((entry) => entry.attachmentId ? [entry.attachmentId] : []));
       const attachments = (await database.attachments.toArray()).filter((attachment) => attachmentIds.has(attachment.id));
-      return { settings, entries, attachments };
+      const recoveryAllocations = (await database.recoveryAllocations.toArray()).filter(
+        (allocation) => !allocation.deletedAt
+          && entryIds.has(allocation.refundEntryId)
+          && entryIds.has(allocation.expenseEntryId),
+      );
+      return { settings, entries, attachments, recoveryAllocations };
     },
   );
   if (!snapshot.settings || !validateSettings(snapshot.settings)) {
@@ -606,6 +710,7 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
     settings: snapshot.settings,
     entries: snapshot.entries,
     attachments,
+    recoveryAllocations: snapshot.recoveryAllocations,
   };
 }
 
@@ -730,6 +835,7 @@ export async function decryptBackup(
       settings: structuredClone(payload.settings),
       entries: structuredClone(payload.entries),
       attachments,
+      recoveryAllocations: structuredClone(payload.recoveryAllocations),
     },
   };
 }
@@ -754,6 +860,7 @@ export async function restorePreparedBackup(
       createdAt: attachment.createdAt,
       dataBase64: "AA==",
     })),
+    recoveryAllocations: prepared.replacement.recoveryAllocations,
   };
   try {
     parsePayload(payload);

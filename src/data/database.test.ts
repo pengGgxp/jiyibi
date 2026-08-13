@@ -1,6 +1,13 @@
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppSettings, EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
+import { evaluateExceptionPrompt } from "../domain/exception-prompt";
+import type {
+  AppSettings,
+  EntryDraft,
+  LedgerEntry,
+  ProcessedImage,
+  RecoveryAllocation,
+} from "../domain/types";
 import {
   API_SCHEMA_VERSION,
   SYNC_SCHEMA_VERSION,
@@ -31,8 +38,11 @@ import {
   setMonthEndBalanceGoal,
   setPayCyclePlan,
   softDeleteEntry,
+  softDeleteRecoveryAllocation,
   undoDeleteEntry,
   updateEntry,
+  updateEntryTreatment,
+  upsertRecoveryAllocation,
 } from "./database";
 
 function draft(overrides: Partial<EntryDraft> = {}): EntryDraft {
@@ -73,6 +83,20 @@ function remoteChange(entry: LedgerEntry, version: number, seq = String(version)
     entityId: entry.id,
     version,
     payload: entry,
+  };
+}
+
+function recoveryChange(
+  allocation: RecoveryAllocation,
+  version: number,
+  seq = String(version),
+): SyncChange {
+  return {
+    seq,
+    entityType: "recoveryAllocation",
+    entityId: allocation.id,
+    version,
+    payload: allocation,
   };
 }
 
@@ -345,6 +369,55 @@ describe("LedgerDatabase", () => {
     },
   );
 
+  it("stamps the persisted revision when a treatment prompt is handled", async () => {
+    const created = await createEntry(draft({ amount: "800.00" }), database);
+    const promptedAt = new Date("2026-07-30T13:00:00.000Z");
+
+    const pending = await updateEntryTreatment(created.id, "ordinary_expense", {
+      confirmationStatus: "pending",
+      detectionRuleVersion: 1,
+      markPrompted: true,
+    }, database, promptedAt);
+
+    expect(pending).toMatchObject({
+      confirmationStatus: "pending",
+      detectionRuleVersion: 1,
+      promptedRevision: promptedAt.toISOString(),
+      updatedAt: promptedAt.toISOString(),
+    });
+    expect(await database.entries.get(created.id)).toEqual(pending);
+  });
+
+  it("keeps prompt metadata across note-only edits and clears it after material edits", async () => {
+    const created = await createEntry(draft({ amount: "800.00" }), database);
+    const prompted = await updateEntryTreatment(created.id, "ordinary_expense", {
+      confirmationStatus: "pending",
+      detectionRuleVersion: 1,
+      markPrompted: true,
+    }, database, new Date("2026-07-30T13:00:00.000Z"));
+
+    const noteOnly = await updateEntry(
+      created.id,
+      draft({ amount: "800.00", note: "只改备注" }),
+      database,
+      new Date("2026-07-30T13:01:00.000Z"),
+    );
+    expect(noteOnly.confirmationStatus).toBe("pending");
+    expect(noteOnly.promptedRevision).toBe(noteOnly.updatedAt);
+    expect(noteOnly.promptedRevision).not.toBe(prompted.promptedRevision);
+    expect(evaluateExceptionPrompt(noteOnly, [noteOnly], undefined).shouldPrompt).toBe(false);
+
+    const amountChanged = await updateEntry(
+      created.id,
+      draft({ amount: "900.00", note: "只改备注" }),
+      database,
+      new Date("2026-07-30T13:02:00.000Z"),
+    );
+    expect(amountChanged.confirmationStatus).toBe("not_needed");
+    expect(amountChanged.promptedRevision).toBeUndefined();
+    expect(evaluateExceptionPrompt(amountChanged, [amountChanged], undefined).shouldPrompt).toBe(true);
+  });
+
   it("creates, edits and summarizes signed entries", async () => {
     const created = await createEntry(draft(), database);
     expect(created.amountMinor).toBe(-1234);
@@ -434,6 +507,7 @@ describe("LedgerDatabase", () => {
         settings,
         entries: [replacementEntry],
         attachments: [replacementAttachment, replacementAttachment],
+        recoveryAllocations: [],
       }, database),
     ).rejects.toBeDefined();
     await expect(database.entries.toArray()).resolves.toEqual([original]);
@@ -665,6 +739,119 @@ describe("LedgerDatabase", () => {
     const reset = await database.syncOutbox.get("settings:primary");
     expect(reset).not.toHaveProperty("clearIncomeForecast");
     expect(reset?.payload).toHaveProperty("incomeForecast.expectedIncomeMinor", 250);
+  });
+
+  it("queues recovery allocations and their tombstones atomically", async () => {
+    const expense = await createEntry(draft({ amount: "20.00" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "10.00" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database, new Date("2026-07-30T13:00:00.000Z"));
+    expect(await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`)).toMatchObject({
+      entityType: "recoveryAllocation",
+      baseVersion: 0,
+      payload: allocation,
+    });
+
+    await softDeleteRecoveryAllocation(
+      allocation.id,
+      database,
+      new Date("2026-07-30T14:00:00.000Z"),
+    );
+    expect(await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`)).toMatchObject({
+      entityType: "recoveryAllocation",
+      baseVersion: 0,
+      payload: {
+        id: allocation.id,
+        deletedAt: "2026-07-30T14:00:00.000Z",
+        updatedAt: "2026-07-30T14:00:00.000Z",
+      },
+    });
+  });
+
+  it("syncs allocation tombstones when deleting and undoing a related entry", async () => {
+    const expense = await createEntry(draft({ amount: "20.00" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "10.00" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const deletedAt = new Date("2026-07-30T14:00:00.000Z");
+
+    await softDeleteEntry(expense.id, database, deletedAt);
+    expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+      deletedAt: deletedAt.toISOString(),
+    });
+    expect(await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`)).toMatchObject({
+      entityType: "recoveryAllocation",
+      payload: { deletedAt: deletedAt.toISOString() },
+    });
+
+    await undoDeleteEntry(
+      expense.id,
+      database,
+      new Date("2026-07-30T14:01:00.000Z"),
+    );
+    expect(await database.recoveryAllocations.get(allocation.id)).not.toHaveProperty("deletedAt");
+    expect(await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`)).toMatchObject({
+      entityType: "recoveryAllocation",
+      payload: { id: allocation.id, amountMinor: 500 },
+    });
+    expect(
+      (await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`))?.payload,
+    ).not.toHaveProperty("deletedAt");
+  });
+
+  it("applies and resolves recovery allocation conflicts", async () => {
+    await linkSyncAccount(session(), true, database);
+    const local: RecoveryAllocation = {
+      id: "recovery-conflict",
+      refundEntryId: "refund-local",
+      expenseEntryId: "expense-local",
+      amountMinor: 400,
+      createdAt: "2026-07-30T12:00:00.000Z",
+      updatedAt: "2026-07-30T12:00:00.000Z",
+    };
+    await database.recoveryAllocations.put(local);
+    await database.syncOutbox.put({
+      entityKey: `recoveryAllocation:${local.id}`,
+      id: "mutation-recovery-conflict",
+      entityType: "recoveryAllocation",
+      entityId: local.id,
+      baseVersion: 1,
+      payload: local,
+      createdAt: local.createdAt,
+      updatedAt: local.updatedAt,
+    });
+    const sent = (await database.syncOutbox.get(`recoveryAllocation:${local.id}`))!;
+    const remote = {
+      ...local,
+      amountMinor: 500,
+      updatedAt: "2026-07-30T13:00:00.000Z",
+    };
+
+    await markPushResults([sent], [{
+      id: sent.id,
+      status: "conflict",
+      remote: recoveryChange(remote, 2),
+    }], database);
+    expect(await database.syncConflicts.get(`recoveryAllocation:${local.id}`)).toBeDefined();
+
+    await resolveSyncConflict("recoveryAllocation", local.id, "use-cloud", database);
+    expect(await database.recoveryAllocations.get(local.id)).toEqual(remote);
+    expect(await database.syncOutbox.get(`recoveryAllocation:${local.id}`)).toBeUndefined();
   });
 
   it("keeps a durable deletion outbox after the local entry and attachment are purged", async () => {

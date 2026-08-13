@@ -78,7 +78,7 @@ export interface SyncOutboxRecord {
   entityType: SyncEntityType;
   entityId: string;
   baseVersion: number;
-  payload: LedgerEntry | AppSettings;
+  payload: LedgerEntry | AppSettings | RecoveryAllocation;
   clearMonthEndBalanceGoal?: true;
   clearPayCycle?: true;
   clearIncomeForecast?: true;
@@ -90,8 +90,8 @@ export interface SyncConflict {
   id: string;
   entityType: SyncEntityType;
   entityId: string;
-  localPayload: LedgerEntry | AppSettings;
-  remotePayload: LedgerEntry | AppSettings;
+  localPayload: LedgerEntry | AppSettings | RecoveryAllocation;
+  remotePayload: LedgerEntry | AppSettings | RecoveryAllocation;
   remoteVersion: number;
   claimLegacyIncomeForecast?: true;
   createdAt: string;
@@ -310,36 +310,14 @@ function isDefaultSettings(settings: AppSettings): boolean {
   );
 }
 
-/**
- * Protocol v4 cannot carry treatment fields (P7 will introduce v5).
- * Local IndexedDB keeps full LedgerEntry; the outbox wire payload strips
- * analysis-only fields so old servers keep accepting mutations.
- */
-type SyncWireEntry = Omit<
-  LedgerEntry,
-  "treatment" | "confirmationStatus" | "detectionRuleVersion" | "promptedRevision"
->;
-
-function toSyncWireEntry(entry: LedgerEntry): SyncWireEntry {
-  const normalized = normalizeLedgerEntry(entry);
-  const {
-    treatment: _treatment,
-    confirmationStatus: _confirmationStatus,
-    detectionRuleVersion: _detectionRuleVersion,
-    promptedRevision: _promptedRevision,
-    ...wire
-  } = normalized;
-  if (wire.deletedAt) delete wire.attachmentId;
-  return wire;
-}
-
 function syncPayloadFor(
   entityType: SyncEntityType,
-  payload: LedgerEntry | AppSettings,
-): LedgerEntry | AppSettings {
+  payload: LedgerEntry | AppSettings | RecoveryAllocation,
+): LedgerEntry | AppSettings | RecoveryAllocation {
   if (entityType === "entry") {
-    // Cast: wire shape is a v4 subset; local readers always re-normalize.
-    return toSyncWireEntry(payload as LedgerEntry) as LedgerEntry;
+    const entry = structuredClone(normalizeLedgerEntry(payload as LedgerEntry));
+    if (entry.deletedAt) delete entry.attachmentId;
+    return entry;
   }
   return structuredClone(payload);
 }
@@ -366,7 +344,7 @@ export async function updateEntryTreatment(
   options: {
     confirmationStatus?: ConfirmationStatus;
     detectionRuleVersion?: number;
-    promptedRevision?: string;
+    markPrompted?: boolean;
   } = {},
   database = ledgerDb,
   now = new Date(),
@@ -393,7 +371,7 @@ export async function updateEntryTreatment(
         treatment,
         confirmationStatus: options.confirmationStatus ?? "confirmed",
         detectionRuleVersion: options.detectionRuleVersion ?? existing.detectionRuleVersion,
-        promptedRevision: options.promptedRevision ?? existing.promptedRevision,
+        promptedRevision: options.markPrompted ? nowIso : existing.promptedRevision,
         updatedAt: nowIso,
       };
       await database.entries.put(updated);
@@ -428,8 +406,14 @@ export async function upsertRecoveryAllocation(
 ): Promise<RecoveryAllocation> {
   return database.transaction(
     "rw",
-    database.entries,
-    database.recoveryAllocations,
+    [
+      database.entries,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
     async () => {
       const refund = await database.entries.get(input.refundEntryId);
       const expense = await database.entries.get(input.expenseEntryId);
@@ -456,6 +440,13 @@ export async function upsertRecoveryAllocation(
         updatedAt: nowIso,
       };
       await database.recoveryAllocations.put(row);
+      await queueSyncMutation(
+        "recoveryAllocation",
+        row.id,
+        row,
+        database,
+        nowIso,
+      );
       return row;
     },
   );
@@ -465,15 +456,36 @@ export async function softDeleteRecoveryAllocation(
   allocationId: string,
   database = ledgerDb,
   now = new Date(),
-): Promise<void> {
-  const existing = await database.recoveryAllocations.get(allocationId);
-  if (!existing || existing.deletedAt) return;
-  const nowIso = now.toISOString();
-  await database.recoveryAllocations.put({
-    ...existing,
-    deletedAt: nowIso,
-    updatedAt: nowIso,
-  });
+): Promise<RecoveryAllocation | undefined> {
+  return database.transaction(
+    "rw",
+    [
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existing = await database.recoveryAllocations.get(allocationId);
+      if (!existing || existing.deletedAt) return existing;
+      const nowIso = now.toISOString();
+      const deleted: RecoveryAllocation = {
+        ...existing,
+        deletedAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await database.recoveryAllocations.put(deleted);
+      await queueSyncMutation(
+        "recoveryAllocation",
+        deleted.id,
+        deleted,
+        database,
+        nowIso,
+      );
+      return deleted;
+    },
+  );
 }
 
 export async function purgeRecoveryAllocationsForEntry(
@@ -489,7 +501,7 @@ export async function purgeRecoveryAllocationsForEntry(
 async function queueSyncMutation(
   entityType: SyncEntityType,
   entityId: string,
-  payload: LedgerEntry | AppSettings,
+  payload: LedgerEntry | AppSettings | RecoveryAllocation,
   database: LedgerDatabase,
   nowIso: string,
   options: {
@@ -611,6 +623,7 @@ export async function linkSyncAccount(
     [
       database.entries,
       database.settings,
+      database.recoveryAllocations,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -657,6 +670,18 @@ export async function linkSyncAccount(
         const entries = await database.entries.filter((entry) => !entry.deletedAt).toArray();
         for (const entry of entries) {
           await queueSyncMutation("entry", entry.id, entry, database, nowIso);
+        }
+        const allocations = await database.recoveryAllocations
+          .filter((allocation) => !allocation.deletedAt)
+          .toArray();
+        for (const allocation of allocations) {
+          await queueSyncMutation(
+            "recoveryAllocation",
+            allocation.id,
+            allocation,
+            database,
+            nowIso,
+          );
         }
         const settings = await database.settings.get("primary");
         if (settings && !(session.cloud.hasData && isDefaultSettings(settings))) {
@@ -934,6 +959,7 @@ export async function recordActualIncome(
     [
       database.entries,
       database.settings,
+      database.recoveryAllocations,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1103,9 +1129,10 @@ export async function updateEntry(
       || !treatmentMatchesAmountSafe(existing.treatment, valid.amountMinor)
       ? defaultTreatmentFromAmount(valid.amountMinor)
       : existing.treatment;
-    const confirmationStatus = signFlipped
+    const materialTreatmentChange = signFlipped
       || existing.amountMinor !== valid.amountMinor
-      || existing.occurredAt !== valid.occurredAt
+      || existing.occurredAt !== valid.occurredAt;
+    const confirmationStatus = materialTreatmentChange
       ? "not_needed"
       : existing.confirmationStatus;
     const updated: LedgerEntry = {
@@ -1119,12 +1146,11 @@ export async function updateEntry(
       attachmentId,
       treatment,
       confirmationStatus,
-      // Amount/time change invalidates a prior prompt for this revision.
-      promptedRevision: confirmationStatus === existing.confirmationStatus
-        && existing.amountMinor === valid.amountMinor
-        && existing.occurredAt === valid.occurredAt
-        ? existing.promptedRevision
-        : undefined,
+      promptedRevision: materialTreatmentChange
+        ? undefined
+        : existing.promptedRevision
+          ? nowIso
+          : undefined,
       updatedAt: nowIso,
     };
     await database.entries.put(updated);
@@ -1161,11 +1187,19 @@ export async function softDeleteEntry(
         .toArray();
       for (const row of related) {
         if (row.deletedAt) continue;
-        await database.recoveryAllocations.put({
+        const tombstone: RecoveryAllocation = {
           ...row,
           deletedAt: timestamp,
           updatedAt: timestamp,
-        });
+        };
+        await database.recoveryAllocations.put(tombstone);
+        await queueSyncMutation(
+          "recoveryAllocation",
+          tombstone.id,
+          tombstone,
+          database,
+          timestamp,
+        );
       }
       await queueSyncMutation("entry", deleted.id, deleted, database, timestamp);
       return deleted;
@@ -1221,6 +1255,13 @@ export async function undoDeleteEntry(
           const live: RecoveryAllocation = { ...row, updatedAt: nowIso };
           delete live.deletedAt;
           await database.recoveryAllocations.put(live);
+          await queueSyncMutation(
+            "recoveryAllocation",
+            live.id,
+            live,
+            database,
+            nowIso,
+          );
         } catch {
           // Leave soft-deleted; user must re-link. Do not silently truncate.
         }
@@ -1380,22 +1421,33 @@ function currentLocalPayload(
   entityType: SyncEntityType,
   entityId: string,
   database: LedgerDatabase,
-): Promise<LedgerEntry | AppSettings | undefined> {
-  return entityType === "entry"
-    ? database.entries.get(entityId)
-    : database.settings.get("primary");
+): Promise<LedgerEntry | AppSettings | RecoveryAllocation | undefined> {
+  if (entityType === "entry") return database.entries.get(entityId);
+  if (entityType === "recoveryAllocation") {
+    return database.recoveryAllocations.get(entityId);
+  }
+  return database.settings.get("primary");
 }
 
 async function applyRemotePayload(
   change: {
     entityType: SyncEntityType;
     entityId: string;
-    payload: LedgerEntry | AppSettings;
+    payload: LedgerEntry | AppSettings | RecoveryAllocation;
   },
   database: LedgerDatabase,
 ): Promise<void> {
   if (change.entityType === "settings") {
     await database.settings.put(change.payload as AppSettings);
+    return;
+  }
+  if (change.entityType === "recoveryAllocation") {
+    const allocation = change.payload as RecoveryAllocation;
+    if (allocation.deletedAt) {
+      await database.recoveryAllocations.delete(change.entityId);
+    } else {
+      await database.recoveryAllocations.put(allocation);
+    }
     return;
   }
 
@@ -1434,7 +1486,7 @@ async function applyRemotePayload(
 
 async function recordConflict(
   change: SyncChange,
-  localPayload: LedgerEntry | AppSettings,
+  localPayload: LedgerEntry | AppSettings | RecoveryAllocation,
   database: LedgerDatabase,
   nowIso: string,
 ): Promise<void> {
@@ -1515,7 +1567,7 @@ async function applyRemoteChangesInTransaction(
       serverVersion: change.version,
       status: "clean",
       tombstoneAcknowledged:
-        change.entityType === "entry" && "deletedAt" in change.payload
+        "deletedAt" in change.payload
           ? Boolean(change.payload.deletedAt)
           : false,
       updatedAt: nowIso,
@@ -1572,6 +1624,7 @@ export async function applyRemoteChanges(
       database.entries,
       database.attachments,
       database.settings,
+      database.recoveryAllocations,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1629,7 +1682,7 @@ async function markPushResultsInTransaction(
       serverVersion: result.version,
       status: "clean",
       tombstoneAcknowledged:
-        sent.entityType === "entry" && "deletedAt" in sent.payload
+        "deletedAt" in sent.payload
           ? Boolean(sent.payload.deletedAt)
           : false,
       updatedAt: nowIso,
@@ -1646,11 +1699,14 @@ export async function markPushResults(
   const nowIso = now.toISOString();
   await database.transaction(
     "rw",
-    database.entries,
-    database.settings,
-    database.entitySyncState,
-    database.syncOutbox,
-    database.syncConflicts,
+    [
+      database.entries,
+      database.settings,
+      database.recoveryAllocations,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
     () => markPushResultsInTransaction(sentMutations, results, database, nowIso),
   );
 }
@@ -1672,6 +1728,7 @@ export async function commitSyncBatch(
       database.entries,
       database.attachments,
       database.settings,
+      database.recoveryAllocations,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1708,6 +1765,7 @@ export async function resolveSyncConflict(
       database.entries,
       database.attachments,
       database.settings,
+      database.recoveryAllocations,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1742,7 +1800,7 @@ export async function resolveSyncConflict(
           serverVersion: conflict.remoteVersion,
           status: "clean",
           tombstoneAcknowledged:
-            entityType === "entry" && "deletedAt" in conflict.remotePayload
+            "deletedAt" in conflict.remotePayload
               ? Boolean(conflict.remotePayload.deletedAt)
               : false,
           updatedAt: nowIso,
@@ -1854,6 +1912,7 @@ export interface LedgerReplacement {
   settings: AppSettings;
   entries: LedgerEntry[];
   attachments: Attachment[];
+  recoveryAllocations: RecoveryAllocation[];
 }
 
 export async function replaceLedgerData(
@@ -1865,6 +1924,7 @@ export async function replaceLedgerData(
     database.settings,
     database.entries,
     database.attachments,
+    database.recoveryAllocations,
     database.syncState,
     async () => {
       if (await database.syncState.get("primary")) {
@@ -1874,12 +1934,16 @@ export async function replaceLedgerData(
         );
       }
       await database.attachments.clear();
+      await database.recoveryAllocations.clear();
       await database.entries.clear();
       await database.settings.clear();
       await database.settings.add(replacement.settings);
       if (replacement.entries.length) await database.entries.bulkAdd(replacement.entries);
       if (replacement.attachments.length) {
         await database.attachments.bulkAdd(replacement.attachments);
+      }
+      if (replacement.recoveryAllocations.length) {
+        await database.recoveryAllocations.bulkAdd(replacement.recoveryAllocations);
       }
     },
   );

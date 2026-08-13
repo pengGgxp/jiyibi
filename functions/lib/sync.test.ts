@@ -1,8 +1,14 @@
 import { webcrypto } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppSettingsPayload, LedgerEntryPayload, SyncMutation } from "./types";
+import type {
+  AppSettingsPayload,
+  LedgerEntryPayload,
+  RecoveryAllocationPayload,
+  SyncMutation,
+} from "./types";
 import {
   applyMutation,
+  assertLegacyClientCompatible,
   minimizeDeletedEntry,
   pullChanges,
   synchronize,
@@ -24,6 +30,27 @@ function settingsMutation(overrides: Partial<SettingsMutation> = {}): SettingsMu
       schemaVersion: 1,
       updatedAt: "2026-07-30T12:00:00.000Z",
     },
+    ...overrides,
+  };
+}
+
+type RecoveryMutation = Extract<SyncMutation, { entityType: "recoveryAllocation" }>;
+
+function recoveryMutation(overrides: Partial<RecoveryMutation> = {}): RecoveryMutation {
+  const payload: RecoveryAllocationPayload = {
+    id: "recovery_1",
+    refundEntryId: "entry_refund",
+    expenseEntryId: "entry_expense",
+    amountMinor: 500,
+    createdAt: "2026-07-30T12:00:00.000Z",
+    updatedAt: "2026-07-30T12:00:00.000Z",
+  };
+  return {
+    id: "mutation_recovery_1",
+    entityType: "recoveryAllocation",
+    entityId: payload.id,
+    baseVersion: 0,
+    payload,
     ...overrides,
   };
 }
@@ -332,6 +359,84 @@ describe("sync mutation receipts", () => {
     ]);
   });
 
+  it("writes recovery allocations as independent versioned entities", async () => {
+    let insertQuery = "";
+    let bindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("INSERT INTO recovery_allocations")) {
+              insertQuery = query;
+              bindings = values;
+            }
+            return this;
+          },
+          async first() {
+            if (query.includes("FROM sync_changes")) return null;
+            if (query.includes("INSERT INTO recovery_allocations")) return { version: 1 };
+            return null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    const mutation = recoveryMutation();
+    await expect(applyMutation(db, "user_1", 3, mutation, 5)).resolves.toEqual({
+      id: mutation.id,
+      status: "applied",
+      version: 1,
+    });
+    expect(insertQuery).toContain("recovery_allocations");
+    expect(bindings.slice(0, 9)).toEqual([
+      "user_1",
+      3,
+      "recovery_1",
+      "entry_refund",
+      "entry_expense",
+      500,
+      "2026-07-30T12:00:00.000Z",
+      "2026-07-30T12:00:00.000Z",
+      null,
+    ]);
+  });
+
+  it("blocks legacy clients before writes when semantic analysis data exists", async () => {
+    let query = "";
+    const db = {
+      prepare(statement: string) {
+        query = statement;
+        return {
+          bind() { return this; },
+          async first() { return { requires_upgrade: 1 }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    await expect(assertLegacyClientCompatible(db, "user_1", 3, 4)).rejects.toMatchObject({
+      status: 409,
+      code: "upgrade_required",
+    });
+    expect(query).toContain("recovery_allocations");
+    expect(query).toContain("deleted_at IS NULL");
+    await expect(assertLegacyClientCompatible(db, "user_1", 3, 5)).resolves.toBeUndefined();
+  });
+
+  it("filters recovery allocation changes from legacy pull responses", async () => {
+    let bindings: unknown[] = [];
+    const db = {
+      prepare() {
+        return {
+          bind(...values: unknown[]) { bindings = values; return this; },
+          async all() { return { results: [] }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    await pullChanges(db, "user_1", 3, "0", 4);
+    expect(bindings).toEqual(["user_1", 3, "0", 4, 101]);
+  });
+
   it("hides the version-two goal from version-one pull responses", async () => {
     const row = {
       cursor: "9",
@@ -555,6 +660,8 @@ describe("deleted entry minimization", () => {
       localDateKey: "2026-07-30",
       localMonthKey: "2026-07",
       timezoneOffsetMinutes: 0,
+      treatment: "ordinary_income",
+      confirmationStatus: "not_needed",
       createdAt: entry.deletedAt,
       updatedAt: entry.deletedAt,
       deletedAt: entry.deletedAt,
@@ -569,6 +676,10 @@ describe("sync privacy cleanup", () => {
       prepare: (query: string) => ({
         bind() {
           return this;
+        },
+        async first() {
+          if (query.includes("requires_upgrade")) return { requires_upgrade: 0 };
+          return null;
         },
         async run() {
           if (query.includes("UPDATE sync_changes")) calls.push("compact");

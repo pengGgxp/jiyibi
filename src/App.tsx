@@ -109,6 +109,7 @@ export default function App() {
   const [treatmentPrompt, setTreatmentPrompt] = useState<{
     entry: LedgerEntry;
     kind: ExceptionPromptKind;
+    detectionRuleVersion?: number;
   }>();
   const [treatmentBusy, setTreatmentBusy] = useState(false);
   const [treatmentError, setTreatmentError] = useState<string>();
@@ -159,7 +160,11 @@ export default function App() {
     const decision = evaluateExceptionPrompt(entry, ledger.entries, ledger.analysis);
     if (!decision.shouldPrompt) return false;
     setTreatmentError(undefined);
-    setTreatmentPrompt({ entry, kind: decision.kind });
+    setTreatmentPrompt({
+      entry,
+      kind: decision.kind,
+      detectionRuleVersion: decision.detectionRuleVersion,
+    });
     return true;
   };
 
@@ -205,8 +210,8 @@ export default function App() {
     try {
       await updateEntryTreatment(treatmentPrompt.entry.id, treatment, {
         confirmationStatus: "confirmed",
-        detectionRuleVersion: treatmentPrompt.entry.detectionRuleVersion,
-        promptedRevision: treatmentPrompt.entry.updatedAt,
+        detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
+        markPrompted: true,
       });
       cloud.requestSync();
       setTreatmentPrompt(undefined);
@@ -228,8 +233,8 @@ export default function App() {
         treatmentPrompt.entry.treatment,
         {
           confirmationStatus: "pending",
-          detectionRuleVersion: treatmentPrompt.entry.detectionRuleVersion,
-          promptedRevision: treatmentPrompt.entry.updatedAt,
+          detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
+          markPrompted: true,
         },
       );
       cloud.requestSync();
@@ -246,6 +251,7 @@ export default function App() {
     setTreatmentPrompt({
       entry,
       kind: entry.amountMinor < 0 ? "expense" : "income",
+      detectionRuleVersion: entry.detectionRuleVersion,
     });
   };
 

@@ -1,6 +1,7 @@
 import { ApiError } from "./errors";
 import type {
   LedgerEntryPayload,
+  RecoveryAllocationPayload,
   SettingsMutationPayload,
   SyncMutation,
   SyncProtocolVersion,
@@ -60,7 +61,33 @@ function hasConsistentLocalDate(entry: LedgerEntryPayload): boolean {
   return entry.localDateKey === expectedDateKey && entry.localMonthKey === expectedDateKey.slice(0, 7);
 }
 
-function validateEntryPayload(value: unknown, entityId: string): LedgerEntryPayload {
+const ENTRY_TREATMENTS = new Set([
+  "ordinary_expense",
+  "one_time_expense",
+  "reimbursable_expense",
+  "ordinary_income",
+  "refund_reimbursement",
+  "account_transfer",
+]);
+const CONFIRMATION_STATUSES = new Set(["not_needed", "pending", "confirmed"]);
+
+function treatmentMatchesAmount(treatment: unknown, amountMinor: number): boolean {
+  if (treatment === "account_transfer") return amountMinor !== 0;
+  if (
+    treatment === "ordinary_expense" ||
+    treatment === "one_time_expense" ||
+    treatment === "reimbursable_expense"
+  ) {
+    return amountMinor < 0;
+  }
+  return amountMinor > 0;
+}
+
+function validateEntryPayload(
+  value: unknown,
+  entityId: string,
+  protocolVersion: SyncProtocolVersion,
+): LedgerEntryPayload {
   const required = [
     "id",
     "amountMinor",
@@ -72,7 +99,20 @@ function validateEntryPayload(value: unknown, entityId: string): LedgerEntryPayl
     "createdAt",
     "updatedAt",
   ] as const;
-  if (!isRecord(value) || !hasOnlyKeys(value, required, ["attachmentId", "deletedAt"])) {
+  const requiredAnalysis = protocolVersion >= 5
+    ? ["treatment", "confirmationStatus"]
+    : [];
+  const optionalAnalysis = protocolVersion >= 5
+    ? ["detectionRuleVersion", "promptedRevision"]
+    : [];
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(
+      value,
+      [...required, ...requiredAnalysis],
+      ["attachmentId", "deletedAt", ...optionalAnalysis],
+    )
+  ) {
     throw new ApiError(400, "invalid_entry", "Entry payload has invalid fields");
   }
   const entry = value as unknown as LedgerEntryPayload;
@@ -91,6 +131,16 @@ function validateEntryPayload(value: unknown, entityId: string): LedgerEntryPayl
     !Number.isInteger(entry.timezoneOffsetMinutes) ||
     Math.abs(entry.timezoneOffsetMinutes) > MAX_TIMEZONE_OFFSET_MINUTES ||
     (entry.attachmentId !== undefined && !isValidId(entry.attachmentId)) ||
+    (protocolVersion >= 5 &&
+      (entry.treatment === undefined ||
+        entry.confirmationStatus === undefined ||
+        !ENTRY_TREATMENTS.has(entry.treatment) ||
+        !treatmentMatchesAmount(entry.treatment, entry.amountMinor) ||
+        !CONFIRMATION_STATUSES.has(entry.confirmationStatus) ||
+        (entry.detectionRuleVersion !== undefined &&
+          (!Number.isSafeInteger(entry.detectionRuleVersion) ||
+            entry.detectionRuleVersion < 0)) ||
+        (entry.promptedRevision !== undefined && !isIsoDate(entry.promptedRevision)))) ||
     !isIsoDate(entry.createdAt) ||
     !isIsoDate(entry.updatedAt) ||
     (entry.deletedAt !== undefined && !isIsoDate(entry.deletedAt)) ||
@@ -107,6 +157,50 @@ function validateEntryPayload(value: unknown, entityId: string): LedgerEntryPayl
     return tombstone;
   }
   return entry;
+}
+
+function validateRecoveryAllocationPayload(
+  value: unknown,
+  entityId: string,
+): RecoveryAllocationPayload {
+  const required = [
+    "id",
+    "refundEntryId",
+    "expenseEntryId",
+    "amountMinor",
+    "createdAt",
+    "updatedAt",
+  ] as const;
+  if (!isRecord(value) || !hasOnlyKeys(value, required, ["deletedAt"])) {
+    throw new ApiError(
+      400,
+      "invalid_recovery_allocation",
+      "Recovery allocation payload has invalid fields",
+    );
+  }
+  const allocation = value as unknown as RecoveryAllocationPayload;
+  if (
+    !isValidId(allocation.id) ||
+    allocation.id !== entityId ||
+    !isValidId(allocation.refundEntryId) ||
+    !isValidId(allocation.expenseEntryId) ||
+    allocation.refundEntryId === allocation.expenseEntryId ||
+    !Number.isSafeInteger(allocation.amountMinor) ||
+    allocation.amountMinor <= 0 ||
+    allocation.amountMinor > MAX_AMOUNT_MINOR ||
+    !isIsoDate(allocation.createdAt) ||
+    !isIsoDate(allocation.updatedAt) ||
+    (allocation.deletedAt !== undefined && !isIsoDate(allocation.deletedAt)) ||
+    new Date(allocation.updatedAt).getTime() < new Date(allocation.createdAt).getTime() ||
+    (allocation.deletedAt !== undefined && allocation.deletedAt !== allocation.updatedAt)
+  ) {
+    throw new ApiError(
+      400,
+      "invalid_recovery_allocation",
+      "Recovery allocation payload is invalid",
+    );
+  }
+  return allocation;
 }
 
 function validateSettingsPayload(
@@ -222,7 +316,8 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
     throw new ApiError(400, "invalid_mutation", "Mutation is invalid");
   }
   if (
-    (value.entityType !== "entry" && value.entityType !== "settings") ||
+    (value.entityType !== "entry" && value.entityType !== "settings" &&
+      (protocolVersion < 5 || value.entityType !== "recoveryAllocation")) ||
     !Number.isSafeInteger(value.baseVersion) ||
     Number(value.baseVersion) < 0 ||
     Number(value.baseVersion) > MAX_VERSION
@@ -239,7 +334,19 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
       entityType: "entry",
       entityId,
       baseVersion: Number(value.baseVersion),
-      payload: validateEntryPayload(value.payload, entityId),
+      payload: validateEntryPayload(value.payload, entityId, protocolVersion),
+    };
+  }
+  if (value.entityType === "recoveryAllocation") {
+    if (!isValidId(entityId)) {
+      throw new ApiError(400, "invalid_mutation", "Recovery allocation ID is invalid");
+    }
+    return {
+      id: value.id,
+      entityType: "recoveryAllocation",
+      entityId,
+      baseVersion: Number(value.baseVersion),
+      payload: validateRecoveryAllocationPayload(value.payload, entityId),
     };
   }
   if (entityId !== "primary") {
@@ -260,7 +367,8 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     !isRecord(value) ||
     !hasOnlyKeys(value, keys) ||
     (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
-      value.schemaVersion !== 3 && value.schemaVersion !== 4)
+      value.schemaVersion !== 3 && value.schemaVersion !== 4 &&
+      value.schemaVersion !== 5)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

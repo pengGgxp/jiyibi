@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { EntryDraft, LedgerEntry, ProcessedImage } from "../domain/types";
+import type {
+  EntryDraft,
+  LedgerEntry,
+  ProcessedImage,
+  RecoveryAllocation,
+} from "../domain/types";
 import {
   clearIncomeForecast,
   LedgerDatabase,
@@ -9,6 +14,9 @@ import {
   setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
+  softDeleteEntry,
+  updateEntryTreatment,
+  upsertRecoveryAllocation,
 } from "../data/database";
 import type { SyncApiClient } from "./api";
 import {
@@ -163,6 +171,210 @@ describe("sync engine", () => {
     expect((await database.syncState.get("primary"))?.cursor).toBe("1");
   });
 
+  it("pushes and acknowledges an independent recovery allocation mutation", async () => {
+    const expense = await createEntry(draft(), database);
+    const refund = await createEntry({ ...draft(), kind: "income" }, database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    const queued = (await database.syncOutbox.get(
+      `recoveryAllocation:${allocation.id}`,
+    ))!;
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+      nextCursor: "1",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 5,
+      mutations: [expect.objectContaining({
+        entityType: "recoveryAllocation",
+        entityId: allocation.id,
+        payload: allocation,
+      })],
+    }), 1);
+    expect(await database.syncOutbox.get(
+      `recoveryAllocation:${allocation.id}`,
+    )).toBeUndefined();
+  });
+
+  it("pushes allocation tombstones before deleting their linked entry", async () => {
+    const expense = await createEntry(draft(), database);
+    const refund = await createEntry({ ...draft(), kind: "income" }, database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    await database.entitySyncState.bulkPut([
+      {
+        id: `entry:${expense.id}`,
+        entityType: "entry",
+        entityId: expense.id,
+        serverVersion: 1,
+        status: "clean",
+        updatedAt: "2026-07-30T13:59:00.000Z",
+      },
+      {
+        id: `recoveryAllocation:${allocation.id}`,
+        entityType: "recoveryAllocation",
+        entityId: allocation.id,
+        serverVersion: 1,
+        status: "clean",
+        updatedAt: "2026-07-30T13:59:00.000Z",
+      },
+    ]);
+    await softDeleteEntry(
+      expense.id,
+      database,
+      new Date("2026-07-30T14:00:00.000Z"),
+    );
+    const allocationMutation = (await database.syncOutbox.get(
+      `recoveryAllocation:${allocation.id}`,
+    ))!;
+    const entryMutation = (await database.syncOutbox.get(`entry:${expense.id}`))!;
+    const api = apiClient(emptyResponse({
+      results: [
+        { id: allocationMutation.id, status: "applied", version: 1 },
+        { id: entryMutation.id, status: "applied", version: 1 },
+      ],
+      nextCursor: "1",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      mutations: [
+        expect.objectContaining({
+          entityType: "recoveryAllocation",
+          entityId: allocation.id,
+          payload: expect.objectContaining({ deletedAt: "2026-07-30T14:00:00.000Z" }),
+        }),
+        expect.objectContaining({
+          entityType: "entry",
+          entityId: expense.id,
+          payload: expect.objectContaining({ deletedAt: "2026-07-30T14:00:00.000Z" }),
+        }),
+      ],
+    }), 1);
+  });
+
+  it("pushes new entries before a new allocation tombstone that references them", async () => {
+    await linkSyncAccount(session(), true, database);
+    const expense = await createEntry(draft(), database);
+    const refund = await createEntry({ ...draft(), kind: "income" }, database);
+    await updateEntryTreatment(expense.id, "one_time_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    await softDeleteEntry(
+      expense.id,
+      database,
+      new Date("2026-07-30T14:00:00.000Z"),
+    );
+    const queued = await database.syncOutbox.toArray();
+    const api = apiClient(emptyResponse({
+      results: queued.map((mutation) => ({
+        id: mutation.id,
+        status: "applied" as const,
+        version: 1,
+      })),
+      nextCursor: "1",
+    }));
+
+    await syncNow(database, api);
+
+    const request = vi.mocked(api.sync).mock.calls[0][0];
+    expect(request.mutations.map((mutation) => mutation.entityType)).toEqual([
+      "entry",
+      "entry",
+      "recoveryAllocation",
+    ]);
+    expect(request.mutations[2]).toMatchObject({
+      entityId: allocation.id,
+      payload: { deletedAt: "2026-07-30T14:00:00.000Z" },
+    });
+  });
+
+  it("pulls and removes recovery allocations independently", async () => {
+    await linkSyncAccount(session(), false, database);
+    const allocation: RecoveryAllocation = {
+      id: "recovery-remote",
+      refundEntryId: "refund-remote",
+      expenseEntryId: "expense-remote",
+      amountMinor: 500,
+      createdAt: "2026-07-30T12:00:00.000Z",
+      updatedAt: "2026-07-30T12:00:00.000Z",
+    };
+    const deleted = {
+      ...allocation,
+      deletedAt: "2026-07-30T13:00:00.000Z",
+      updatedAt: "2026-07-30T13:00:00.000Z",
+    };
+    const api = apiClient(emptyResponse());
+    vi.mocked(api.sync)
+      .mockResolvedValueOnce(emptyResponse({
+        changes: [{
+          seq: "1",
+          entityType: "recoveryAllocation",
+          entityId: allocation.id,
+          version: 1,
+          payload: allocation,
+        }],
+        nextCursor: "1",
+        hasMore: true,
+      }))
+      .mockResolvedValueOnce(emptyResponse({
+        changes: [{
+          seq: "2",
+          entityType: "recoveryAllocation",
+          entityId: allocation.id,
+          version: 2,
+          payload: deleted,
+        }],
+        nextCursor: "2",
+      }));
+
+    await syncNow(database, api);
+
+    expect(await database.recoveryAllocations.get(allocation.id)).toBeUndefined();
+    expect(await database.entitySyncState.get(
+      `recoveryAllocation:${allocation.id}`,
+    )).toMatchObject({ serverVersion: 2, tombstoneAcknowledged: true });
+    expect((await database.syncState.get("primary"))?.cursor).toBe("2");
+  });
+
+  it("leaves the cursor and outbox untouched when the server requires an upgrade", async () => {
+    await linkSyncAccount(session(), true, database);
+    const entry = await createEntry(draft(), database);
+    const queued = (await database.syncOutbox.get(`entry:${entry.id}`))!;
+    const api = apiClient(emptyResponse());
+    vi.mocked(api.sync).mockRejectedValue(Object.assign(new Error("upgrade"), {
+      code: "upgrade_required",
+    }));
+
+    await expect(syncNow(database, api)).rejects.toMatchObject({
+      code: "upgrade_required",
+    });
+    expect((await database.syncState.get("primary"))?.cursor).toBe("0");
+    expect(await database.syncOutbox.get(`entry:${entry.id}`)).toEqual(queued);
+  });
+
   it("leaves the same mutation durable across a network failure and idempotent retry", async () => {
     await linkSyncAccount(session(), true, database);
     const entry = await createEntry(draft(), database);
@@ -197,7 +409,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 4,
+      schemaVersion: 5,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
@@ -220,7 +432,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 4,
+      schemaVersion: 5,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
@@ -252,7 +464,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 4,
+      schemaVersion: 5,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
@@ -308,7 +520,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 4,
+      schemaVersion: 5,
       cursor: "0",
       mutations: [],
     }), 1);
@@ -323,7 +535,7 @@ describe("sync engine", () => {
     });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 4,
+      syncProtocolVersion: 5,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",
@@ -400,7 +612,7 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 4,
+      syncProtocolVersion: 5,
     });
   });
 

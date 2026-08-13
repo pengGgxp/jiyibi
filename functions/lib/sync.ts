@@ -6,6 +6,7 @@ import type {
   LegacyPayCyclePlanPayload,
   LedgerEntryPayload,
   MutationResult,
+  RecoveryAllocationPayload,
   RemoteChange,
   SettingsMutationPayload,
   SyncAppSettingsPayload,
@@ -20,7 +21,7 @@ const CHANGE_PAGE_SIZE = 100;
 interface ChangeRow {
   cursor: string;
   mutation_id: string;
-  entity_type: "entry" | "settings";
+  entity_type: "entry" | "settings" | "recoveryAllocation";
   entity_id: string;
   entity_version: number;
   mutation_hash: string;
@@ -38,6 +39,21 @@ interface ChangeRow {
   settings_expected_income_minor?: number | null;
   settings_schema_version?: number | null;
   settings_updated_at?: string | null;
+  entry_id?: string | null;
+  entry_amount_minor?: number | null;
+  entry_note?: string | null;
+  entry_occurred_at?: string | null;
+  entry_local_date_key?: string | null;
+  entry_local_month_key?: string | null;
+  entry_timezone_offset_minutes?: number | null;
+  entry_attachment_id?: string | null;
+  entry_treatment?: string | null;
+  entry_confirmation_status?: string | null;
+  entry_detection_rule_version?: number | null;
+  entry_prompted_revision?: string | null;
+  entry_created_at?: string | null;
+  entry_updated_at?: string | null;
+  entry_deleted_at?: string | null;
 }
 
 const SETTINGS_PROJECTION_COLUMNS = `
@@ -63,6 +79,30 @@ const SETTINGS_PROJECTION_JOIN = `
    AND current_settings.account_generation = current_change.account_generation
    AND current_settings.id = current_change.entity_id`;
 
+const ENTRY_PROJECTION_COLUMNS = `
+  current_entry.id AS entry_id,
+  current_entry.amount_minor AS entry_amount_minor,
+  current_entry.note AS entry_note,
+  current_entry.occurred_at AS entry_occurred_at,
+  current_entry.local_date_key AS entry_local_date_key,
+  current_entry.local_month_key AS entry_local_month_key,
+  current_entry.timezone_offset_minutes AS entry_timezone_offset_minutes,
+  current_entry.attachment_id AS entry_attachment_id,
+  current_entry.treatment AS entry_treatment,
+  current_entry.confirmation_status AS entry_confirmation_status,
+  current_entry.detection_rule_version AS entry_detection_rule_version,
+  current_entry.prompted_revision AS entry_prompted_revision,
+  current_entry.created_at AS entry_created_at,
+  current_entry.updated_at AS entry_updated_at,
+  current_entry.deleted_at AS entry_deleted_at`;
+
+const ENTRY_PROJECTION_JOIN = `
+  LEFT JOIN ledger_entries AS current_entry
+    ON current_change.entity_type = 'entry'
+   AND current_entry.user_id = current_change.user_id
+   AND current_entry.account_generation = current_change.account_generation
+   AND current_entry.id = current_change.entity_id`;
+
 interface VersionRow {
   version: number;
 }
@@ -70,10 +110,15 @@ interface VersionRow {
 function payloadFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
-): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload {
+): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload | RecoveryAllocationPayload {
   try {
     const payload = JSON.parse(row.payload_json) as unknown;
-    if (row.entity_type === "entry") return payload as LedgerEntryPayload;
+    if (row.entity_type === "recoveryAllocation") {
+      return payload as RecoveryAllocationPayload;
+    }
+    if (row.entity_type === "entry") {
+      return entryPayloadFromRow(row, protocolVersion) ?? payload as LedgerEntryPayload;
+    }
     return projectSettingsPayload(
       settingsPayloadFromRow(row) ?? payload,
       protocolVersion,
@@ -85,6 +130,37 @@ function payloadFromRow(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function entryPayloadFromRow(
+  row: ChangeRow,
+  protocolVersion: SyncProtocolVersion,
+): LedgerEntryPayload | null {
+  if (typeof row.entry_id !== "string") return null;
+  const payload: LedgerEntryPayload = {
+    id: row.entry_id,
+    amountMinor: Number(row.entry_amount_minor),
+    note: String(row.entry_note ?? ""),
+    occurredAt: String(row.entry_occurred_at),
+    localDateKey: String(row.entry_local_date_key),
+    localMonthKey: String(row.entry_local_month_key),
+    timezoneOffsetMinutes: Number(row.entry_timezone_offset_minutes),
+    createdAt: String(row.entry_created_at),
+    updatedAt: String(row.entry_updated_at),
+  };
+  if (row.entry_attachment_id) payload.attachmentId = row.entry_attachment_id;
+  if (protocolVersion >= 5) {
+    payload.treatment = row.entry_treatment as LedgerEntryPayload["treatment"];
+    payload.confirmationStatus =
+      row.entry_confirmation_status as LedgerEntryPayload["confirmationStatus"];
+    if (row.entry_detection_rule_version !== null &&
+        row.entry_detection_rule_version !== undefined) {
+      payload.detectionRuleVersion = row.entry_detection_rule_version;
+    }
+    if (row.entry_prompted_revision) payload.promptedRevision = row.entry_prompted_revision;
+  }
+  if (row.entry_deleted_at) payload.deletedAt = row.entry_deleted_at;
+  return payload;
 }
 
 function settingsPayloadFromRow(row: ChangeRow): Record<string, unknown> | null {
@@ -216,7 +292,11 @@ function changeFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
 ): RemoteChange {
-  if (row.entity_type !== "entry" && row.entity_type !== "settings") {
+  if (
+    row.entity_type !== "entry" &&
+    row.entity_type !== "settings" &&
+    row.entity_type !== "recoveryAllocation"
+  ) {
     throw new Error("Stored sync entity type is invalid");
   }
   return {
@@ -262,9 +342,11 @@ async function latestRemoteChange(
               current_change.entity_version,
               current_change.mutation_hash,
               current_change.payload_json,
-              ${SETTINGS_PROJECTION_COLUMNS}
+              ${SETTINGS_PROJECTION_COLUMNS},
+              ${ENTRY_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
+       ${ENTRY_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
          AND current_change.account_generation = ?
          AND current_change.entity_type = ?
@@ -375,6 +457,8 @@ export function minimizeDeletedEntry(entry: LedgerEntryPayload): LedgerEntryPayl
     localDateKey: entry.deletedAt.slice(0, 10),
     localMonthKey: entry.deletedAt.slice(0, 7),
     timezoneOffsetMinutes: 0,
+    treatment: "ordinary_income",
+    confirmationStatus: "not_needed",
     createdAt: entry.deletedAt,
     updatedAt: entry.deletedAt,
     deletedAt: entry.deletedAt,
@@ -391,6 +475,9 @@ async function writeEntry(
   const entry = minimizeDeletedEntry(requestedEntry);
   const now = new Date().toISOString();
   const mutationHash = await syncMutationHash(mutation);
+  const treatment = entry.treatment ??
+    (entry.amountMinor < 0 ? "ordinary_expense" : "ordinary_income");
+  const confirmationStatus = entry.confirmationStatus ?? "not_needed";
   const values = [
     entry.amountMinor,
     entry.note,
@@ -399,6 +486,10 @@ async function writeEntry(
     entry.localMonthKey,
     entry.timezoneOffsetMinutes,
     entry.attachmentId ?? null,
+    treatment,
+    confirmationStatus,
+    entry.detectionRuleVersion ?? null,
+    entry.promptedRevision ?? null,
     entry.createdAt,
     entry.updatedAt,
     entry.deletedAt ?? null,
@@ -408,10 +499,11 @@ async function writeEntry(
       .prepare(
          `INSERT INTO ledger_entries (
            user_id, account_generation, id, amount_minor, note, occurred_at, local_date_key,
-           local_month_key, timezone_offset_minutes, attachment_id, created_at,
+           local_month_key, timezone_offset_minutes, attachment_id, treatment,
+           confirmation_status, detection_rule_version, prompted_revision, created_at,
            updated_at, deleted_at, version, last_mutation_id,
            last_mutation_hash, server_updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id, id) DO NOTHING
          RETURNING version`,
       )
@@ -423,7 +515,9 @@ async function writeEntry(
       `UPDATE ledger_entries SET
          amount_minor = ?, note = ?, occurred_at = ?, local_date_key = ?,
          local_month_key = ?, timezone_offset_minutes = ?, attachment_id = ?,
-         created_at = ?, updated_at = ?, deleted_at = ?, version = version + 1,
+         treatment = ?, confirmation_status = ?, detection_rule_version = ?,
+         prompted_revision = ?, created_at = ?, updated_at = ?, deleted_at = ?,
+         version = version + 1,
          last_mutation_id = ?, last_mutation_hash = ?, server_updated_at = ?
        WHERE user_id = ? AND account_generation = ?
          AND id = ? AND version = ? AND last_mutation_id <> ?
@@ -437,6 +531,61 @@ async function writeEntry(
       userId,
       generation,
       entry.id,
+      mutation.baseVersion,
+      mutation.id,
+    )
+    .first<VersionRow>();
+}
+
+async function writeRecoveryAllocation(
+  db: D1Database,
+  userId: string,
+  generation: number,
+  mutation: SyncMutation,
+): Promise<VersionRow | null> {
+  const allocation = mutation.payload as RecoveryAllocationPayload;
+  const now = new Date().toISOString();
+  const mutationHash = await syncMutationHash(mutation);
+  const values = [
+    allocation.refundEntryId,
+    allocation.expenseEntryId,
+    allocation.amountMinor,
+    allocation.createdAt,
+    allocation.updatedAt,
+    allocation.deletedAt ?? null,
+  ] as const;
+  if (mutation.baseVersion === 0) {
+    return db
+      .prepare(
+        `INSERT INTO recovery_allocations (
+           user_id, account_generation, id, refund_entry_id, expense_entry_id,
+           amount_minor, created_at, updated_at, deleted_at, version,
+           last_mutation_id, last_mutation_hash, server_updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ON CONFLICT(user_id, id) DO NOTHING
+         RETURNING version`,
+      )
+      .bind(userId, generation, allocation.id, ...values, mutation.id, mutationHash, now)
+      .first<VersionRow>();
+  }
+  return db
+    .prepare(
+      `UPDATE recovery_allocations SET
+         refund_entry_id = ?, expense_entry_id = ?, amount_minor = ?,
+         created_at = ?, updated_at = ?, deleted_at = ?, version = version + 1,
+         last_mutation_id = ?, last_mutation_hash = ?, server_updated_at = ?
+       WHERE user_id = ? AND account_generation = ? AND id = ? AND version = ?
+         AND last_mutation_id <> ?
+       RETURNING version`,
+    )
+    .bind(
+      ...values,
+      mutation.id,
+      mutationHash,
+      now,
+      userId,
+      generation,
+      allocation.id,
       mutation.baseVersion,
       mutation.id,
     )
@@ -587,9 +736,13 @@ export async function applyMutation(
 
   let written: VersionRow | null;
   try {
-    written = mutation.entityType === "entry"
-      ? await writeEntry(db, userId, generation, mutation)
-      : await writeSettings(db, userId, generation, mutation, protocolVersion);
+    if (mutation.entityType === "entry") {
+      written = await writeEntry(db, userId, generation, mutation);
+    } else if (mutation.entityType === "recoveryAllocation") {
+      written = await writeRecoveryAllocation(db, userId, generation, mutation);
+    } else {
+      written = await writeSettings(db, userId, generation, mutation, protocolVersion);
+    }
   } catch (error) {
     const raced = await findMutation(db, userId, generation, mutation.id);
     if (raced && await mutationMatchesRow(mutation, raced)) {
@@ -659,12 +812,15 @@ export async function pullChanges(
               current_change.entity_version,
               current_change.mutation_hash,
               current_change.payload_json,
-              ${SETTINGS_PROJECTION_COLUMNS}
+              ${SETTINGS_PROJECTION_COLUMNS},
+              ${ENTRY_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
+       ${ENTRY_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
           AND current_change.account_generation = ?
          AND current_change.seq > CAST(? AS INTEGER)
+         AND (? >= 5 OR current_change.entity_type <> 'recoveryAllocation')
          AND NOT EXISTS (
            SELECT 1
            FROM sync_changes AS newer_change
@@ -677,7 +833,7 @@ export async function pullChanges(
        ORDER BY current_change.seq ASC
        LIMIT ?`,
     )
-    .bind(userId, generation, cursor, CHANGE_PAGE_SIZE + 1)
+    .bind(userId, generation, cursor, protocolVersion, CHANGE_PAGE_SIZE + 1)
     .all<ChangeRow>();
   const hasMore = result.results.length > CHANGE_PAGE_SIZE;
   const page = result.results.slice(0, CHANGE_PAGE_SIZE);
@@ -713,6 +869,42 @@ export async function compactSupersededChanges(
     .run();
 }
 
+export async function assertLegacyClientCompatible(
+  db: D1Database,
+  userId: string,
+  generation: number,
+  protocolVersion: SyncProtocolVersion,
+): Promise<void> {
+  if (protocolVersion >= 5) return;
+  const row = await db
+    .prepare(
+      `SELECT CASE WHEN EXISTS (
+         SELECT 1 FROM ledger_entries
+         WHERE user_id = ? AND account_generation = ?
+           AND deleted_at IS NULL
+           AND (
+             treatment <> CASE WHEN amount_minor < 0
+               THEN 'ordinary_expense' ELSE 'ordinary_income' END
+             OR confirmation_status <> 'not_needed'
+             OR detection_rule_version IS NOT NULL
+             OR prompted_revision IS NOT NULL
+           )
+       ) OR EXISTS (
+         SELECT 1 FROM recovery_allocations
+         WHERE user_id = ? AND account_generation = ? AND deleted_at IS NULL
+       ) THEN 1 ELSE 0 END AS requires_upgrade`,
+    )
+    .bind(userId, generation, userId, generation)
+    .first<{ requires_upgrade: number }>();
+  if (row?.requires_upgrade === 1) {
+    throw new ApiError(
+      409,
+      "upgrade_required",
+      "This ledger uses analysis fields that require a newer client",
+    );
+  }
+}
+
 export async function synchronize(
   env: Env,
   userId: string,
@@ -725,6 +917,12 @@ export async function synchronize(
   nextCursor: string;
   hasMore: boolean;
 }> {
+  await assertLegacyClientCompatible(
+    env.DB,
+    userId,
+    generation,
+    request.schemaVersion,
+  );
   const duplicateIds = await assertMutationIdsReusable(
     env.DB,
     userId,
