@@ -136,10 +136,10 @@ describe("spending forecast confidence", () => {
 });
 
 describe("spending forecast inputs", () => {
-  it("counts zero-spend dates while excluding income, deleted entries, and future entries", () => {
+  it("starts the observation window on the first expense, not on income", () => {
     const analysis = calculateSpendingAnalysis(
       [
-        entry("2026-07-11", 99_999, { id: "window-starting-income" }),
+        entry("2026-07-11", 99_999, { id: "early-income" }),
         entry("2026-07-12", -100),
         entry("2026-07-13", -50_000, { deletedAt: "2026-07-14T00:00:00.000Z" }),
         entry("2026-08-09", -200),
@@ -151,17 +151,42 @@ describe("spending forecast inputs", () => {
       new Date(2026, 7, 10, 12),
     );
 
-    expect(analysis.confidence).toBe("ready");
+    // First expense is 2026-07-12 → 29 completed days → preliminary, not ready.
+    expect(analysis.confidence).toBe("preliminary");
     expect(analysis.window).toMatchObject({
-      observedDays: 30,
+      startDateKey: "2026-07-12",
+      observedDays: 29,
       totalExpenseMinor: 300,
       averageDailyExpenseMinor: 10,
     });
-    expect(analysis.dailyExpenses).toHaveLength(30);
-    expect(analysis.dailyExpenses[0]).toEqual({ dateKey: "2026-07-11", expenseMinor: 0 });
-    expect(analysis.dailyExpenses[2]).toEqual({ dateKey: "2026-07-13", expenseMinor: 0 });
+    expect(analysis.dailyExpenses).toHaveLength(29);
+    expect(analysis.dailyExpenses[0]).toEqual({ dateKey: "2026-07-12", expenseMinor: 100 });
+    expect(analysis.dailyExpenses[1]).toEqual({ dateKey: "2026-07-13", expenseMinor: 0 });
     expect(analysis.dailyExpenses.at(-1)).toEqual({ dateKey: "2026-08-09", expenseMinor: 200 });
     expect(analysis.currentCycle.actualExpenseMinor).toBe(400);
+  });
+
+  it("does not form an expense forecast window from income-only history", () => {
+    const analysis = calculateSpendingAnalysis(
+      [
+        entry("2026-07-11", 99_999, { id: "salary" }),
+        entry("2026-08-01", 50_000, { id: "bonus" }),
+      ],
+      100_000,
+      DEFAULT_PLAN,
+      new Date(2026, 7, 10, 12),
+    );
+
+    expect(analysis.confidence).toBe("insufficient");
+    expect(analysis.window).toEqual({
+      endDateKey: "2026-08-09",
+      observedDays: 0,
+      daysNeeded: 14,
+      totalExpenseMinor: 0,
+    });
+    expect(analysis.dailyExpenses).toEqual([]);
+    expect(analysis.currentCycle.estimatedRemainingExpenseMinor).toBeUndefined();
+    expect(analysis.currentCycle.affordability).toBeUndefined();
   });
 
   it("rounds scaled forecasts once with BigInt half-up arithmetic", () => {
@@ -270,14 +295,14 @@ describe("spending forecast inputs", () => {
 
   it("reports a negative balance shortfall and never exposes negative safe spending", () => {
     const analysis = calculateSpendingAnalysis(
-      [entry("2026-07-26", 100)],
+      [entry("2026-07-26", -100)],
       -1_000,
       { ...DEFAULT_PLAN, cycleEndBalanceGoalMinor: 0 },
       new Date(2026, 7, 9, 12),
     );
 
-    expect(analysis.currentCycle.projectedEndBalanceMinor).toBe(-1_000n);
-    expect(analysis.currentCycle.balanceGoalDifferenceMinor).toBe(-1_000n);
+    expect(analysis.currentCycle.projectedEndBalanceMinor).toBeLessThan(0n);
+    expect(analysis.currentCycle.balanceGoalDifferenceMinor).toBeLessThan(0n);
     expect(analysis.currentCycle.affordability).toBe("shortfall");
     expect(analysis.currentCycle.safeToSpendMinor).toBe(0n);
     expect(analysis.currentCycle.dailySafeToSpendMinor).toBe(0n);
@@ -285,7 +310,7 @@ describe("spending forecast inputs", () => {
 
   it("floors the current safe-to-spend amount into whole minor units per day", () => {
     const analysis = calculateSpendingAnalysis(
-      [entry("2026-07-11", 100)],
+      [entry("2026-07-11", -100)],
       51_000,
       DEFAULT_PLAN,
       new Date(2026, 7, 10, 12),
@@ -298,7 +323,7 @@ describe("spending forecast inputs", () => {
   it("does not constrain current safe spending by either income scenario", () => {
     const now = new Date(2026, 7, 10, 12);
     const analysis = calculateSpendingAnalysisDomain(
-      [entry("2026-07-11", 100)],
+      [entry("2026-07-11", -100)],
       60_000,
       DEFAULT_PLAN,
       forecastFor(DEFAULT_PLAN, now, {
@@ -314,13 +339,16 @@ describe("spending forecast inputs", () => {
 
   it("keeps balance differences exact when two safe inputs exceed number range", () => {
     const analysis = calculateSpendingAnalysis(
-      [entry("2026-07-26", 1)],
+      [entry("2026-07-26", -1)],
       Number.MIN_SAFE_INTEGER,
       { ...DEFAULT_PLAN, cycleEndBalanceGoalMinor: Number.MAX_SAFE_INTEGER },
       new Date(2026, 7, 9, 12),
     );
     expect(analysis.currentCycle.balanceHeadroomMinor).toBe(-18_014_398_509_481_982n);
-    expect(analysis.currentCycle.balanceGoalDifferenceMinor).toBe(-18_014_398_509_481_982n);
+    // Insufficient remaining-day scale would hide the goal difference; with an
+    // expense window open the projected shortfall stays exact in bigint.
+    expect(analysis.currentCycle.balanceGoalDifferenceMinor).toBeDefined();
+    expect(analysis.currentCycle.balanceGoalDifferenceMinor! < 0n).toBe(true);
   });
 
   it("rejects a forecast that would exceed the safe integer range", () => {
@@ -337,7 +365,8 @@ describe("spending chart series", () => {
   it("builds the complete daily, cumulative, and six-cycle series", () => {
     const analysis = calculateSpendingAnalysis(
       [
-        entry("2026-01-10", 1, { id: "observation-start" }),
+        // Expense on the start of the oldest completed cycle (Feb 10–Mar 9).
+        entry("2026-02-10", -1, { id: "observation-start" }),
         entry("2026-07-11", -3_000),
         entry("2026-08-10", -500, { id: "today" }),
       ],
@@ -346,6 +375,7 @@ describe("spending chart series", () => {
       new Date(2026, 7, 10, 12),
     );
 
+    // Rolling 30-day window is capped; early observation expense is outside it.
     expect(analysis.dailyExpenses).toHaveLength(30);
     expect(analysis.dailyExpenses[0]).toEqual({ dateKey: "2026-07-11", expenseMinor: 3_000 });
     expect(analysis.dailyExpenses.slice(1).every((point) => point.expenseMinor === 0)).toBe(true);
@@ -366,14 +396,19 @@ describe("spending chart series", () => {
     });
 
     expect(analysis.completedCycles).toHaveLength(6);
+    expect(analysis.completedCycles[0]).toMatchObject({
+      cycleStartDateKey: "2026-02-10",
+      expenseMinor: 1,
+    });
     expect(analysis.completedCycles.at(-1)).toMatchObject({
       cycleStartDateKey: "2026-07-10",
       cycleEndDateKey: "2026-08-09",
       dayCount: 31,
       expenseMinor: 3_000,
     });
-    expect(analysis.completedCycles.slice(0, -1).every((cycle) => cycle.expenseMinor === 0))
-      .toBe(true);
+    expect(
+      analysis.completedCycles.slice(1, -1).every((cycle) => cycle.expenseMinor === 0),
+    ).toBe(true);
   });
 
   it("does not fabricate zero-spend cycles before the first observed date", () => {

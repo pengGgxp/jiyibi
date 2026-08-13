@@ -119,6 +119,8 @@ function prepareAnalysisEntries(
       throw new RangeError("账目金额必须使用非零整数分");
     }
     if (entry.localDateKey > todayDateKey) continue;
+    // Income, refunds, and transfers must not open the expense observation window.
+    if (entry.amountMinor > 0) continue;
 
     if (entry.localDateKey <= yesterdayDateKey) {
       earliestCompletedEntryDateKey = earliestCompletedEntryDateKey === undefined
@@ -126,7 +128,6 @@ function prepareAnalysisEntries(
         ? entry.localDateKey
         : earliestCompletedEntryDateKey;
     }
-    if (entry.amountMinor > 0) continue;
 
     const expenseMinor = Math.abs(entry.amountMinor);
     expenseByDate.set(

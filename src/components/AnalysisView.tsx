@@ -84,17 +84,17 @@ function tooltipAmount(value: unknown): string {
 }
 
 function confidenceLabel(analysis: SpendingAnalysis): string {
-  if (analysis.confidence === "ready") return "近 30 天估算";
+  if (analysis.confidence === "ready") return "按近 30 天估算";
   if (analysis.confidence === "preliminary") return "初步估算";
   const remaining = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
-  return `还差 ${remaining} 个完整日`;
+  return `数据覆盖还差 ${remaining} 天`;
 }
 
 function confidenceDescription(analysis: SpendingAnalysis): string {
   const { observedDays, daysNeeded } = analysis.window;
-  if (analysis.confidence === "ready") return "包含 0 支出日";
-  if (analysis.confidence === "preliminary") return `已有 ${observedDays} 个完整日`;
-  return `满 ${daysNeeded} 个完整日后开始估算`;
+  if (analysis.confidence === "ready") return "数据覆盖 30 天 · 含 0 支出日";
+  if (analysis.confidence === "preliminary") return `数据覆盖 ${observedDays} 天 · 不代表记录完整`;
+  return `满 ${daysNeeded} 天数据覆盖后开始估算`;
 }
 
 function affordabilityLabel(value: "surplus" | "shortfall" | "exact" | undefined): string {
@@ -284,15 +284,15 @@ function DailyExpensesTable({ analysis }: { analysis: SpendingAnalysis }) {
 function currentCycleVerdict(analysis: SpendingAnalysis): string {
   const cycle = analysis.currentCycle;
   if (cycle.projectedEndBalanceMinor === undefined || cycle.balanceGoalDifferenceMinor === undefined) {
-    return `本周期已支出 ${displayAmount(cycle.actualExpenseMinor)}，数据不足，暂不预测周期末余额。`;
+    return `本周期实际已支出 ${displayAmount(cycle.actualExpenseMinor)}，数据覆盖不足，暂不预测周期末余额。`;
   }
   if (cycle.affordability === "surplus") {
-    return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，高出周期底线 ${displayAmount(cycle.balanceGoalDifferenceMinor)}。`;
+    return `按近期已记录花法估算，预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，高出周期底线 ${displayAmount(cycle.balanceGoalDifferenceMinor)}。`;
   }
   if (cycle.affordability === "shortfall") {
-    return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，低于周期底线 ${displayAmount(-cycle.balanceGoalDifferenceMinor)}。`;
+    return `按近期已记录花法估算，预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，低于周期底线 ${displayAmount(-cycle.balanceGoalDifferenceMinor)}。`;
   }
-  return `预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，刚好达到周期底线。`;
+  return `按近期已记录花法估算，预计周期末余额 ${displayAmount(cycle.projectedEndBalanceMinor)}，刚好达到周期底线。`;
 }
 
 function currentCycleChartDescription(analysis: SpendingAnalysis): string {
@@ -304,19 +304,19 @@ function currentCycleChartDescription(analysis: SpendingAnalysis): string {
 }
 
 function scenarioVerdict(scenario: IncomeScenarioAnalysis | undefined): string {
-  if (!scenario) return "数据不足，暂不判断。";
+  if (!scenario) return "数据覆盖不足，暂不判断。";
   if (scenario.affordability === "surplus") {
-    return `按当前花法可多 ${displayAmount(scenario.differenceMinor)}。`;
+    return `按近期已记录花法可多 ${displayAmount(scenario.differenceMinor)}。`;
   }
   if (scenario.affordability === "shortfall") {
-    return `按当前花法还差 ${displayAmount(-scenario.differenceMinor)}。`;
+    return `按近期已记录花法还差 ${displayAmount(-scenario.differenceMinor)}。`;
   }
-  return "按当前花法刚好覆盖。";
+  return "按近期已记录花法刚好覆盖。";
 }
 
 function dailyChartDescription(analysis: SpendingAnalysis): string {
   const { observedDays, totalExpenseMinor } = analysis.window;
-  return `${observedDays} 个完整日共支出 ${displayAmount(totalExpenseMinor)}，包含 0 支出日。`;
+  return `数据覆盖 ${observedDays} 天，共支出 ${displayAmount(totalExpenseMinor)}，包含 0 支出日。`;
 }
 
 function errorMessage(error: string | undefined): string {
@@ -332,7 +332,9 @@ function AnalysisHeader({ analysis }: { analysis?: SpendingAnalysis }) {
     <header className="analysis-header">
       <div>
         <h2>够不够花</h2>
-        <p className="analysis-lede">按近 30 天支出，估算发薪前和下个工资周期是否够用。</p>
+        <p className="analysis-lede">
+          实际现金流解释已经发生的收支；日常花法只按近期已记录支出估算到发薪日是否够用，不是保证。
+        </p>
       </div>
       {analysis ? (
         <div className={`analysis-confidence analysis-confidence--${analysis.confidence}`}>
@@ -403,7 +405,7 @@ export function AnalysisView({
         <StatePanel
           kind="empty"
           title="还没有支出记录"
-          message="记录满 14 个完整日后开始估算。"
+          message="支出数据覆盖满 14 个完整日后开始估算。"
           actionLabel="去记一笔"
           onAction={onOpenLedger}
         />
@@ -412,7 +414,7 @@ export function AnalysisView({
           <section className="analysis-outlook" aria-labelledby="analysis-outlook-title">
             <div className="analysis-outlook-heading">
               <h3 id="analysis-outlook-title">结论</h3>
-              <p className="analysis-method"><Info aria-hidden="true" /> 只统计已记录支出，不含固定支出。</p>
+              <p className="analysis-method"><Info aria-hidden="true" /> 结论按近期已记录花法估算，不含未记录的固定支出。</p>
             </div>
             <div className="analysis-verdict-grid">
               <article className={`analysis-verdict analysis-verdict--${analysis.currentCycle.affordability ?? "pending"}`}>
@@ -423,7 +425,7 @@ export function AnalysisView({
               </article>
               <article className={`analysis-verdict analysis-verdict--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
                 <div className="analysis-verdict-label"><StatusIcon value={analysis.nextCycle.expectedIncomeScenario?.affordability} /> 下个工资周期</div>
-                <small className="analysis-income-basis">按近 {analysis.window.observedDays} 个完整日的花法 · 周期 {analysis.nextCycle.days} 天</small>
+                <small className="analysis-income-basis">按数据覆盖 {analysis.window.observedDays} 天的日常花法 · 周期 {analysis.nextCycle.days} 天</small>
                 {activeForecast ? (
                   <div className="analysis-income-scenarios">
                     <div>
@@ -446,15 +448,35 @@ export function AnalysisView({
             </div>
           </section>
 
-          <section className="analysis-metrics-section" aria-labelledby="analysis-metrics-title">
+          <section className="analysis-metrics-section" aria-labelledby="analysis-cashflow-title">
             <div className="analysis-section-heading">
-              <h3 id="analysis-metrics-title">关键数据</h3>
+              <h3 id="analysis-cashflow-title">实际现金流</h3>
+              <p>已经发生的外部流入与流出，不替代日常花法预测。</p>
+            </div>
+            <dl className="analysis-metrics">
+              <Metric label="本月收入" value={summary ? `+${displayAmount(summary.monthIncomeMinor)}` : "—"} detail="有效外部流入" tone="positive" />
+              <Metric label="本月支出" value={summary ? `−${displayAmount(summary.monthExpenseMinor)}` : "—"} detail="有效外部流出" tone="negative" />
+              <Metric
+                label="本月净额"
+                value={summary
+                  ? displaySignedAmount(BigInt(summary.monthIncomeMinor) - BigInt(summary.monthExpenseMinor))
+                  : "—"}
+                detail="流入减流出"
+              />
+              <Metric label="本周期实际支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} detail="从发薪日开始的外部流出" />
+            </dl>
+          </section>
+
+          <section className="analysis-metrics-section" aria-labelledby="analysis-baseline-title">
+            <div className="analysis-section-heading">
+              <h3 id="analysis-baseline-title">日常花法</h3>
+              <p>用于外推的近期支出基线，时间跨度不代表记账完整。</p>
             </div>
             <dl className="analysis-metrics">
               <Metric
                 label="预计周期末余额"
                 value={displayAmount(analysis.currentCycle.projectedEndBalanceMinor)}
-                detail="本周期结束时"
+                detail="按近期已记录花法估算"
                 tone={analysis.currentCycle.affordability === "shortfall" ? "negative" : analysis.currentCycle.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric
@@ -466,26 +488,35 @@ export function AnalysisView({
               <Metric
                 label="最低收入差额"
                 value={displaySignedAmount(analysis.nextCycle.minimumIncomeScenario?.differenceMinor)}
-                detail="最低收入与当前花法"
+                detail="最低收入与日常花法"
                 tone={analysis.nextCycle.minimumIncomeScenario?.affordability === "shortfall" ? "negative" : analysis.nextCycle.minimumIncomeScenario?.affordability === "surplus" ? "positive" : "pending"}
               />
               <Metric
                 label="预计收入差额"
                 value={displaySignedAmount(analysis.nextCycle.expectedIncomeScenario?.differenceMinor)}
-                detail="预计收入与当前花法"
+                detail="预计收入与日常花法"
                 tone={analysis.nextCycle.expectedIncomeScenario?.affordability === "shortfall" ? "negative" : analysis.nextCycle.expectedIncomeScenario?.affordability === "surplus" ? "positive" : "pending"}
               />
-              <Metric label="近 30 天日均支出" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`近 ${analysis.window.observedDays} 个完整日`} />
-              <Metric label="本周期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} detail="从发薪日开始" />
-              <Metric label="本月收入" value={summary ? `+${displayAmount(summary.monthIncomeMinor)}` : "—"} detail="有效收入记录" tone="positive" />
-              <Metric label="本月支出" value={summary ? `−${displayAmount(summary.monthExpenseMinor)}` : "—"} detail="有效支出记录" tone="negative" />
+              <Metric
+                label="日常支出日均"
+                value={displayAmount(analysis.window.averageDailyExpenseMinor)}
+                detail={`数据覆盖 ${analysis.window.observedDays} 天`}
+              />
+              <Metric
+                label="数据覆盖"
+                value={`${analysis.window.observedDays} 天`}
+                detail={analysis.confidence === "ready" ? "满 30 天可标为按近 30 天估算" : analysis.confidence === "preliminary" ? "14–29 天为初步估算" : "不足 14 天不给结论"}
+              />
             </dl>
           </section>
 
           {analysis.confidence !== "insufficient" ? (
             <section className="analysis-insight-strip" aria-label="统计口径">
               <ListChecks aria-hidden="true" />
-              <p>统计口径：截至昨天的 {analysis.window.observedDays} 个完整日，包含 0 支出日；今天按完整一天估算。</p>
+              <p>
+                日常花法数据覆盖截至昨天的 {analysis.window.observedDays} 天（含 0 支出日），不代表记录完整；
+                今天按完整一天估算，结论不是现金流保证。
+              </p>
             </section>
           ) : null}
 

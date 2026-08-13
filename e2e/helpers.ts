@@ -87,9 +87,10 @@ export async function seedAnalysisLedger(
       12,
     );
     const observationKey = dateKey(observationDate);
+    // Expense (not income): income must not open the observation window.
     entries.unshift({
       id: "analysis-observation-start",
-      amountMinor: 1,
+      amountMinor: -1,
       note: "分析观察起点",
       occurredAt: observationDate.toISOString(),
       localDateKey: observationKey,

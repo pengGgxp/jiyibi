@@ -203,7 +203,7 @@ describe("AnalysisView states", () => {
     const { host, onOpenLedger } = await renderView({ result: empty, entryCount: 0 });
 
     expect(host.textContent).toContain("还没有支出记录");
-    expect(host.textContent).toContain("记录满 14 个完整日后开始估算。");
+    expect(host.textContent).toContain("支出数据覆盖满 14 个完整日后开始估算。");
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("去记一笔"));
     await act(async () => button?.click());
     expect(onOpenLedger).toHaveBeenCalledOnce();
@@ -219,12 +219,14 @@ describe("AnalysisView states", () => {
     const { host } = await renderView({ result: todayOnly, entryCount: 1 });
 
     expect(host.textContent).not.toContain("还没有支出记录");
-    expect(host.textContent).toContain("本周期支出");
+    expect(host.textContent).toContain("本周期实际支出");
+    expect(host.textContent).toContain("实际现金流");
+    expect(host.textContent).toContain("日常花法");
     expect(host.textContent).toContain("¥24.00");
-    expect(host.textContent).toContain("还差 14 个完整日");
-    expect(host.textContent).toContain("满 14 个完整日后开始估算");
+    expect(host.textContent).toContain("数据覆盖还差 14 天");
+    expect(host.textContent).toContain("满 14 天数据覆盖后开始估算");
     expect(host.textContent).toContain("暂不预测周期末余额");
-    expect(host.textContent).not.toContain("统计口径：");
+    expect(host.textContent).not.toContain("日常花法数据覆盖截至昨天");
     expect(host.textContent).not.toContain("保守估算");
     expect(host.textContent).not.toContain("预计够用");
   });
@@ -232,11 +234,13 @@ describe("AnalysisView states", () => {
   it("explains why an insufficient sample does not produce a verdict", async () => {
     const { host } = await renderView({ result: analysis("insufficient") });
 
-    expect(host.textContent).toContain("还差 9 个完整日");
-    expect(host.textContent).toContain("满 14 个完整日后开始估算");
+    expect(host.textContent).toContain("数据覆盖还差 9 天");
+    expect(host.textContent).toContain("满 14 天数据覆盖后开始估算");
     expect(host.textContent).toContain("暂不预测周期末余额");
-    expect(host.textContent).toContain("数据不足，暂不判断");
-    expect(host.textContent).not.toContain("统计口径：");
+    expect(host.textContent).toContain("数据覆盖不足，暂不判断");
+    expect(host.textContent).toContain("实际现金流");
+    expect(host.textContent).toContain("日常花法");
+    expect(host.textContent).not.toContain("日常花法数据覆盖截至昨天");
     expect(host.textContent).not.toContain("保守估算");
     expect(host.textContent).not.toContain("预计够用");
   });
@@ -264,7 +268,7 @@ describe("AnalysisView forecasts and charts", () => {
     const { host } = await renderView({ result: analysis("preliminary") });
 
     expect(host.textContent).toContain("初步估算");
-    expect(host.textContent).toContain("已有 20 个完整日");
+    expect(host.textContent).toContain("数据覆盖 20 天 · 不代表记录完整");
   });
 
   it.each([
@@ -282,11 +286,13 @@ describe("AnalysisView forecasts and charts", () => {
     const { host } = await renderView({ result: analysis("ready") });
 
     expect(host.textContent).toContain("最低收入 ¥6,000.00");
-    expect(host.textContent).toContain("按当前花法还差 ¥1,000.00");
+    expect(host.textContent).toContain("按近期已记录花法还差 ¥1,000.00");
     expect(host.textContent).toContain("预计收入 ¥8,000.00");
-    expect(host.textContent).toContain("按当前花法可多 ¥1,000.00");
+    expect(host.textContent).toContain("按近期已记录花法可多 ¥1,000.00");
     expect(host.textContent).toContain("最低收入差额−¥1,000.00");
     expect(host.textContent).toContain("预计收入差额+¥1,000.00");
+    expect(host.textContent).toContain("实际现金流");
+    expect(host.textContent).toContain("日常花法");
     expect(host.textContent).not.toContain("月工资");
   });
 
@@ -314,9 +320,12 @@ describe("AnalysisView forecasts and charts", () => {
     expect(host.textContent).toContain("当前周期累计支出");
     expect(host.textContent).toContain("完整工资周期支出");
     expect(host.textContent).toContain("近 30 个完整日的每日支出");
+    expect(host.textContent).toContain("实际现金流");
+    expect(host.textContent).toContain("日常花法");
     expect(host.textContent).toContain("包含 0 支出日");
-    expect(host.textContent).toContain("统计口径：");
-    expect((host.textContent?.match(/统计口径：/g) ?? []).length).toBe(1);
+    expect(host.textContent).toContain("日常花法数据覆盖截至昨天的");
+    expect(host.textContent).toContain("不代表记录完整");
+    expect((host.textContent?.match(/日常花法数据覆盖截至昨天的/g) ?? []).length).toBe(1);
     for (const oldCopy of [
       "资金判断",
       "两段钱，分别回答",
@@ -324,6 +333,8 @@ describe("AnalysisView forecasts and charts", () => {
       "花费速度",
       "工资基线",
       "可绘制的支出点",
+      "一定够用",
+      "保证够用",
     ]) {
       expect(host.textContent).not.toContain(oldCopy);
     }
