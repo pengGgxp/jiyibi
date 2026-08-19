@@ -176,6 +176,62 @@ describe("income confirmation D1 transaction", () => {
     await expect(counts()).resolves.toEqual({ receipts: 1, entries: 1 });
   });
 
+  it("stores a delayed actual income date while preserving the original forecast date", async () => {
+    await applyMutation(database, USER_ID, GENERATION, settingsMutation(
+      "settings_forecast_delayed",
+      0,
+      {
+        incomeForecast: {
+          id: "forecast_2026_08_15",
+          targetPaydayDateKey: "2026-08-15",
+          expectedIncomeMinor: 80_000,
+        },
+      },
+    ), 7);
+    const delayed = confirmation("confirmation_delayed", 75_000);
+    delayed.forecastId = "forecast_2026_08_15";
+    delayed.targetPaydayDateKey = "2026-08-15";
+    delayed.confirmedAt = "2026-08-18T02:00:00.000Z";
+    if (!delayed.entry) throw new Error("Expected a positive income entry");
+    delayed.entry.id = "forecast_2026_08_15";
+    delayed.entry.occurredAt = "2026-08-18T01:00:00.000Z";
+    delayed.entry.localDateKey = "2026-08-18";
+    delayed.entry.localMonthKey = "2026-08";
+    delayed.entry.createdAt = "2026-08-18T01:00:00.000Z";
+    delayed.entry.updatedAt = "2026-08-18T01:00:00.000Z";
+    const delayedMutation = confirmationMutation("settings_confirm_delayed", delayed);
+    delayedMutation.payload.updatedAt = delayed.confirmedAt;
+
+    const applied = await applyMutation(
+      database,
+      USER_ID,
+      GENERATION,
+      delayedMutation,
+      7,
+    );
+
+    expect(applied).toMatchObject({
+      status: "applied",
+      incomeConfirmation: {
+        forecastId: "forecast_2026_08_15",
+        actualIncomeMinor: 75_000,
+        entry: {
+          occurredAt: "2026-08-18T01:00:00.000Z",
+          localDateKey: "2026-08-18",
+        },
+      },
+    });
+    await expect(database.prepare(
+      `SELECT target_payday_date_key, confirmed_at
+       FROM income_confirmations
+       WHERE user_id = ? AND account_generation = ? AND forecast_id = ?`,
+    ).bind(USER_ID, GENERATION, delayed.forecastId).first()).resolves.toMatchObject({
+      target_payday_date_key: "2026-08-15",
+      confirmed_at: "2026-08-18T02:00:00.000Z",
+    });
+    await expect(counts()).resolves.toEqual({ receipts: 1, entries: 1 });
+  });
+
   it("atomically confirms a forecast that was created and consumed while offline", async () => {
     await applyMutation(
       database,

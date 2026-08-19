@@ -29,12 +29,16 @@ import {
   listActiveEntries,
   linkSyncAccount,
   markPushResults,
+  postponeIncomeForecast,
   purgeDeletedEntry,
   recordActualIncome,
+  recordActualIncomeOnDate,
+  replaceIncomeForecast,
   replaceLedgerData,
   resolveSyncConflict,
   setInitialBalance,
   setIncomeForecast,
+  setIncomeForecastIfUnchanged,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
   softDeleteEntry,
@@ -272,47 +276,140 @@ describe("LedgerDatabase", () => {
     expect((await getSettings(database)).incomeForecast).toEqual(end.incomeForecast);
   });
 
-  it("allows an overdue forecast to move to today or later within its original window", async () => {
-    const setupNow = new Date(2026, 7, 9, 10, 30);
+  it("postpones only the current income occurrence", async () => {
+    const setupNow = new Date(2026, 7, 14, 10, 30);
     await setPayCyclePlan({
-      paydayDay: 10,
+      paydayDay: 15,
       cycleEndBalanceGoalMinor: 100_000,
     }, database, setupNow);
     const saved = await setIncomeForecast({
-      targetPaydayDateKey: "2026-08-10",
+      targetPaydayDateKey: "2026-08-15",
       minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     }, database, setupNow);
-    const overdueNow = new Date(2026, 7, 12, 8);
+    const paydayNow = new Date(2026, 7, 15, 8);
 
     await expect(setIncomeForecast({
-      targetPaydayDateKey: "2026-08-11",
+      targetPaydayDateKey: "2026-08-14",
       minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
-    }, database, overdueNow)).rejects.toMatchObject({ code: "invalid-settings" });
-
-    const postponed = await setIncomeForecast({
-      targetPaydayDateKey: "2026-08-12",
-      minimumIncomeMinor: 550_000,
-      expectedIncomeMinor: 850_000,
-    }, database, overdueNow);
-    expect(postponed.incomeForecast).toMatchObject({
-      id: saved.incomeForecast?.id,
-      targetPaydayDateKey: "2026-08-12",
-    });
-
-    const later = await setIncomeForecast({
-      targetPaydayDateKey: "2026-08-20",
-      minimumIncomeMinor: 550_000,
-      expectedIncomeMinor: 850_000,
-    }, database, overdueNow);
-    expect(later.incomeForecast?.id).toBe(saved.incomeForecast?.id);
+    }, database, paydayNow)).rejects.toMatchObject({ code: "sync-conflict" });
 
     await expect(setIncomeForecast({
-      targetPaydayDateKey: "2026-09-10",
+      targetPaydayDateKey: "2026-09-15",
       minimumIncomeMinor: 550_000,
       expectedIncomeMinor: 850_000,
-    }, database, overdueNow)).rejects.toMatchObject({ code: "invalid-settings" });
+    }, database, paydayNow)).rejects.toMatchObject({ code: "sync-conflict" });
+
+    const postponed = await postponeIncomeForecast(
+      "2026-09-14",
+      saved.incomeForecast!,
+      database,
+      paydayNow,
+    );
+    expect(postponed.incomeForecast).toMatchObject({
+      id: saved.incomeForecast?.id,
+      targetPaydayDateKey: "2026-09-14",
+    });
+
+    await expect(postponeIncomeForecast(
+      "2026-09-15",
+      postponed.incomeForecast!,
+      database,
+      paydayNow,
+    )).rejects.toMatchObject({ code: "invalid-settings" });
+
+    await expect(postponeIncomeForecast(
+      "2026-08-16",
+      saved.incomeForecast!,
+      database,
+      paydayNow,
+    )).rejects.toMatchObject({ code: "sync-conflict" });
+  });
+
+  it("replaces a due income with the next occurrence", async () => {
+    const setupNow = new Date(2026, 7, 14, 10, 30);
+    await setPayCyclePlan({ paydayDay: 15 }, database, setupNow);
+    const saved = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 800_000,
+    }, database, setupNow);
+    const paydayNow = new Date(2026, 7, 15, 8);
+
+    await expect(replaceIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 850_000,
+    }, saved.incomeForecast!, database, paydayNow)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
+
+    const next = await replaceIncomeForecast({
+      targetPaydayDateKey: "2026-09-15",
+      expectedIncomeMinor: 850_000,
+    }, saved.incomeForecast!, database, paydayNow);
+    expect(next.incomeForecast).toMatchObject({
+      targetPaydayDateKey: "2026-09-15",
+      expectedIncomeMinor: 850_000,
+    });
+    expect(next.incomeForecast?.id).not.toBe(saved.incomeForecast?.id);
+
+    await expect(replaceIncomeForecast({
+      targetPaydayDateKey: "2026-09-20",
+      expectedIncomeMinor: 850_000,
+    }, saved.incomeForecast!, database, paydayNow)).rejects.toMatchObject({
+      code: "sync-conflict",
+    });
+  });
+
+  it("edits an upcoming income using the new-income date window", async () => {
+    const now = new Date(2026, 7, 10, 10, 30);
+    await setPayCyclePlan({ paydayDay: 15 }, database, now);
+    const saved = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-14",
+      expectedIncomeMinor: 800_000,
+    }, database, now);
+
+    const edited = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 850_000,
+    }, database, now);
+    expect(edited.incomeForecast).toEqual({
+      ...saved.incomeForecast,
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 850_000,
+    });
+  });
+
+  it("does not overwrite a forecast changed after the form opened", async () => {
+    const now = new Date(2026, 7, 10, 10, 30);
+    await setPayCyclePlan({ paydayDay: 15 }, database, now);
+
+    const remoteCreated = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 900_000,
+    }, database, now);
+    await expect(setIncomeForecastIfUnchanged({
+      targetPaydayDateKey: "2026-08-18",
+      expectedIncomeMinor: 800_000,
+    }, null, database, now)).rejects.toMatchObject({ code: "sync-conflict" });
+
+    const openedForecast = remoteCreated.incomeForecast!;
+    await database.settings.update("primary", {
+      incomeForecast: {
+        ...openedForecast,
+        expectedIncomeMinor: 950_000,
+      },
+    });
+    await expect(setIncomeForecastIfUnchanged({
+      targetPaydayDateKey: "2026-08-18",
+      expectedIncomeMinor: 800_000,
+    }, openedForecast, database, now)).rejects.toMatchObject({ code: "sync-conflict" });
+
+    expect((await getSettings(database)).incomeForecast).toMatchObject({
+      id: openedForecast.id,
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 950_000,
+    });
   });
 
   it("accepts the following cycle after the current payday was confirmed", async () => {
@@ -415,6 +512,65 @@ describe("LedgerDatabase", () => {
       recordActualIncome(765_432, database, new Date(2026, 7, 10, 14, 36)),
     ).rejects.toMatchObject({ code: "invalid-settings" });
     expect(await database.entries.count()).toBe(1);
+  });
+
+  it("records an overdue income on its actual arrival date", async () => {
+    const forecastNow = new Date(2026, 7, 14, 10, 30);
+    await setPayCyclePlan({ paydayDay: 15 }, database, forecastNow);
+    const planned = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 800_000,
+    }, database, forecastNow);
+
+    const result = await recordActualIncomeOnDate(
+      765_432,
+      "2026-08-18",
+      planned.incomeForecast!,
+      database,
+      new Date(2026, 7, 18, 14, 35),
+    );
+    expect(result.entry).toMatchObject({
+      localDateKey: "2026-08-18",
+      localMonthKey: "2026-08",
+    });
+
+    const next = await setIncomeForecast({
+      targetPaydayDateKey: "2026-09-15",
+      expectedIncomeMinor: 800_000,
+    }, database, new Date(2026, 7, 18, 14, 36));
+    await expect(recordActualIncomeOnDate(
+      765_432,
+      "2026-09-14",
+      next.incomeForecast!,
+      database,
+      new Date(2026, 8, 15, 14, 35),
+    )).rejects.toMatchObject({ code: "invalid-settings" });
+  });
+
+  it("rejects actual income when the opened forecast changed on another device", async () => {
+    const forecastNow = new Date(2026, 7, 14, 10, 30);
+    await setPayCyclePlan({ paydayDay: 15 }, database, forecastNow);
+    const planned = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-15",
+      expectedIncomeMinor: 800_000,
+    }, database, forecastNow);
+    await database.settings.update("primary", {
+      incomeForecast: {
+        ...planned.incomeForecast!,
+        expectedIncomeMinor: 900_000,
+      },
+    });
+
+    await expect(recordActualIncomeOnDate(
+      765_432,
+      "2026-08-18",
+      planned.incomeForecast!,
+      database,
+      new Date(2026, 7, 18, 14, 35),
+    )).rejects.toMatchObject({ code: "sync-conflict" });
+    await expect(database.entries.count()).resolves.toBe(0);
+    expect((await getSettings(database)).incomeForecast?.expectedIncomeMinor)
+      .toBe(900_000);
   });
 
   it("allows a zero actual income without creating a zero-value entry", async () => {

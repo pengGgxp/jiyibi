@@ -725,6 +725,46 @@ describe("validateSyncRequest", () => {
     delete zero.mutations[0].payload.incomeConfirmation.entry;
     delete zero.mutations[0].payload.incomeConfirmation.entryMutationId;
     expect(() => validateSyncRequest(zero)).not.toThrow();
+
+    const delayed = structuredClone(request) as {
+      mutations: Array<{
+        payload: {
+          incomeConfirmation: {
+            targetPaydayDateKey: string;
+            confirmedAt: string;
+            entry: {
+              occurredAt: string;
+              localDateKey: string;
+              localMonthKey: string;
+              createdAt: string;
+              updatedAt: string;
+            };
+          };
+        };
+      }>;
+    };
+    const delayedConfirmation = delayed.mutations[0].payload.incomeConfirmation;
+    delayedConfirmation.targetPaydayDateKey = "2026-08-15";
+    delayedConfirmation.confirmedAt = "2026-08-18T02:00:00.000Z";
+    delayedConfirmation.entry.occurredAt = "2026-08-18T01:00:00.000Z";
+    delayedConfirmation.entry.localDateKey = "2026-08-18";
+    delayedConfirmation.entry.localMonthKey = "2026-08";
+    delayedConfirmation.entry.createdAt = "2026-08-18T01:00:00.000Z";
+    delayedConfirmation.entry.updatedAt = "2026-08-18T01:00:00.000Z";
+    expect(() => validateSyncRequest(delayed)).not.toThrow();
+
+    const beforeForecast = structuredClone(delayed);
+    beforeForecast.mutations[0].payload.incomeConfirmation.targetPaydayDateKey = "2026-08-19";
+    expect(() => validateSyncRequest(beforeForecast)).toThrowError(
+      "Settings payload is invalid",
+    );
+
+    const beforeOccurrence = structuredClone(delayed);
+    beforeOccurrence.mutations[0].payload.incomeConfirmation.confirmedAt =
+      "2026-08-18T00:59:59.999Z";
+    expect(() => validateSyncRequest(beforeOccurrence)).toThrowError(
+      "Settings payload is invalid",
+    );
   });
 
   it("accepts a create-then-delete tombstone without requiring its local attachment", () => {

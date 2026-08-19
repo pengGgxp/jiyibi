@@ -439,7 +439,7 @@ export default function App() {
                 </div>
                 <div className="income-reminder-actions">
                   <button type="button" className="text-button" onClick={() => setIncomeReminderDismissed(true)}>稍后</button>
-                  <button type="button" className="secondary-button" onClick={() => openIncomeDialog("forecast")}>延期到账</button>
+                  <button type="button" className="secondary-button" onClick={() => openIncomeDialog("postpone")}>延期到账</button>
                   <button type="button" className="primary-button" onClick={() => openIncomeDialog("actual")}>填写实际收入</button>
                 </div>
               </section>
@@ -599,6 +599,7 @@ export default function App() {
         mode={incomeDialogMode ?? "forecast"}
         settings={ledger.settings}
         onClose={() => setIncomeDialogMode(undefined)}
+        onModeChange={setIncomeDialogMode}
         onSaved={(message) => {
           cloud.requestSync();
           showNotice({

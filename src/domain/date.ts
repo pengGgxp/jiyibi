@@ -149,6 +149,17 @@ export interface PayCycleRange {
   daysUntilPayday: number;
 }
 
+export interface IncomeForecastDateWindow {
+  minimumDateKey: string;
+  regularDateKey: string;
+  maximumDateKey: string;
+}
+
+export interface IncomeForecastPostponeWindow {
+  minimumDateKey: string;
+  maximumDateKey: string;
+}
+
 /** Returns the configured payday on or after the provided local calendar day. */
 export function resolveNextPaydayDateKey(
   paydayDay: number,
@@ -205,6 +216,52 @@ export function resolvePayCycleRange(
     cycleEndDateKey: localDateKey(cycleEnd),
     nextPaydayDateKey: localDateKey(nextPayday),
     daysUntilPayday: calendarDayNumber(nextPayday) - calendarDayNumber(now),
+  };
+}
+
+/**
+ * Dates offered for the one active income forecast. The regular date is the
+ * first configured payday strictly after today. Custom dates may cover a
+ * delayed current payment or the cycle that starts on that regular date.
+ */
+export function resolveIncomeForecastDateWindow(
+  paydayDay: number,
+  now = new Date(),
+): IncomeForecastDateWindow {
+  const minimumDateKey = currentLocalDateKey(now);
+  const regularDateKey = resolveFollowingPaydayDateKey(paydayDay, now);
+  const regularCycle = resolvePayCycleRange(
+    paydayDay,
+    localDateFromKey(regularDateKey),
+  );
+  return {
+    minimumDateKey,
+    regularDateKey,
+    maximumDateKey: regularCycle.cycleEndDateKey,
+  };
+}
+
+/**
+ * Dates that still represent the same income occurrence. A postponement must
+ * end before the following regular payday; crossing that boundary creates a
+ * new expected income instead of extending the old one indefinitely.
+ */
+export function resolveIncomeForecastPostponeWindow(
+  paydayDay: number,
+  forecastTargetDateKey: string,
+  now = new Date(),
+): IncomeForecastPostponeWindow {
+  const forecastCycle = resolvePayCycleRange(
+    paydayDay,
+    localDateFromKey(forecastTargetDateKey),
+  );
+  const todayDateKey = currentLocalDateKey(now);
+  const dayAfterForecastDateKey = addLocalDays(forecastTargetDateKey, 1);
+  return {
+    minimumDateKey: todayDateKey > dayAfterForecastDateKey
+      ? todayDateKey
+      : dayAfterForecastDateKey,
+    maximumDateKey: forecastCycle.cycleEndDateKey,
   };
 }
 

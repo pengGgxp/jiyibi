@@ -514,7 +514,8 @@ function isValidIncomeConfirmation(value: unknown): value is IncomeConfirmationP
     return entry.id === value.forecastId &&
       entry.amountMinor === value.actualIncomeMinor &&
       entry.note === "本次实际收入" &&
-      entry.localDateKey === value.targetPaydayDateKey &&
+      entry.localDateKey >= value.targetPaydayDateKey &&
+      new Date(entry.occurredAt).getTime() <= new Date(value.confirmedAt).getTime() &&
       entry.attachmentId === undefined &&
       entry.treatment === "ordinary_income" &&
       entry.confirmationStatus === "not_needed" &&

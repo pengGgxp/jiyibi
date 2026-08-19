@@ -1996,7 +1996,13 @@ button.summary-savings-warning {
 
 .date-input > input {
   width: 100%;
-  padding-left: 2.25rem;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.55rem 0.65rem 0.55rem 2.25rem;
+  color: var(--ink);
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
 }
 
 .goal-clear-confirm {
@@ -2055,42 +2061,166 @@ button.summary-savings-warning {
   font-size: 0.84rem;
 }
 
-.income-target-date--editable {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(9.5rem, auto);
+.income-date-choice {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
-.income-target-date--editable label small,
-.income-target-date--editable label span {
+.income-date-choice legend {
+  margin-bottom: 0.45rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.income-date-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.income-date-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+  min-height: 3.5rem;
+  padding: 0.65rem 0.75rem;
+  color: var(--ink-soft);
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.income-date-options label:has(input:focus-visible) {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.income-date-options label.is-selected {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+}
+
+.income-date-options input {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 1rem;
+  margin: 0;
+  accent-color: var(--brand);
+  outline: 0;
+}
+
+.income-date-options span,
+.income-date-options strong,
+.income-date-options small {
+  display: block;
+  min-width: 0;
+}
+
+.income-date-options strong {
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+
+.income-date-options small {
+  margin-top: 0.1rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.income-custom-date {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.8rem;
+}
+
+.income-custom-date > label {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.income-custom-date .field-help,
+.income-dialog-fields .field-help,
+.income-postpone-fields .field-help {
+  margin: 0;
+}
+
+.income-postpone-fields {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.income-postpone-fields .field-group {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.income-postpone-summary {
+  margin: 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.income-postpone-summary > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.income-postpone-summary dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.income-postpone-summary dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.88rem;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.income-forecast-stale {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.7rem 0.75rem;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-radius: 7px;
+}
+
+.income-forecast-stale > svg {
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.1rem;
+}
+
+.income-forecast-stale span,
+.income-forecast-stale strong,
+.income-forecast-stale small {
   display: block;
 }
 
-.income-target-date--editable label span,
-.income-target-date--editable > p {
-  color: var(--muted);
-  font-size: 0.72rem;
+.income-forecast-stale strong {
+  font-size: 0.78rem;
+}
+
+.income-forecast-stale small {
+  margin-top: 0.1rem;
+  color: var(--muted-strong);
+  font-size: 0.7rem;
   line-height: 1.4;
-}
-
-.income-target-date--editable input {
-  width: 100%;
-  min-width: 0;
-  min-height: 44px;
-  padding: 0.55rem 0.65rem;
-  color: var(--ink);
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
-
-.income-target-date--editable > p {
-  grid-column: 2 / -1;
-  margin: -0.25rem 0 0;
-}
-
-.income-dialog-fields > .field-help {
-  grid-column: 1 / -1;
-  margin: -0.25rem 0 0;
 }
 
 .income-actual-field {
@@ -3449,17 +3579,8 @@ button.summary-savings-warning {
     grid-template-columns: 1fr;
   }
 
-  .income-target-date--editable {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .income-target-date--editable input,
-  .income-target-date--editable > p {
-    grid-column: 2;
-  }
-
-  .income-dialog-fields > .field-help {
-    grid-column: auto;
+  .income-date-options {
+    grid-template-columns: 1fr;
   }
 
   .income-setting-row .secondary-button {

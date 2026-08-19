@@ -6,9 +6,9 @@ import {
   currentLocalMonthKey,
   localDateFromKey,
   parseLocalDateTime,
-  resolveFollowingPaydayDateKey,
+  resolveIncomeForecastDateWindow,
+  resolveIncomeForecastPostponeWindow,
   resolveNextPaydayDateKey,
-  resolvePayCycleRange,
 } from "../domain/date";
 import {
   assertRecoveryAllocationValid,
@@ -1265,6 +1265,11 @@ export interface IncomeForecastInput {
   minimumIncomeMinor?: number;
 }
 
+export type IncomeForecastRevision = Pick<
+  IncomeForecast,
+  "id" | "targetPaydayDateKey" | "expectedIncomeMinor"
+>;
+
 function isValidIncomeForecastInput(value: IncomeForecastInput): boolean {
   let hasValidTargetDate = false;
   if (
@@ -1335,37 +1340,45 @@ export async function acknowledgeSavingsTargetReview(
 function isIncomeForecastTargetInWindow(
   targetDateKey: string,
   paydayDay: number,
-  existingForecast: IncomeForecast | undefined,
   now: Date,
 ): boolean {
-  const todayDateKey = currentLocalDateKey(now);
-  if (existingForecast) {
-    const window = resolvePayCycleRange(
-      paydayDay,
-      localDateFromKey(existingForecast.targetPaydayDateKey),
-    );
-    return (
-      targetDateKey >= todayDateKey &&
-      targetDateKey >= window.cycleStartDateKey &&
-      targetDateKey < window.nextPaydayDateKey
-    );
-  }
-
-  const latestWindow = resolvePayCycleRange(
-    paydayDay,
-    localDateFromKey(resolveFollowingPaydayDateKey(paydayDay, now)),
-  );
-
+  const window = resolveIncomeForecastDateWindow(paydayDay, now);
   return (
-    targetDateKey >= todayDateKey &&
-    targetDateKey < latestWindow.nextPaydayDateKey
+    targetDateKey >= window.minimumDateKey &&
+    targetDateKey <= window.maximumDateKey
   );
 }
 
-export async function setIncomeForecast(
+function isValidIncomeForecastRevision(
+  value: IncomeForecastRevision,
+): boolean {
+  return SYNC_ID_PATTERN.test(value.id) && isValidIncomeForecastInput(value);
+}
+
+function matchesIncomeForecastRevision(
+  current: IncomeForecast | undefined,
+  expected: IncomeForecastRevision,
+): boolean {
+  return current?.id === expected.id
+    && current.targetPaydayDateKey === expected.targetPaydayDateKey
+    && current.expectedIncomeMinor === expected.expectedIncomeMinor;
+}
+
+function matchesIncomeForecastExpectation(
+  current: IncomeForecast | undefined,
+  expected: IncomeForecastRevision | null,
+): boolean {
+  return expected === null
+    ? current === undefined
+    : matchesIncomeForecastRevision(current, expected);
+}
+
+async function persistIncomeForecast(
   incomeForecast: IncomeForecastInput,
+  replacementOf: IncomeForecastRevision | undefined,
   database = ledgerDb,
   now = new Date(),
+  expectedCurrent?: IncomeForecastRevision | null,
 ): Promise<AppSettings> {
   if (!isValidIncomeForecastInput(incomeForecast)) {
     throw new LedgerDataError("收入预期设置无效", "invalid-settings");
@@ -1379,17 +1392,54 @@ export async function setIncomeForecast(
     database.syncConflicts,
     async () => {
       const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      const todayDateKey = currentLocalDateKey(now);
+      if (
+        expectedCurrent !== undefined
+        && !matchesIncomeForecastExpectation(current.incomeForecast, expectedCurrent)
+      ) {
+        throw new LedgerDataError(
+          "本次收入状态已变化，请关闭后重试",
+          "sync-conflict",
+        );
+      }
+      if (replacementOf !== undefined && (
+        !matchesIncomeForecastRevision(current.incomeForecast, replacementOf)
+        || current.incomeForecast!.targetPaydayDateKey > todayDateKey
+      )) {
+        throw new LedgerDataError(
+          "本次收入状态已变化，请关闭后重试",
+          "sync-conflict",
+        );
+      }
+      if (
+        replacementOf === undefined
+        && current.incomeForecast
+        && current.incomeForecast.targetPaydayDateKey <= todayDateKey
+      ) {
+        throw new LedgerDataError(
+          "本次收入已到期，请先确认、延期或设为下次",
+          "sync-conflict",
+        );
+      }
+      if (
+        replacementOf !== undefined
+        && incomeForecast.targetPaydayDateKey <= todayDateKey
+      ) {
+        throw new LedgerDataError(
+          "下次到账日必须晚于今天",
+          "invalid-settings",
+        );
+      }
       if (
         !current.payCycle ||
         !isIncomeForecastTargetInWindow(
           incomeForecast.targetPaydayDateKey,
           current.payCycle.paydayDay,
-          current.incomeForecast,
           now,
         )
       ) {
         throw new LedgerDataError(
-          "收入预期日期必须在对应发薪周期内，且不能早于今天",
+          "到账日需在今天至下个到账周期内",
           "invalid-settings",
         );
       }
@@ -1397,11 +1447,129 @@ export async function setIncomeForecast(
       const next: AppSettings = {
         ...current,
         incomeForecast: {
-          id: current.incomeForecast?.id ?? incomeForecast.id ?? createId("income-forecast"),
+          id: replacementOf !== undefined
+            ? createId("income-forecast")
+            : current.incomeForecast?.id ?? incomeForecast.id ?? createId("income-forecast"),
           targetPaydayDateKey: incomeForecast.targetPaydayDateKey,
           expectedIncomeMinor: incomeForecast.expectedIncomeMinor,
         },
         lastExpectedIncomeMinor: incomeForecast.expectedIncomeMinor,
+        updatedAt: nowIso,
+      };
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso);
+      return next;
+    },
+  );
+}
+
+/** Updates the active expected income while preserving its confirmation identity. */
+export async function setIncomeForecast(
+  incomeForecast: IncomeForecastInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  return persistIncomeForecast(incomeForecast, undefined, database, now);
+}
+
+/** Saves a forecast only while the state shown when the form opened is current. */
+export async function setIncomeForecastIfUnchanged(
+  incomeForecast: IncomeForecastInput,
+  expectedCurrent: IncomeForecastRevision | null,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (
+    expectedCurrent !== null
+    && !isValidIncomeForecastRevision(expectedCurrent)
+  ) {
+    throw new LedgerDataError("收入预期设置无效", "invalid-settings");
+  }
+  return persistIncomeForecast(
+    incomeForecast,
+    undefined,
+    database,
+    now,
+    expectedCurrent,
+  );
+}
+
+/** Replaces an already-due expectation with a new income occurrence. */
+export async function replaceIncomeForecast(
+  incomeForecast: Omit<IncomeForecastInput, "id">,
+  expectedCurrentForecast: IncomeForecastRevision,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (!isValidIncomeForecastRevision(expectedCurrentForecast)) {
+    throw new LedgerDataError("收入预期设置无效", "invalid-settings");
+  }
+  return persistIncomeForecast(
+    incomeForecast,
+    expectedCurrentForecast,
+    database,
+    now,
+  );
+}
+
+/** Moves the active expectation without crossing into the next occurrence. */
+export async function postponeIncomeForecast(
+  targetPaydayDateKey: string,
+  expectedCurrentForecast: IncomeForecastRevision,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  if (!isValidIncomeForecastRevision(expectedCurrentForecast)) {
+    throw new LedgerDataError("收入预期设置无效", "invalid-settings");
+  }
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      const forecast = current.incomeForecast;
+      if (!current.payCycle || !forecast) {
+        throw new LedgerDataError(
+          "本次收入状态已变化，请关闭后重试",
+          "sync-conflict",
+        );
+      }
+      if (!matchesIncomeForecastRevision(forecast, expectedCurrentForecast)) {
+        throw new LedgerDataError(
+          "本次收入状态已变化，请关闭后重试",
+          "sync-conflict",
+        );
+      }
+      let validDate = false;
+      try {
+        localDateFromKey(targetPaydayDateKey);
+        const window = resolveIncomeForecastPostponeWindow(
+          current.payCycle.paydayDay,
+          forecast.targetPaydayDateKey,
+          now,
+        );
+        validDate = targetPaydayDateKey >= window.minimumDateKey
+          && targetPaydayDateKey <= window.maximumDateKey;
+      } catch {
+        validDate = false;
+      }
+      if (!validDate) {
+        throw new LedgerDataError(
+          "延期日需在本次到账周期内",
+          "invalid-settings",
+        );
+      }
+      const nowIso = now.toISOString();
+      const next: AppSettings = {
+        ...current,
+        incomeForecast: {
+          ...forecast,
+          targetPaydayDateKey,
+        },
         updatedAt: nowIso,
       };
       await database.settings.put(next);
@@ -2052,6 +2220,8 @@ export async function recordActualIncome(
   amountMinor: number,
   database = ledgerDb,
   now = new Date(),
+  actualDateKey?: string,
+  expectedForecast?: IncomeForecastRevision,
 ): Promise<ActualIncomeResult> {
   if (
     !Number.isSafeInteger(amountMinor) ||
@@ -2059,6 +2229,9 @@ export async function recordActualIncome(
     amountMinor > MAX_AMOUNT_MINOR
   ) {
     throw new LedgerDataError("实际收入金额无效", "invalid-settings");
+  }
+  if (expectedForecast && !isValidIncomeForecastRevision(expectedForecast)) {
+    throw new LedgerDataError("收入预期设置无效", "invalid-settings");
   }
   return database.transaction(
     "rw",
@@ -2075,8 +2248,32 @@ export async function recordActualIncome(
     async () => {
       const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
       const forecast = current.incomeForecast;
+      if (
+        expectedForecast
+        && !matchesIncomeForecastRevision(forecast, expectedForecast)
+      ) {
+        throw new LedgerDataError(
+          "本次收入状态已变化，请关闭后重试",
+          "sync-conflict",
+        );
+      }
       if (!forecast || currentLocalDateKey(now) < forecast.targetPaydayDateKey) {
         throw new LedgerDataError("当前没有可确认的到期收入预期", "invalid-settings");
+      }
+      const occurredDateKey = actualDateKey ?? forecast.targetPaydayDateKey;
+      try {
+        localDateFromKey(occurredDateKey);
+      } catch {
+        throw new LedgerDataError("实际到账日无效", "invalid-settings");
+      }
+      if (
+        occurredDateKey < forecast.targetPaydayDateKey
+        || occurredDateKey > currentLocalDateKey(now)
+      ) {
+        throw new LedgerDataError(
+          "实际到账日需在预计日至今天之间",
+          "invalid-settings",
+        );
       }
 
       const nowIso = now.toISOString();
@@ -2084,14 +2281,14 @@ export async function recordActualIncome(
       let entryMutationId: string | undefined;
       if (amountMinor > 0) {
         const localTime = currentLocalDateTimeInput(now).slice(11);
-        const occurred = parseLocalDateTime(`${forecast.targetPaydayDateKey}T${localTime}`);
+        const occurred = parseLocalDateTime(`${occurredDateKey}T${localTime}`);
         const existing = await database.entries.get(forecast.id);
         if (existing) {
           if (
             existing.amountMinor !== amountMinor ||
             existing.note !== "本次实际收入" ||
             existing.treatment !== "ordinary_income" ||
-            existing.localDateKey !== forecast.targetPaydayDateKey ||
+            existing.localDateKey !== occurredDateKey ||
             existing.deletedAt !== undefined
           ) {
             throw new LedgerDataError(
@@ -2158,6 +2355,22 @@ export async function recordActualIncome(
       );
       return { entry, settings };
     },
+  );
+}
+
+export function recordActualIncomeOnDate(
+  amountMinor: number,
+  actualDateKey: string,
+  expectedForecast: IncomeForecastRevision,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<ActualIncomeResult> {
+  return recordActualIncome(
+    amountMinor,
+    database,
+    now,
+    actualDateKey,
+    expectedForecast,
   );
 }
 

@@ -130,7 +130,8 @@ test("发薪日和单一预计收入可设置，实际收入确认后保留下�
 
   const forecastDialog = page.getByRole("dialog", { name: "下次收入" });
   await expect(forecastDialog).toBeVisible();
-  await forecastDialog.getByLabel("到账日").fill(dates.todayDateKey);
+  await forecastDialog.getByRole("radio", { name: /改日期/ }).check();
+  await forecastDialog.getByLabel("选择日期").fill(dates.todayDateKey);
   await forecastDialog.getByLabel("预计额").fill("1000.00");
   await forecastDialog.getByRole("button", { name: "保存预计" }).click();
   await expect(forecastDialog).toBeHidden();
@@ -146,9 +147,10 @@ test("发薪日和单一预计收入可设置，实际收入确认后保留下�
   await expect(reminder).toBeVisible();
 
   await reminder.getByRole("button", { name: "延期到账" }).click();
-  await forecastDialog.getByLabel("到账日").fill(dates.tomorrowDateKey);
-  await forecastDialog.getByRole("button", { name: "保存预计" }).click();
-  await expect(forecastDialog).toBeHidden();
+  const postponeDialog = page.getByRole("dialog", { name: "延期到账" });
+  await postponeDialog.getByLabel("到账日").fill(dates.tomorrowDateKey);
+  await postponeDialog.getByRole("button", { name: "保存日期" }).click();
+  await expect(postponeDialog).toBeHidden();
   await expect(reminder).toHaveCount(0);
 
   await page.getByRole("button", { name: "设置目标" }).click();
@@ -163,13 +165,14 @@ test("发薪日和单一预计收入可设置，实际收入确认后保留下�
   await page.getByRole("button", { name: "打开设置" }).click();
   await expect(payday).toHaveValue(String(dates.todayDay));
   await settings.getByRole("button", { name: "修改预计" }).click();
-  await forecastDialog.getByLabel("到账日").fill(dates.todayDateKey);
+  await forecastDialog.getByLabel("选择日期").fill(dates.todayDateKey);
   await forecastDialog.getByRole("button", { name: "保存预计" }).click();
   await expect(reminder).toBeVisible();
 
   await reminder.getByRole("button", { name: "填写实际收入" }).click();
   const actualDialog = page.getByRole("dialog", { name: "实际收入" });
   await expect(actualDialog.getByLabel("实际额")).toHaveValue("1000.00");
+  await expect(actualDialog.getByLabel("到账日")).toHaveValue(dates.todayDateKey);
   await expect(actualDialog.getByText("本次再留存")).toHaveCount(0);
   await actualDialog.getByRole("button", { name: "确认收入" }).click();
   await expect(actualDialog).toBeHidden();
@@ -182,7 +185,8 @@ test("发薪日和单一预计收入可设置，实际收入确认后保留下�
   await expect(nextForecastButton).toBeVisible();
   await nextForecastButton.click();
   await expect(forecastDialog.getByLabel("预计额")).toHaveValue("1000.00");
-  await expect(forecastDialog.getByLabel("到账日")).not.toHaveValue(dates.todayDateKey);
+  await expect(forecastDialog.getByRole("radio", { name: /常规日/ })).toBeChecked();
+  await expect(forecastDialog.locator("#income-target-date")).toHaveCount(0);
   await forecastDialog.getByRole("button", { name: "取消" }).click();
   await expect(summary).toContainText("下次收入未填写");
 

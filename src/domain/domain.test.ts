@@ -7,7 +7,13 @@ import {
   parseSignedAmountToMinor,
   parseUnsignedAmountToMinor,
 } from "./amount";
-import { entryToLocalDateTimeInput, parseLocalDateTime, resolvePayCycleRange } from "./date";
+import {
+  entryToLocalDateTimeInput,
+  parseLocalDateTime,
+  resolveIncomeForecastDateWindow,
+  resolveIncomeForecastPostponeWindow,
+  resolvePayCycleRange,
+} from "./date";
 import { calculateLedgerSummary, calculatePayCycleStatus } from "./stats";
 import type { LedgerEntry } from "./types";
 import { EntryValidationError, validateEntryDraft } from "./validation";
@@ -86,6 +92,48 @@ describe("entry validation and statistics", () => {
 });
 
 describe("pay cycle", () => {
+  it("resolves the income forecast window from today through the next regular cycle", () => {
+    expect(resolveIncomeForecastDateWindow(15, new Date(2026, 7, 15, 12, 0))).toEqual({
+      minimumDateKey: "2026-08-15",
+      regularDateKey: "2026-09-15",
+      maximumDateKey: "2026-10-14",
+    });
+  });
+
+  it("keeps a postponed income before the next regular payday", () => {
+    expect(resolveIncomeForecastPostponeWindow(
+      15,
+      "2026-08-15",
+      new Date(2026, 7, 16, 12, 0),
+    )).toEqual({
+      minimumDateKey: "2026-08-16",
+      maximumDateKey: "2026-09-14",
+    });
+  });
+
+  it("has no postponement date after the income reaches its cycle boundary", () => {
+    expect(resolveIncomeForecastPostponeWindow(
+      15,
+      "2026-09-14",
+      new Date(2026, 8, 14, 12, 0),
+    )).toEqual({
+      minimumDateKey: "2026-09-15",
+      maximumDateKey: "2026-09-14",
+    });
+  });
+
+  it.each([
+    [29, "2026-03-28"],
+    [30, "2026-03-29"],
+    [31, "2026-03-30"],
+  ])("clamps payday %i to the last day of a short month", (paydayDay, maximumDateKey) => {
+    expect(resolveIncomeForecastDateWindow(paydayDay, new Date(2026, 0, 31, 12, 0))).toEqual({
+      minimumDateKey: "2026-01-31",
+      regularDateKey: "2026-02-28",
+      maximumDateKey,
+    });
+  });
+
   it("uses payday boundaries instead of natural months", () => {
     expect(resolvePayCycleRange(10, new Date(2026, 7, 9, 12, 0))).toEqual({
       cycleStartDateKey: "2026-07-10",
