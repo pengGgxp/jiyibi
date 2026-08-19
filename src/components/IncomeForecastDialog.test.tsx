@@ -2,10 +2,14 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings, IncomeForecast, PayCyclePlan } from "../domain";
-import { IncomeForecastDialog, type IncomeDialogMode } from "./IncomeForecastDialog";
+import {
+  IncomeForecastDialog,
+  type IncomeDialogMode,
+  type IncomeSettlementContext,
+} from "./IncomeForecastDialog";
 
 const dataMocks = vi.hoisted(() => ({
-  recordActualIncome: vi.fn(),
+  recordActualIncomeWithSavings: vi.fn(),
   setIncomeForecast: vi.fn(),
 }));
 
@@ -32,7 +36,7 @@ vi.mock("./Modal", () => ({
 
 const plan: PayCyclePlan = {
   paydayDay: 15,
-  cycleEndBalanceGoalMinor: 100_000,
+  defaultSavingsTargetMinor: 100_000,
 };
 
 function settings(
@@ -71,7 +75,7 @@ afterAll(() => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 7, 10, 12));
-  dataMocks.recordActualIncome.mockReset().mockResolvedValue(undefined);
+  dataMocks.recordActualIncomeWithSavings.mockReset().mockResolvedValue(undefined);
   dataMocks.setIncomeForecast.mockReset().mockResolvedValue(undefined);
 });
 
@@ -86,6 +90,7 @@ afterEach(async () => {
 async function renderDialog(
   mode: IncomeDialogMode,
   appSettings: AppSettings | undefined = settings(),
+  settlement?: IncomeSettlementContext,
 ): Promise<{
   host: HTMLElement;
   onClose: ReturnType<typeof vi.fn>;
@@ -104,6 +109,7 @@ async function renderDialog(
         open
         mode={mode}
         settings={appSettings}
+        settlement={settlement}
         onClose={onClose}
         onSaved={onSaved}
       />,
@@ -139,6 +145,10 @@ describe("IncomeForecastDialog forecast mode", () => {
   it("starts a new forecast at zero and restores values for the same target payday", async () => {
     const fresh = await renderDialog("forecast");
 
+    const freshTarget = fresh.host.querySelector<HTMLInputElement>("#income-target-date");
+    expect(freshTarget?.value).toBe("2026-08-15");
+    expect(freshTarget?.min).toBe("2026-08-10");
+    expect(freshTarget?.max).toBe("2026-09-14");
     expect(fresh.host.querySelector<HTMLInputElement>("#minimum-income")?.value).toBe("0.00");
     expect(fresh.host.querySelector<HTMLInputElement>("#expected-income")?.value).toBe("0.00");
 
@@ -150,8 +160,48 @@ describe("IncomeForecastDialog forecast mode", () => {
     };
     const edit = await renderDialog("forecast", settings(plan, existing));
 
+    expect(edit.host.querySelector<HTMLInputElement>("#income-target-date")?.value).toBe("2026-08-15");
     expect(edit.host.querySelector<HTMLInputElement>("#minimum-income")?.value).toBe("123.45");
     expect(edit.host.querySelector<HTMLInputElement>("#expected-income")?.value).toBe("678.90");
+  });
+
+  it("defaults a new forecast to the following cycle after today's income was confirmed", async () => {
+    vi.setSystemTime(new Date(2026, 7, 15, 12));
+
+    const { host } = await renderDialog("forecast");
+
+    const target = host.querySelector<HTMLInputElement>("#income-target-date");
+    expect(target?.value).toBe("2026-09-15");
+    expect(target?.min).toBe("2026-08-15");
+    expect(target?.max).toBe("2026-10-14");
+  });
+
+  it("allows this payday to be delayed without changing the regular payday", async () => {
+    const { host } = await renderDialog("forecast");
+
+    await changeInput(host.querySelector<HTMLInputElement>("#income-target-date")!, "2026-08-18");
+    await changeInput(host.querySelector<HTMLInputElement>("#expected-income")!, "5000.00");
+    await submit(host);
+
+    expect(dataMocks.setIncomeForecast).toHaveBeenCalledWith({
+      targetPaydayDateKey: "2026-08-18",
+      minimumIncomeMinor: 0,
+      expectedIncomeMinor: 500_000,
+    });
+  });
+
+  it("rejects a delayed date outside the current payday window", async () => {
+    const { host } = await renderDialog("forecast");
+    const target = host.querySelector<HTMLInputElement>("#income-target-date")!;
+
+    await changeInput(target, "2026-09-15");
+    await submit(host);
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
+      "2026-08-10 至 2026-09-14",
+    );
+    expect(target.getAttribute("aria-invalid")).toBe("true");
+    expect(dataMocks.setIncomeForecast).not.toHaveBeenCalled();
   });
 
   it("rejects negative income", async () => {
@@ -161,8 +211,11 @@ describe("IncomeForecastDialog forecast mode", () => {
     await changeInput(minimum, "-1.00");
     await submit(host);
 
-    expect(host.querySelector('[role="alert"]')?.textContent).toBe("收入不能小于 0");
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("最低收入不能小于 0");
     expect(minimum.value).toBe("-1.00");
+    expect(minimum.getAttribute("aria-invalid")).toBe("true");
+    expect(host.querySelector<HTMLInputElement>("#expected-income")?.getAttribute("aria-invalid"))
+      .toBe("false");
     expect(dataMocks.setIncomeForecast).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
@@ -178,6 +231,8 @@ describe("IncomeForecastDialog forecast mode", () => {
     await submit(host);
 
     expect(host.querySelector('[role="alert"]')?.textContent).toBe("最低收入不能高于预计收入");
+    expect(minimum.getAttribute("aria-describedby")).toContain("income-dialog-error");
+    expect(expected.getAttribute("aria-describedby")).not.toContain("income-dialog-error");
     expect(dataMocks.setIncomeForecast).not.toHaveBeenCalled();
   });
 
@@ -201,14 +256,17 @@ describe("IncomeForecastDialog forecast mode", () => {
   it("retains entered values when saving fails", async () => {
     dataMocks.setIncomeForecast.mockRejectedValueOnce(new Error("本机存储空间不足"));
     const { host, onClose, onSaved } = await renderDialog("forecast");
+    const targetDate = host.querySelector<HTMLInputElement>("#income-target-date")!;
     const minimum = host.querySelector<HTMLInputElement>("#minimum-income")!;
     const expected = host.querySelector<HTMLInputElement>("#expected-income")!;
 
+    await changeInput(targetDate, "2026-08-18");
     await changeInput(minimum, "3000.00");
     await changeInput(expected, "5000.00");
     await submit(host);
 
     expect(host.querySelector('[role="alert"]')?.textContent).toBe("本机存储空间不足");
+    expect(targetDate.value).toBe("2026-08-18");
     expect(minimum.value).toBe("3000.00");
     expect(expected.value).toBe("5000.00");
     expect(host.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false);
@@ -231,6 +289,43 @@ describe("IncomeForecastDialog actual mode", () => {
     expect(host.querySelector<HTMLInputElement>("#actual-income")?.value).toBe("4321.00");
   });
 
+  it("uses the target cycle snapshot even when the income reminder is overdue", async () => {
+    const context: IncomeSettlementContext = {
+      targetMinor: 100_000,
+      netGrowthMinor: 20_000n,
+      remainingTargetMinor: 80_000n,
+      availableBeforeIncomeMinor: 0n,
+      suggestedAmountMinor: 80_000,
+    };
+    const { host } = await renderDialog("actual", settings(plan, existing), context);
+
+    expect(host.textContent).toContain("本周期目标¥1,000.00");
+    expect(host.textContent).toContain("当前净增长¥200.00");
+    expect(host.textContent).toContain("尚需留存¥800.00");
+    expect(host.querySelector<HTMLInputElement>("#settlement-savings")?.value).toBe("800.00");
+  });
+
+  it("prevents retained money from exceeding funds after the edited actual income", async () => {
+    const context: IncomeSettlementContext = {
+      targetMinor: 100_000,
+      netGrowthMinor: 0n,
+      remainingTargetMinor: 100_000n,
+      availableBeforeIncomeMinor: 0n,
+      suggestedAmountMinor: 100_000,
+    };
+    const { host } = await renderDialog("actual", settings(plan, existing), context);
+    const actual = host.querySelector<HTMLInputElement>("#actual-income")!;
+    const savings = host.querySelector<HTMLInputElement>("#settlement-savings")!;
+    await changeInput(actual, "100.00");
+    await changeInput(savings, "200.00");
+    await submit(host);
+
+    expect(host.querySelector('[role="alert"]')?.textContent)
+      .toBe("本次留存不能超过到账后的未留存资金");
+    expect(savings.getAttribute("aria-invalid")).toBe("true");
+    expect(dataMocks.recordActualIncomeWithSavings).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["0", 0, "本次收入已确认为 ¥0.00"],
     ["4567.89", 456_789, "实际收入已记入余额"],
@@ -240,10 +335,43 @@ describe("IncomeForecastDialog actual mode", () => {
 
     await submit(host);
 
-    expect(dataMocks.recordActualIncome).toHaveBeenCalledOnce();
-    expect(dataMocks.recordActualIncome).toHaveBeenCalledWith(expectedMinor);
+    expect(dataMocks.recordActualIncomeWithSavings).toHaveBeenCalledOnce();
+    expect(dataMocks.recordActualIncomeWithSavings).toHaveBeenCalledWith(expectedMinor, 0);
     expect(onSaved).toHaveBeenCalledWith(message);
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("associates an invalid savings amount with the savings field", async () => {
+    const { host } = await renderDialog("actual", settings(plan, existing));
+    const actual = host.querySelector<HTMLInputElement>("#actual-income")!;
+    const savings = host.querySelector<HTMLInputElement>("#settlement-savings")!;
+
+    await changeInput(actual, "5000.00");
+    await changeInput(savings, "-1.00");
+    await submit(host);
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("留存金额不能小于 0");
+    expect(actual.getAttribute("aria-invalid")).toBe("false");
+    expect(savings.getAttribute("aria-invalid")).toBe("true");
+    expect(dataMocks.recordActualIncomeWithSavings).not.toHaveBeenCalled();
+  });
+
+  it("retains actual-income and savings input when the atomic save fails", async () => {
+    dataMocks.recordActualIncomeWithSavings.mockRejectedValueOnce(new Error("本机存储空间不足"));
+    const { host, onClose } = await renderDialog("actual", settings(plan, existing));
+    const actual = host.querySelector<HTMLInputElement>("#actual-income")!;
+    const savings = host.querySelector<HTMLInputElement>("#settlement-savings")!;
+
+    await changeInput(actual, "5000.00");
+    await changeInput(savings, "800.00");
+    await submit(host);
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("本机存储空间不足");
+    expect(actual.value).toBe("5000.00");
+    expect(savings.value).toBe("800.00");
+    expect(actual.getAttribute("aria-invalid")).toBe("false");
+    expect(savings.getAttribute("aria-invalid")).toBe("false");
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
@@ -252,11 +380,11 @@ describe("IncomeForecastDialog plan requirements", () => {
     const { host } = await renderDialog("forecast", settings(null));
 
     expect(host.querySelector('[role="alert"]')?.textContent).toContain(
-      "请先在设置中填写发薪日和周期底线",
+      "请先在设置中填写发薪日和每周期默认留存目标",
     );
     expect(host.querySelector("form")).toBeNull();
     expect(host.querySelector("#minimum-income")).toBeNull();
     expect(dataMocks.setIncomeForecast).not.toHaveBeenCalled();
-    expect(dataMocks.recordActualIncome).not.toHaveBeenCalled();
+    expect(dataMocks.recordActualIncomeWithSavings).not.toHaveBeenCalled();
   });
 });

@@ -6,6 +6,7 @@ import type {
   IncomeForecast,
   LedgerSummary,
   PayCyclePlan,
+  RetainedSavingsSummary,
   SpendingAnalysis,
 } from "../domain";
 import { SummaryPanel } from "./SummaryPanel";
@@ -111,11 +112,15 @@ function renderPanel({
   payCycle,
   forecast,
   error,
+  canSettleSavings = false,
+  retainedSavings,
 }: {
   analysis?: SpendingAnalysis;
   payCycle?: PayCyclePlan;
   forecast?: IncomeForecast;
   error?: Error;
+  canSettleSavings?: boolean;
+  retainedSavings?: RetainedSavingsSummary;
 } = {}): HTMLElement {
   const host = document.createElement("div");
   host.innerHTML = renderToStaticMarkup(
@@ -124,11 +129,16 @@ function renderPanel({
       settings={settings(payCycle, forecast)}
       payCycle={payCycle}
       analysis={analysis}
+      retainedSavings={retainedSavings}
       analysisError={error}
       loading={false}
       onOpenSettings={vi.fn()}
       onOpenIncomeForecast={vi.fn()}
       onOpenAnalysis={vi.fn()}
+      onReserveSavings={vi.fn()}
+      onReleaseSavings={vi.fn()}
+      canSettleSavings={canSettleSavings}
+      onSettleSavings={vi.fn()}
     />,
   );
   return host;
@@ -157,9 +167,9 @@ describe("SummaryPanel spending outlook", () => {
   });
 
   it.each([
-    ["surplus", "预计够用", "按近期已记录花法估算，高出底线 ¥125.00"],
-    ["shortfall", "预计有缺口", "按近期已记录花法估算，短缺 ¥25.00"],
-    ["exact", "预计刚好达到", "按近期已记录花法估算，周期末余额达到底线"],
+    ["surplus", "预计够用", "完成留存目标后还可剩 ¥125.00"],
+    ["shortfall", "预计有缺口", "完成留存目标还差 ¥25.00"],
+    ["exact", "预计刚好达到", "按近期已记录花法估算，刚好完成留存目标"],
   ] as const)("shows the current-cycle %s outcome in words and figures", (outcome, current, detail) => {
     const panel = renderPanel({
       payCycle: plan,
@@ -172,7 +182,28 @@ describe("SummaryPanel spending outlook", () => {
     expect(panel.textContent).toContain("按近 30 天已记录花法估算");
     expect(panel.textContent).toContain("剩余天数21 天");
     expect(panel.textContent).toContain("每日可花¥33.33");
+    expect(panel.textContent).not.toContain("周期底线");
     expect(panel.querySelector<HTMLAnchorElement>(".summary-analysis-link")?.hash).toBe("#analysis");
+  });
+
+  it("subtracts retained money even before a pay-cycle plan is configured", () => {
+    const panel = renderPanel({
+      retainedSavings: {
+        openingRetainedMinor: 30_000n,
+        reservedMinor: 0n,
+        releasedMinor: 0n,
+        settledMinor: 0n,
+        totalRetainedMinor: 30_000n,
+        hasNegativeBalance: false,
+        needsCorrection: false,
+      },
+    });
+
+    expect(panel.querySelector(".balance-value")?.textContent).toBe("¥500.00");
+    expect(panel.textContent).toContain("总余额¥800.00");
+    expect(panel.textContent).toContain("已留存¥300.00");
+    expect(panel.textContent).toContain("留存一笔");
+    expect(panel.textContent).toContain("取用留存");
   });
 
   it("shows minimum and expected income as separate next-cycle scenarios", () => {
@@ -187,6 +218,74 @@ describe("SummaryPanel spending outlook", () => {
     expect(panel.textContent).toContain("预计收入 ¥1,000.00");
     expect(panel.textContent).toContain("按近期已记录花法可多 ¥100.00");
     expect(panel.textContent).not.toContain("月工资");
+  });
+
+  it("separates spendable, total, retained and current-cycle savings figures", () => {
+    const analysis = spendingAnalysis("ready", "surplus");
+    Object.assign(analysis.currentCycle, {
+      totalBalanceMinor: 80_000n,
+      retainedBalanceMinor: 20_000n,
+      savingsTargetMinor: 10_000,
+      cycleNetGrowthMinor: 4_000n,
+      remainingSavingsTargetMinor: 6_000n,
+      spendableBalanceMinor: 54_000n,
+    });
+
+    const panel = renderPanel({ payCycle: plan, analysis });
+
+    expect(panel.querySelector(".balance-value")?.textContent).toBe("¥540.00");
+    expect(panel.textContent).toContain("总余额¥800.00");
+    expect(panel.textContent).toContain("已留存¥200.00");
+    expect(panel.textContent).toContain("本周期目标¥100.00");
+    expect(panel.textContent).toContain("净增长¥40.00");
+    expect(panel.textContent).toContain("尚需留存¥60.00");
+  });
+
+  it("shows zero spendable balance and a written warning when retained money was used", () => {
+    const analysis = spendingAnalysis("ready", "shortfall");
+    Object.assign(analysis.currentCycle, {
+      totalBalanceMinor: 8_000n,
+      retainedBalanceMinor: 100_000n,
+      savingsTargetMinor: 5_000,
+      cycleNetGrowthMinor: 0n,
+      remainingSavingsTargetMinor: 5_000n,
+      spendableBalanceMinor: -7_000n,
+    });
+
+    const panel = renderPanel({ payCycle: plan, analysis });
+
+    expect(panel.querySelector(".balance-value")?.textContent).toBe("¥0.00");
+    expect(panel.textContent).toContain("实际动用了留存");
+  });
+
+  it("shows today instead of a zero-day countdown on the expected income date", () => {
+    const dueAnalysis = spendingAnalysis("ready", "surplus");
+    dueAnalysis.currentCycle.daysUntilPayday = 0;
+    const panel = renderPanel({
+      payCycle: plan,
+      forecast: incomeForecast,
+      analysis: dueAnalysis,
+    });
+
+    expect(panel.textContent).toContain("剩余天数今天");
+    expect(panel.textContent).not.toContain("剩余天数0 天");
+  });
+
+  it("offers manual settlement only when the completed cycle is unsettled and has no forecast", () => {
+    const panel = renderPanel({
+      payCycle: plan,
+      analysis: spendingAnalysis("ready", "surplus"),
+      canSettleSavings: true,
+    });
+    expect(panel.textContent).toContain("结算上个周期");
+
+    const withForecast = renderPanel({
+      payCycle: plan,
+      forecast: incomeForecast,
+      analysis: spendingAnalysis("ready", "surplus"),
+      canSettleSavings: true,
+    });
+    expect(withForecast.textContent).not.toContain("结算上个周期");
   });
 
   it("shows an explicit calculation error without hiding the balance", () => {

@@ -3,6 +3,7 @@ import {
   addLocalDays,
   localCalendarDayDifference,
   localDateFromKey,
+  resolveFollowingPaydayDateKey,
   resolveNextPaydayDateKey,
 } from "./date";
 import { calculateSpendingAnalysis as calculateSpendingAnalysisDomain } from "./stats";
@@ -80,6 +81,17 @@ describe("local calendar date helpers", () => {
     expect(resolveNextPaydayDateKey(31, new Date(2028, 1, 28, 12))).toBe("2028-02-29");
     expect(resolveNextPaydayDateKey(31, new Date(2028, 1, 29, 12))).toBe("2028-02-29");
     expect(resolveNextPaydayDateKey(31, new Date(2028, 2, 1, 12))).toBe("2028-03-31");
+  });
+
+  it("resolves the first payday strictly after today with short-month clamping", () => {
+    expect(resolveFollowingPaydayDateKey(10, new Date(2026, 7, 9, 23, 59)))
+      .toBe("2026-08-10");
+    expect(resolveFollowingPaydayDateKey(10, new Date(2026, 7, 10, 0, 1)))
+      .toBe("2026-09-10");
+    expect(resolveFollowingPaydayDateKey(31, new Date(2028, 1, 28, 12)))
+      .toBe("2028-02-29");
+    expect(resolveFollowingPaydayDateKey(31, new Date(2028, 1, 29, 12)))
+      .toBe("2028-03-31");
   });
 });
 
@@ -165,7 +177,7 @@ describe("spending forecast inputs", () => {
     expect(analysis.dailyExpenses[0]).toEqual({ dateKey: "2026-07-12", expenseMinor: 100 });
     expect(analysis.dailyExpenses[1]).toEqual({ dateKey: "2026-07-13", expenseMinor: 0 });
     expect(analysis.dailyExpenses.at(-1)).toEqual({ dateKey: "2026-08-09", expenseMinor: 200 });
-    expect(analysis.currentCycle.actualExpenseMinor).toBe(400);
+    expect(analysis.currentCycle.actualExpenseMinor).toBe(700);
   });
 
   it("does not form an expense forecast window from income-only history", () => {
@@ -311,11 +323,13 @@ describe("spending forecast inputs", () => {
   });
 
   it("floors the current safe-to-spend amount into whole minor units per day", () => {
-    const analysis = calculateSpendingAnalysis(
+    const now = new Date(2026, 7, 10, 12);
+    const analysis = calculateSpendingAnalysisDomain(
       [entry("2026-07-11", -100)],
       51_000,
       DEFAULT_PLAN,
-      new Date(2026, 7, 10, 12),
+      forecastFor(DEFAULT_PLAN, now, { targetPaydayDateKey: "2026-09-10" }),
+      now,
     );
     expect(analysis.currentCycle.daysUntilPayday).toBe(31);
     expect(analysis.currentCycle.safeToSpendMinor).toBe(1_000n);
@@ -337,6 +351,114 @@ describe("spending forecast inputs", () => {
 
     expect(analysis.currentCycle.balanceHeadroomMinor).toBe(10_000n);
     expect(analysis.currentCycle.safeToSpendMinor).toBe(10_000n);
+  });
+
+  it("extends the current cycle to a delayed income date and starts the next cycle there", () => {
+    const now = new Date(2026, 7, 9, 12);
+    const analysis = calculateSpendingAnalysisDomain(
+      [entry("2026-07-26", -1_400)],
+      100_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, { targetPaydayDateKey: "2026-08-12" }),
+      now,
+    );
+
+    expect(analysis.currentCycle).toMatchObject({
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-11",
+      nextPaydayDateKey: "2026-08-12",
+      daysUntilPayday: 3,
+      estimatedRemainingExpenseMinor: 300,
+    });
+    expect(analysis.nextCycle).toMatchObject({
+      cycleStartDateKey: "2026-08-12",
+      cycleEndDateKey: "2026-09-09",
+      nextPaydayDateKey: "2026-09-10",
+      days: 29,
+      referenceSpendMinor: 2_900,
+    });
+    expect(analysis.nextCycle.minimumIncomeScenario).toBeDefined();
+    expect(analysis.nextCycle.expectedIncomeScenario).toBeDefined();
+  });
+
+  it("uses one conservative forecast day when the one-off income is due today", () => {
+    const now = new Date(2026, 7, 12, 12);
+    const analysis = calculateSpendingAnalysisDomain(
+      [entry("2026-07-29", -1_400)],
+      100_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now, { targetPaydayDateKey: "2026-08-12" }),
+      now,
+    );
+
+    expect(analysis.currentCycle).toMatchObject({
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-11",
+      nextPaydayDateKey: "2026-08-12",
+      daysUntilPayday: 0,
+      estimatedRemainingExpenseMinor: 100,
+    });
+    expect(analysis.currentCycle.dailySafeToSpendMinor).toBe(50_000n);
+    expect(analysis.nextCycle).toMatchObject({
+      cycleStartDateKey: "2026-08-12",
+      cycleEndDateKey: "2026-09-09",
+      nextPaydayDateKey: "2026-09-10",
+      days: 29,
+    });
+    expect(analysis.currentCycleSeries.at(-1)).toMatchObject({
+      dateKey: "2026-08-12",
+      projectedCumulativeMinor: 1_500,
+      isPaydayBoundary: true,
+    });
+  });
+
+  it("keeps the due income attached to the ending cycle on the regular payday", () => {
+    const now = new Date(2026, 7, 10, 12);
+    const analysis = calculateSpendingAnalysisDomain(
+      [entry("2026-07-27", -1_400)],
+      100_000,
+      DEFAULT_PLAN,
+      forecastFor(DEFAULT_PLAN, now),
+      now,
+    );
+
+    expect(analysis.currentCycle).toMatchObject({
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-09",
+      nextPaydayDateKey: "2026-08-10",
+      daysUntilPayday: 0,
+    });
+    expect(analysis.nextCycle).toMatchObject({
+      cycleStartDateKey: "2026-08-10",
+      cycleEndDateKey: "2026-09-09",
+      nextPaydayDateKey: "2026-09-10",
+      days: 31,
+    });
+  });
+
+  it("keeps a delayed short-month payday attached to the intended cycle", () => {
+    const now = new Date(2026, 1, 27, 12);
+    const plan = { ...DEFAULT_PLAN, paydayDay: 31 };
+    const analysis = calculateSpendingAnalysisDomain(
+      [entry("2026-02-13", -1_400)],
+      100_000,
+      plan,
+      forecastFor(plan, now, { targetPaydayDateKey: "2026-03-02" }),
+      now,
+    );
+
+    expect(analysis.currentCycle).toMatchObject({
+      cycleStartDateKey: "2026-01-31",
+      cycleEndDateKey: "2026-03-01",
+      nextPaydayDateKey: "2026-03-02",
+      daysUntilPayday: 3,
+    });
+    expect(analysis.nextCycle).toMatchObject({
+      cycleStartDateKey: "2026-03-02",
+      cycleEndDateKey: "2026-03-30",
+      nextPaydayDateKey: "2026-03-31",
+      days: 29,
+    });
   });
 
   it("keeps balance differences exact when two safe inputs exceed number range", () => {
@@ -365,7 +487,8 @@ describe("spending forecast inputs", () => {
 
 describe("spending chart series", () => {
   it("builds the complete daily, cumulative, and six-cycle series", () => {
-    const analysis = calculateSpendingAnalysis(
+    const now = new Date(2026, 7, 10, 12);
+    const analysis = calculateSpendingAnalysisDomain(
       [
         // Expense on the start of the oldest completed cycle (Feb 10–Mar 9).
         entry("2026-02-10", -1, { id: "observation-start" }),
@@ -374,7 +497,8 @@ describe("spending chart series", () => {
       ],
       100_000,
       DEFAULT_PLAN,
-      new Date(2026, 7, 10, 12),
+      forecastFor(DEFAULT_PLAN, now, { targetPaydayDateKey: "2026-09-10" }),
+      now,
     );
 
     // Rolling 30-day window is capped; early observation expense is outside it.
@@ -426,7 +550,7 @@ describe("spending chart series", () => {
     expect(analysis.completedCycles).toEqual([]);
   });
 
-  it("uses the payday on or after today to derive the forecast cycle", () => {
+  it("keeps the due income attached to the cycle that ends today", () => {
     const analysis = calculateSpendingAnalysis(
       [entry("2028-01-30", -3_000)],
       100_000,
@@ -435,10 +559,10 @@ describe("spending chart series", () => {
     );
 
     expect(analysis.currentCycle).toMatchObject({
-      cycleStartDateKey: "2028-02-29",
-      cycleEndDateKey: "2028-03-30",
-      nextPaydayDateKey: "2028-03-31",
-      daysUntilPayday: 31,
+      cycleStartDateKey: "2028-01-31",
+      cycleEndDateKey: "2028-02-28",
+      nextPaydayDateKey: "2028-02-29",
+      daysUntilPayday: 0,
     });
     expect(analysis.nextCycle).toMatchObject({
       cycleStartDateKey: "2028-02-29",

@@ -19,6 +19,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "production",
-    "GITHUB_ALLOWED_USER_ID": "98072271"
+    "GITHUB_ALLOWED_USER_ID": "98072271",
+    "VITE_CLOUD_SYNC_ENABLED": "true"
   }
 }

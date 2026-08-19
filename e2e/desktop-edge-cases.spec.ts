@@ -61,7 +61,9 @@ test("仅添加截图也能保存账目", async ({ page }) => {
 
   await expect(page.locator(".record-list").getByText("截图记录", { exact: true })).toBeVisible();
   await expect(page.locator(".record-list img[alt='账目截图']")).toBeVisible();
-  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥6.50");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥0.00");
+  await expect(page.locator(".summary-savings-grid div").filter({ hasText: "总余额" }).locator("dd"))
+    .toHaveText("-¥6.50");
 });
 
 test("本机存储用量读取失败时显示明确状态", async ({ page }) => {

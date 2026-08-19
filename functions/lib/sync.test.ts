@@ -4,6 +4,7 @@ import type {
   AppSettingsPayload,
   LedgerEntryPayload,
   RecoveryAllocationPayload,
+  SavingsEventPayload,
   SyncMutation,
 } from "./types";
 import {
@@ -48,6 +49,31 @@ function recoveryMutation(overrides: Partial<RecoveryMutation> = {}): RecoveryMu
   return {
     id: "mutation_recovery_1",
     entityType: "recoveryAllocation",
+    entityId: payload.id,
+    baseVersion: 0,
+    payload,
+    ...overrides,
+  };
+}
+
+type SavingsMutation = Extract<SyncMutation, { entityType: "savingsEvent" }>;
+
+function savingsMutation(overrides: Partial<SavingsMutation> = {}): SavingsMutation {
+  const payload: SavingsEventPayload = {
+    id: "savings_1",
+    kind: "reserve",
+    amountMinor: 50_000,
+    note: "本周期留存",
+    occurredAt: "2026-07-30T04:01:00.000Z",
+    localDateKey: "2026-07-30",
+    localMonthKey: "2026-07",
+    timezoneOffsetMinutes: -480,
+    createdAt: "2026-07-30T04:01:00.000Z",
+    updatedAt: "2026-07-30T04:01:00.000Z",
+  };
+  return {
+    id: "mutation_savings_1",
+    entityType: "savingsEvent",
     entityId: payload.id,
     baseVersion: 0,
     payload,
@@ -124,11 +150,14 @@ describe("sync mutation receipts", () => {
       version: 1,
     });
     expect(insertQuery).toContain("month_end_balance_goal_minor");
-    expect(insertBindings.slice(0, 12)).toEqual([
+    expect(insertBindings.slice(0, 15)).toEqual([
       "user_1",
       3,
       500,
       goal ?? null,
+      null,
+      null,
+      null,
       null,
       null,
       null,
@@ -166,9 +195,10 @@ describe("sync mutation receipts", () => {
       version: 2,
     });
     expect(updateQuery).toContain("CASE WHEN ? = 1");
-    expect(updateBindings.slice(0, 20)).toEqual([
-      500, 0, null, 0, null, 0, null, 0, null, 0,
-      null, 0, null, 0, null, 0, null, 0, null,
+    expect(updateBindings.slice(0, 28)).toEqual([
+      500, 0, null, 0, 0, null, null, 0, null, 0,
+      null, 0, null, 0, null, 0, null, 0, null, 0,
+      null, 0, null, 0, null, 0, null,
       "2026-07-30T12:00:00.000Z",
     ]);
   });
@@ -191,9 +221,10 @@ describe("sync mutation receipts", () => {
     const mutation = settingsMutation({ baseVersion: 1 });
 
     await applyMutation(db, "user_1", 3, mutation, 2);
-    expect(updateBindings.slice(0, 19)).toEqual([
-      500, 0, null, 0, null, 0, null, 0, null, 0,
-      null, 0, null, 0, null, 0, null, 0, null,
+    expect(updateBindings.slice(0, 21)).toEqual([
+      500, 0, null, 0, 0, null, null, 0, null, 0,
+      null, 0, null, 0, null, 0, null, 0, null, 0,
+      null,
     ]);
   });
 
@@ -225,9 +256,10 @@ describe("sync mutation receipts", () => {
       status: "applied",
       version: 2,
     });
-    expect(updateBindings.slice(0, 20)).toEqual([
-      500, 1, null, 0, null, 0, null, 0, null, 0,
-      null, 0, null, 0, null, 0, null, 0, null,
+    expect(updateBindings.slice(0, 28)).toEqual([
+      500, 1, null, 0, 0, null, null, 0, null, 0,
+      null, 0, null, 0, null, 0, null, 0, null, 0,
+      null, 0, null, 0, null, 0, null,
       "2026-07-30T12:00:00.000Z",
     ]);
   });
@@ -264,11 +296,11 @@ describe("sync mutation receipts", () => {
       payload: { ...(original.payload as AppSettingsPayload), payCycle: null },
     }), 3);
 
-    expect(updates[0].slice(3, 12)).toEqual([
-      0, 10, 1, 800_000, 0, 800_000, 0, 100_000, 0,
+    expect(updates[0].slice(3, 14)).toEqual([
+      1, 0, 10, 10, 1, 800_000, 1, 800_000, 1, 100_000, 0,
     ]);
-    expect(updates[1].slice(3, 12)).toEqual([
-      0, null, 1, null, 0, null, 0, null, 0,
+    expect(updates[1].slice(3, 14)).toEqual([
+      1, 0, null, null, 1, null, 0, null, 1, null, 0,
     ]);
   });
 
@@ -302,9 +334,10 @@ describe("sync mutation receipts", () => {
       status: "applied",
       version: 1,
     });
-    expect(insertBindings.slice(0, 12)).toEqual([
+    expect(insertBindings.slice(0, 15)).toEqual([
       "user_1", 3, 500, null, 10, 800_000, 100_000,
-      null, null, null, null, "2026-07-30T12:00:00.000Z",
+      null, null, null, null, null, null, null,
+      "2026-07-30T12:00:00.000Z",
     ]);
   });
 
@@ -346,15 +379,15 @@ describe("sync mutation receipts", () => {
       },
     }), 4);
 
-    expect(updates[0].slice(3, 19)).toEqual([
-      1, 10, 1, 800_000, 1, 800_000, 1, 100_000,
+    expect(updates[0].slice(3, 21)).toEqual([
+      1, 0, 10, 10, 1, 800_000, 1, 800_000, 1, 100_000,
       1, incomeForecast.id,
       1, incomeForecast.targetPaydayDateKey,
       1, incomeForecast.minimumIncomeMinor,
       1, incomeForecast.expectedIncomeMinor,
     ]);
-    expect(updates[1].slice(3, 19)).toEqual([
-      1, null, 1, null, 0, null, 1, null,
+    expect(updates[1].slice(3, 21)).toEqual([
+      1, 0, null, null, 1, null, 0, null, 1, null,
       1, null, 1, null, 1, null, 1, null,
     ]);
   });
@@ -403,12 +436,13 @@ describe("sync mutation receipts", () => {
 
   it("blocks legacy clients before writes when semantic analysis data exists", async () => {
     let query = "";
+    let bindings: unknown[] = [];
     const db = {
       prepare(statement: string) {
         query = statement;
         return {
-          bind() { return this; },
-          async first() { return { requires_upgrade: 1 }; },
+          bind(...values: unknown[]) { bindings = values; return this; },
+          async first() { return { requires_upgrade: bindings[2] }; },
         };
       },
     } as unknown as D1Database;
@@ -418,8 +452,70 @@ describe("sync mutation receipts", () => {
       code: "upgrade_required",
     });
     expect(query).toContain("recovery_allocations");
+    expect(query).toContain("savings_events");
     expect(query).toContain("deleted_at IS NULL");
     await expect(assertLegacyClientCompatible(db, "user_1", 3, 5)).resolves.toBeUndefined();
+    expect(bindings[2]).toBe(0);
+    expect(bindings[5]).toBe(0);
+  });
+
+  it("writes retained-money events as independent versioned entities", async () => {
+    let insertQuery = "";
+    let bindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("INSERT INTO savings_events")) {
+              insertQuery = query;
+              bindings = values;
+            }
+            return this;
+          },
+          async first() {
+            if (query.includes("FROM sync_changes")) return null;
+            if (query.includes("INSERT INTO savings_events")) return { version: 1 };
+            return null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    const mutation = savingsMutation();
+    await expect(applyMutation(db, "user_1", 3, mutation, 6)).resolves.toEqual({
+      id: mutation.id,
+      status: "applied",
+      version: 1,
+    });
+    expect(insertQuery).toContain("savings_events");
+    expect(bindings.slice(0, 10)).toEqual([
+      "user_1",
+      3,
+      "savings_1",
+      "reserve",
+      50_000,
+      "本周期留存",
+      "2026-07-30T04:01:00.000Z",
+      "2026-07-30",
+      "2026-07",
+      -480,
+    ]);
+  });
+
+  it("blocks version-five clients when retained-money semantics exist", async () => {
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async first() { return { requires_upgrade: 1 }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    await expect(assertLegacyClientCompatible(db, "user_1", 3, 5)).rejects.toMatchObject({
+      status: 409,
+      code: "upgrade_required",
+    });
   });
 
   it("filters recovery allocation changes from legacy pull responses", async () => {
@@ -434,7 +530,7 @@ describe("sync mutation receipts", () => {
     } as unknown as D1Database;
 
     await pullChanges(db, "user_1", 3, "0", 4);
-    expect(bindings).toEqual(["user_1", 3, "0", 4, 101]);
+    expect(bindings).toEqual(["user_1", 3, "0", 4, 4, 101]);
   });
 
   it("hides the version-two goal from version-one pull responses", async () => {
@@ -588,6 +684,58 @@ describe("sync mutation receipts", () => {
         monthlySalaryMinor: 700_000,
         cycleEndBalanceGoalMinor: 100_000,
       },
+    });
+  });
+
+  it("projects authoritative retained-money settings only to version six", async () => {
+    const row = {
+      cursor: "12",
+      mutation_id: "mutation_settings_v6",
+      entity_type: "settings" as const,
+      entity_id: "primary",
+      entity_version: 5,
+      mutation_hash: "hash",
+      payload_json: "{}",
+      settings_id: "primary",
+      settings_currency: "CNY",
+      settings_initial_balance_minor: 500,
+      settings_month_end_balance_goal_minor: null,
+      settings_payday_day: 10,
+      settings_monthly_salary_minor: null,
+      settings_cycle_end_balance_goal_minor: 0,
+      settings_income_forecast_id: null,
+      settings_income_forecast_target_payday_date_key: null,
+      settings_minimum_income_minor: null,
+      settings_expected_income_minor: null,
+      settings_default_savings_target_minor: 0,
+      settings_savings_override_target_payday_date_key: "2026-08-12",
+      settings_savings_override_target_minor: 80_000,
+      settings_schema_version: 1,
+      settings_updated_at: "2026-07-30T12:00:00.000Z",
+    };
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() { return { results: [row] }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    const v5 = await pullChanges(db, "user_1", 3, "0", 5);
+    const v6 = await pullChanges(db, "user_1", 3, "0", 6);
+    expect(v5.changes[0].payload).toHaveProperty("payCycle", {
+      paydayDay: 10,
+      cycleEndBalanceGoalMinor: 0,
+    });
+    expect(v5.changes[0].payload).not.toHaveProperty("savingsTargetOverride");
+    expect(v6.changes[0].payload).toHaveProperty("payCycle", {
+      paydayDay: 10,
+      defaultSavingsTargetMinor: 0,
+    });
+    expect(v6.changes[0].payload).toHaveProperty("savingsTargetOverride", {
+      targetPaydayDateKey: "2026-08-12",
+      targetMinor: 80_000,
     });
   });
 

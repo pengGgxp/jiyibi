@@ -327,15 +327,6 @@ describe("validateSyncRequest", () => {
   });
 
   it.each([
-    {
-      payCycle: undefined,
-      incomeForecast: {
-        id: "forecast_1",
-        targetPaydayDateKey: "2026-08-10",
-        minimumIncomeMinor: 0,
-        expectedIncomeMinor: 1,
-      },
-    },
     { payCycle: null, incomeForecast: undefined },
     {
       payCycle: null,
@@ -498,6 +489,123 @@ describe("validateSyncRequest", () => {
     expect(() => validateSyncRequest(overdrawn)).toThrowError(
       "Recovery allocation payload is invalid",
     );
+  });
+
+  it("accepts version-six retained-money settings and partial patches", () => {
+    const base = {
+      id: "primary",
+      currency: "CNY",
+      initialBalanceMinor: 500,
+      schemaVersion: 1,
+      updatedAt: "2026-07-30T04:01:00.000Z",
+    } as const;
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 6;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 1,
+      payload: {
+        ...base,
+        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
+        savingsTargetOverride: {
+          targetPaydayDateKey: "2026-08-12",
+          targetMinor: 80_000,
+        },
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
+      savingsTargetOverride: { targetPaydayDateKey: "2026-08-12", targetMinor: 80_000 },
+    });
+
+    request.mutations[0] = {
+      id: "mutation_settings_2",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 2,
+      payload: {
+        ...base,
+        incomeForecast: {
+          id: "forecast_2026_08_12",
+          targetPaydayDateKey: "2026-08-12",
+          minimumIncomeMinor: 600_000,
+          expectedIncomeMinor: 800_000,
+        },
+      },
+    };
+    expect(validateSyncRequest(request).mutations[0].payload).not.toHaveProperty("payCycle");
+  });
+
+  it("requires explicit dependent clears when version six clears a pay cycle", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 6;
+    request.mutations = [{
+      id: "mutation_settings_1",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 1,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: null,
+        incomeForecast: null,
+        savingsTargetOverride: null,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      payCycle: null,
+      incomeForecast: null,
+      savingsTargetOverride: null,
+    });
+
+    const missingOverrideClear = structuredClone(request) as {
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    delete missingOverrideClear.mutations[0].payload.savingsTargetOverride;
+    expect(() => validateSyncRequest(missingOverrideClear)).toThrowError("Settings payload is invalid");
+  });
+
+  it("accepts strict version-six savings events and rejects legacy or invalid shapes", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 6;
+    request.mutations = [{
+      id: "mutation_savings_1",
+      entityType: "savingsEvent",
+      entityId: "savings_1",
+      baseVersion: 0,
+      payload: {
+        id: "savings_1",
+        kind: "reserve",
+        amountMinor: 50_000,
+        note: "本周期留存",
+        occurredAt: "2026-07-30T04:01:00.000Z",
+        localDateKey: "2026-07-30",
+        localMonthKey: "2026-07",
+        timezoneOffsetMinutes: -480,
+        createdAt: "2026-07-30T04:01:00.000Z",
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+    expect(validateSyncRequest(request).mutations[0]).toMatchObject({
+      entityType: "savingsEvent",
+      payload: { kind: "reserve", amountMinor: 50_000 },
+    });
+
+    const legacy = structuredClone(request);
+    legacy.schemaVersion = 5;
+    expect(() => validateSyncRequest(legacy)).toThrowError("Mutation is invalid");
+
+    const zeroReserve = structuredClone(request) as {
+      mutations: Array<{ payload: { amountMinor: number } }>;
+    };
+    zeroReserve.mutations[0].payload.amountMinor = 0;
+    expect(() => validateSyncRequest(zeroReserve)).toThrowError("Savings event payload is invalid");
   });
 
   it("accepts a create-then-delete tombstone without requiring its local attachment", () => {

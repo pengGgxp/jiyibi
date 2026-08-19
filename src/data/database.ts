@@ -1,18 +1,25 @@
 import Dexie, { type EntityTable } from "dexie";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import {
+  addLocalDays,
   currentLocalDateKey,
   currentLocalDateTimeInput,
   currentLocalMonthKey,
+  localDateFromKey,
   parseLocalDateTime,
+  resolveFollowingPaydayDateKey,
   resolveNextPaydayDateKey,
+  resolvePayCycleRange,
 } from "../domain/date";
 import {
   assertRecoveryAllocationValid,
   defaultTreatmentFromAmount,
   normalizeLedgerEntry,
 } from "../domain/entry-treatment";
-import { calculateLedgerSummary } from "../domain/stats";
+import {
+  calculateLedgerSummary,
+  calculateRetainedSavingsSummary,
+} from "../domain/stats";
 import type {
   AppSettings,
   Attachment,
@@ -25,8 +32,10 @@ import type {
   PayCyclePlan,
   ProcessedImage,
   RecoveryAllocation,
+  SavingsEvent,
+  SavingsEventKind,
 } from "../domain/types";
-import { validateEntryDraft } from "../domain/validation";
+import { MAX_NOTE_LENGTH, validateEntryDraft } from "../domain/validation";
 import { createId } from "../lib/id";
 import {
   SYNC_SCHEMA_VERSION,
@@ -39,13 +48,14 @@ import {
 
 export const DATABASE_NAME = "jiyibi";
 export const DATABASE_SCHEMA_VERSION = 1 as const;
-/** v3: cloud sync tables. v4: entry treatment fields + recovery allocations. */
-export const INDEXED_DB_VERSION = 4 as const;
+/** v3: cloud sync. v4: entry treatment/recovery. v5: retained savings. */
+export const INDEXED_DB_VERSION = 5 as const;
 export const INDEXED_DB_SYNC_VERSION = 3 as const;
 
 const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type EntitySyncStatus = "clean" | "pending" | "conflict";
+type SyncEntityPayload = LedgerEntry | AppSettings | RecoveryAllocation | SavingsEvent;
 
 export interface SyncState {
   id: "primary";
@@ -78,10 +88,11 @@ export interface SyncOutboxRecord {
   entityType: SyncEntityType;
   entityId: string;
   baseVersion: number;
-  payload: LedgerEntry | AppSettings | RecoveryAllocation;
+  payload: SyncEntityPayload;
   clearMonthEndBalanceGoal?: true;
   clearPayCycle?: true;
   clearIncomeForecast?: true;
+  clearSavingsTargetOverride?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -90,10 +101,11 @@ export interface SyncConflict {
   id: string;
   entityType: SyncEntityType;
   entityId: string;
-  localPayload: LedgerEntry | AppSettings | RecoveryAllocation;
-  remotePayload: LedgerEntry | AppSettings | RecoveryAllocation;
+  localPayload: SyncEntityPayload;
+  remotePayload: SyncEntityPayload;
   remoteVersion: number;
   claimLegacyIncomeForecast?: true;
+  claimLegacySavingsTarget?: true;
   createdAt: string;
   updatedAt: string;
 }
@@ -191,11 +203,46 @@ export function migrateLegacyIncomeSettings(
   return next as AppSettings;
 }
 
+/** Converts the old absolute balance floor into the v5 per-cycle savings target. */
+export function migrateLegacySavingsSettings(
+  settings: AppSettings | LegacyAppSettings,
+  now = new Date(),
+): AppSettings {
+  const next = structuredClone(
+    migrateLegacyIncomeSettings(settings, now),
+  ) as AppSettings;
+  const plan = next.payCycle;
+  if (plan) {
+    const legacyTarget = plan.cycleEndBalanceGoalMinor;
+    const canonicalTarget = plan.defaultSavingsTargetMinor;
+    const targetMinor = Number.isSafeInteger(canonicalTarget) &&
+      canonicalTarget! >= 0 && canonicalTarget! <= MAX_AMOUNT_MINOR
+      ? canonicalTarget!
+      : Number.isSafeInteger(legacyTarget) && Math.abs(legacyTarget!) <= MAX_AMOUNT_MINOR
+        ? Math.max(legacyTarget!, 0)
+        : 0;
+    next.payCycle = {
+      paydayDay: plan.paydayDay,
+      defaultSavingsTargetMinor: targetMinor,
+    };
+    if (Number.isSafeInteger(legacyTarget) && legacyTarget! < 0) {
+      next.savingsTargetNeedsReview = true;
+    }
+  }
+
+  if (!next.savingsTargetOverride && next.cycleSavingsTargetOverride) {
+    next.savingsTargetOverride = structuredClone(next.cycleSavingsTargetOverride);
+  }
+  delete next.cycleSavingsTargetOverride;
+  return next;
+}
+
 export class LedgerDatabase extends Dexie {
   entries!: EntityTable<LedgerEntry, "id">;
   attachments!: EntityTable<Attachment, "id">;
   settings!: EntityTable<AppSettings, "id">;
   recoveryAllocations!: EntityTable<RecoveryAllocation, "id">;
+  savingsEvents!: EntityTable<SavingsEvent, "id">;
   syncState!: EntityTable<SyncState, "id">;
   entitySyncState!: EntityTable<EntitySyncState, "id">;
   syncOutbox!: EntityTable<SyncOutboxRecord, "entityKey">;
@@ -252,7 +299,7 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
-    this.version(INDEXED_DB_VERSION).stores({
+    this.version(4).stores({
       entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
       attachments: "id, entryId, createdAt",
       settings: "id",
@@ -286,6 +333,54 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
+    this.version(INDEXED_DB_VERSION).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      recoveryAllocations: "id, refundEntryId, expenseEntryId, deletedAt, createdAt",
+      savingsEvents: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, linkedExpenseEntryId, cycleStartDateKey, &[kind+cycleStartDateKey]",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    }).upgrade(async (transaction) => {
+      const now = migrationNow ? new Date(migrationNow) : new Date();
+      const settingsTable = transaction.table("settings");
+      for (const settings of await settingsTable.toArray() as LegacyAppSettings[]) {
+        await settingsTable.put(migrateLegacySavingsSettings(settings, now));
+      }
+
+      const outboxTable = transaction.table("syncOutbox");
+      for (const record of await outboxTable.toArray() as SyncOutboxRecord[]) {
+        if (record.entityType !== "settings") continue;
+        await outboxTable.put({
+          ...record,
+          payload: syncPayloadFor(
+            "settings",
+            migrateLegacySavingsSettings(
+              record.payload as AppSettings | LegacyAppSettings,
+              now,
+            ),
+          ),
+        });
+      }
+
+      const conflictsTable = transaction.table("syncConflicts");
+      for (const conflict of await conflictsTable.toArray() as SyncConflict[]) {
+        if (conflict.entityType !== "settings") continue;
+        await conflictsTable.put({
+          ...conflict,
+          localPayload: migrateLegacySavingsSettings(
+            conflict.localPayload as AppSettings | LegacyAppSettings,
+            now,
+          ),
+          remotePayload: migrateLegacySavingsSettings(
+            conflict.remotePayload as AppSettings | LegacyAppSettings,
+            now,
+          ),
+        });
+      }
+    });
     this.on("populate", (transaction) =>
       transaction.table<AppSettings>("settings").add(createDefaultSettings()),
     );
@@ -306,18 +401,26 @@ function isDefaultSettings(settings: AppSettings): boolean {
     settings.initialBalanceMinor === 0 &&
     settings.monthEndBalanceGoalMinor === undefined &&
     settings.payCycle === undefined &&
+    settings.savingsTargetOverride === undefined &&
+    settings.savingsTargetNeedsReview === undefined &&
     settings.incomeForecast === undefined
   );
 }
 
 function syncPayloadFor(
   entityType: SyncEntityType,
-  payload: LedgerEntry | AppSettings | RecoveryAllocation,
-): LedgerEntry | AppSettings | RecoveryAllocation {
+  payload: SyncEntityPayload,
+): SyncEntityPayload {
   if (entityType === "entry") {
     const entry = structuredClone(normalizeLedgerEntry(payload as LedgerEntry));
     if (entry.deletedAt) delete entry.attachmentId;
     return entry;
+  }
+  if (entityType === "settings") {
+    const settings = structuredClone(payload as AppSettings);
+    delete settings.savingsTargetNeedsReview;
+    delete settings.cycleSavingsTargetOverride;
+    return settings;
   }
   return structuredClone(payload);
 }
@@ -501,13 +604,14 @@ export async function purgeRecoveryAllocationsForEntry(
 async function queueSyncMutation(
   entityType: SyncEntityType,
   entityId: string,
-  payload: LedgerEntry | AppSettings | RecoveryAllocation,
+  payload: SyncEntityPayload,
   database: LedgerDatabase,
   nowIso: string,
   options: {
     clearMonthEndBalanceGoal?: boolean;
     clearPayCycle?: boolean;
     clearIncomeForecast?: boolean;
+    clearSavingsTargetOverride?: boolean;
   } = {},
 ): Promise<SyncOutboxRecord | undefined> {
   const link = await database.syncState.get("primary");
@@ -528,6 +632,9 @@ async function queueSyncMutation(
   const clearsIncomeForecast = entityType === "settings" &&
     !Object.prototype.hasOwnProperty.call(payload, "incomeForecast") &&
     (options.clearIncomeForecast || existing?.clearIncomeForecast);
+  const clearsSavingsTargetOverride = entityType === "settings" &&
+    !Object.prototype.hasOwnProperty.call(payload, "savingsTargetOverride") &&
+    (options.clearSavingsTargetOverride || existing?.clearSavingsTargetOverride);
   const outbox: SyncOutboxRecord = {
     entityKey,
     id: createId("mutation"),
@@ -538,6 +645,7 @@ async function queueSyncMutation(
     ...(clearsMonthEndBalanceGoal ? { clearMonthEndBalanceGoal: true } : {}),
     ...(clearsPayCycle ? { clearPayCycle: true } : {}),
     ...(clearsIncomeForecast ? { clearIncomeForecast: true } : {}),
+    ...(clearsSavingsTargetOverride ? { clearSavingsTargetOverride: true } : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
   };
@@ -624,6 +732,7 @@ export async function linkSyncAccount(
       database.entries,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -679,6 +788,18 @@ export async function linkSyncAccount(
             "recoveryAllocation",
             allocation.id,
             allocation,
+            database,
+            nowIso,
+          );
+        }
+        const savingsEvents = await database.savingsEvents
+          .filter((event) => !event.deletedAt)
+          .toArray();
+        for (const event of savingsEvents) {
+          await queueSyncMutation(
+            "savingsEvent",
+            event.id,
+            event,
             database,
             nowIso,
           );
@@ -800,14 +921,22 @@ export async function setPayCyclePlan(
   database = ledgerDb,
   now = new Date(),
 ): Promise<AppSettings> {
+  const defaultSavingsTargetMinor = payCycle?.defaultSavingsTargetMinor
+    ?? payCycle?.cycleEndBalanceGoalMinor;
   if (
     payCycle !== undefined &&
     (
       !Number.isInteger(payCycle.paydayDay) ||
       payCycle.paydayDay < 1 ||
       payCycle.paydayDay > 31 ||
-      !Number.isSafeInteger(payCycle.cycleEndBalanceGoalMinor) ||
-      Math.abs(payCycle.cycleEndBalanceGoalMinor) > MAX_AMOUNT_MINOR
+      !Number.isSafeInteger(defaultSavingsTargetMinor) ||
+      defaultSavingsTargetMinor! < 0 ||
+      defaultSavingsTargetMinor! > MAX_AMOUNT_MINOR ||
+      (
+        payCycle.defaultSavingsTargetMinor !== undefined &&
+        payCycle.cycleEndBalanceGoalMinor !== undefined &&
+        payCycle.defaultSavingsTargetMinor !== payCycle.cycleEndBalanceGoalMinor
+      )
     )
   ) {
     throw new LedgerDataError("工资周期设置无效", "invalid-settings");
@@ -830,17 +959,21 @@ export async function setPayCyclePlan(
       if (payCycle === undefined) {
         delete next.payCycle;
         delete next.incomeForecast;
+        delete next.savingsTargetOverride;
+        delete next.cycleSavingsTargetOverride;
       } else {
         next.payCycle = {
           paydayDay: payCycle.paydayDay,
-          cycleEndBalanceGoalMinor: payCycle.cycleEndBalanceGoalMinor,
+          defaultSavingsTargetMinor: defaultSavingsTargetMinor!,
         };
+        delete next.savingsTargetNeedsReview;
       }
       await database.settings.put(next);
       await queueSyncMutation("settings", next.id, next, database, nowIso, {
         clearMonthEndBalanceGoal: true,
         clearPayCycle: payCycle === undefined,
         clearIncomeForecast: payCycle === undefined,
+        clearSavingsTargetOverride: payCycle === undefined,
       });
       return next;
     },
@@ -850,12 +983,25 @@ export async function setPayCyclePlan(
 export type IncomeForecastInput = Omit<IncomeForecast, "id"> & { id?: string };
 
 function isValidIncomeForecastInput(value: IncomeForecastInput): boolean {
+  let hasValidTargetDate = false;
+  if (
+    typeof value.targetPaydayDateKey === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value.targetPaydayDateKey)
+  ) {
+    try {
+      localDateFromKey(value.targetPaydayDateKey);
+      hasValidTargetDate = true;
+    } catch {
+      // Keep malformed or impossible calendar dates in the normal settings error path.
+    }
+  }
+
   return (
     (value.id === undefined || (
       typeof value.id === "string" &&
       SYNC_ID_PATTERN.test(value.id)
     )) &&
-    /^\d{4}-\d{2}-\d{2}$/.test(value.targetPaydayDateKey) &&
+    hasValidTargetDate &&
     Number.isSafeInteger(value.minimumIncomeMinor) &&
     value.minimumIncomeMinor >= 0 &&
     value.minimumIncomeMinor <= MAX_AMOUNT_MINOR &&
@@ -863,6 +1009,125 @@ function isValidIncomeForecastInput(value: IncomeForecastInput): boolean {
     value.expectedIncomeMinor >= 0 &&
     value.expectedIncomeMinor <= MAX_AMOUNT_MINOR &&
     value.minimumIncomeMinor <= value.expectedIncomeMinor
+  );
+}
+
+export async function setSavingsTargetOverride(
+  targetMinor: number | undefined,
+  database = ledgerDb,
+  now = new Date(),
+  targetPaydayDateKey?: string,
+): Promise<AppSettings> {
+  if (
+    targetMinor !== undefined &&
+    (
+      !Number.isSafeInteger(targetMinor) ||
+      targetMinor < 0 ||
+      targetMinor > MAX_AMOUNT_MINOR
+    )
+  ) {
+    throw new LedgerDataError("本周期留存目标必须是有效的非负整数分", "invalid-settings");
+  }
+  if (targetPaydayDateKey !== undefined) {
+    try {
+      localDateFromKey(targetPaydayDateKey);
+    } catch {
+      throw new LedgerDataError("本周期留存目标日期无效", "invalid-settings");
+    }
+  }
+
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      if (targetMinor !== undefined && !current.payCycle) {
+        throw new LedgerDataError("请先设置发薪周期", "invalid-settings");
+      }
+      const nowIso = now.toISOString();
+      const next: AppSettings = { ...current, updatedAt: nowIso };
+      delete next.cycleSavingsTargetOverride;
+      if (targetMinor === undefined) {
+        delete next.savingsTargetOverride;
+      } else {
+        const targetDateKey = targetPaydayDateKey
+          ?? current.incomeForecast?.targetPaydayDateKey
+          ?? resolveNextPaydayDateKey(current.payCycle!.paydayDay, now);
+        const allowedTargetDateKey = current.incomeForecast?.targetPaydayDateKey
+          ?? resolveNextPaydayDateKey(current.payCycle!.paydayDay, now);
+        if (targetDateKey !== allowedTargetDateKey) {
+          throw new LedgerDataError("本周期留存目标必须绑定下一次收入日期", "invalid-settings");
+        }
+        next.savingsTargetOverride = {
+          targetPaydayDateKey: targetDateKey,
+          targetMinor,
+        };
+      }
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso, {
+        clearSavingsTargetOverride: targetMinor === undefined,
+      });
+      return next;
+    },
+  );
+}
+
+export async function acknowledgeSavingsTargetReview(
+  database = ledgerDb,
+  now = new Date(),
+): Promise<AppSettings> {
+  return database.transaction(
+    "rw",
+    database.settings,
+    database.syncState,
+    database.entitySyncState,
+    database.syncOutbox,
+    database.syncConflicts,
+    async () => {
+      const nowIso = now.toISOString();
+      const next: AppSettings = {
+        ...((await database.settings.get("primary")) ?? createDefaultSettings(now)),
+        updatedAt: nowIso,
+      };
+      delete next.savingsTargetNeedsReview;
+      await database.settings.put(next);
+      await queueSyncMutation("settings", next.id, next, database, nowIso);
+      return next;
+    },
+  );
+}
+
+function isIncomeForecastTargetInWindow(
+  targetDateKey: string,
+  paydayDay: number,
+  existingForecast: IncomeForecast | undefined,
+  now: Date,
+): boolean {
+  const todayDateKey = currentLocalDateKey(now);
+  if (existingForecast) {
+    const window = resolvePayCycleRange(
+      paydayDay,
+      localDateFromKey(existingForecast.targetPaydayDateKey),
+    );
+    return (
+      targetDateKey >= todayDateKey &&
+      targetDateKey >= window.cycleStartDateKey &&
+      targetDateKey < window.nextPaydayDateKey
+    );
+  }
+
+  const latestWindow = resolvePayCycleRange(
+    paydayDay,
+    localDateFromKey(resolveFollowingPaydayDateKey(paydayDay, now)),
+  );
+
+  return (
+    targetDateKey >= todayDateKey &&
+    targetDateKey < latestWindow.nextPaydayDateKey
   );
 }
 
@@ -885,24 +1150,38 @@ export async function setIncomeForecast(
       const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
       if (
         !current.payCycle ||
-        resolveNextPaydayDateKey(current.payCycle.paydayDay, now) !==
-          incomeForecast.targetPaydayDateKey
+        !isIncomeForecastTargetInWindow(
+          incomeForecast.targetPaydayDateKey,
+          current.payCycle.paydayDay,
+          current.incomeForecast,
+          now,
+        )
       ) {
-        throw new LedgerDataError("收入预期必须对应下一次发薪日", "invalid-settings");
+        throw new LedgerDataError(
+          "收入预期日期必须在对应发薪周期内，且不能早于今天",
+          "invalid-settings",
+        );
       }
       const nowIso = now.toISOString();
+      const previousTargetPaydayDateKey = current.incomeForecast?.targetPaydayDateKey
+        ?? resolveNextPaydayDateKey(current.payCycle.paydayDay, now);
       const next: AppSettings = {
         ...current,
         incomeForecast: {
           ...structuredClone(incomeForecast),
-          id: incomeForecast.id ?? (
-            current.incomeForecast?.targetPaydayDateKey === incomeForecast.targetPaydayDateKey
-              ? current.incomeForecast.id
-              : createId("income-forecast")
-          ),
+          id: current.incomeForecast?.id ?? incomeForecast.id ?? createId("income-forecast"),
         },
         updatedAt: nowIso,
       };
+      if (
+        next.savingsTargetOverride?.targetPaydayDateKey === previousTargetPaydayDateKey &&
+        previousTargetPaydayDateKey !== incomeForecast.targetPaydayDateKey
+      ) {
+        next.savingsTargetOverride = {
+          ...next.savingsTargetOverride,
+          targetPaydayDateKey: incomeForecast.targetPaydayDateKey,
+        };
+      }
       await database.settings.put(next);
       await queueSyncMutation("settings", next.id, next, database, nowIso);
       return next;
@@ -937,15 +1216,682 @@ export async function clearIncomeForecast(
   );
 }
 
+export interface SavingsEventInput {
+  id?: string;
+  amountMinor: number;
+  note?: string;
+  occurredAtLocal?: string;
+  linkedExpenseEntryId?: string;
+}
+
+export interface SavingsSettlementInput {
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  goalMinorSnapshot: number;
+  amountMinor: number;
+  note?: string;
+  occurredAtLocal?: string;
+}
+
+export interface SavingsFundedExpenseResult {
+  entry: LedgerEntry;
+  savingsEvent: SavingsEvent;
+}
+
+const OPENING_SAVINGS_EVENT_ID = "savings-opening";
+
+function settlementSavingsEventId(cycleStartDateKey: string): string {
+  return `savings-settlement-${cycleStartDateKey}`;
+}
+
+function assertSavingsAmount(amountMinor: number, allowZero = false): void {
+  if (
+    !Number.isSafeInteger(amountMinor) ||
+    amountMinor < (allowZero ? 0 : 1) ||
+    amountMinor > MAX_AMOUNT_MINOR
+  ) {
+    throw new LedgerDataError("留存金额必须是有效的非负整数分", "invalid-settings");
+  }
+}
+
+function normalizedSavingsNote(note: string | undefined): string {
+  const normalized = note?.trim() ?? "";
+  if (normalized.length > MAX_NOTE_LENGTH) {
+    throw new LedgerDataError(`留存备注不能超过 ${MAX_NOTE_LENGTH} 个字符`, "invalid-settings");
+  }
+  return normalized;
+}
+
+function savingsOccurrence(occurredAtLocal: string | undefined, now: Date) {
+  try {
+    const occurrence = parseLocalDateTime(
+      occurredAtLocal ?? currentLocalDateTimeInput(now),
+    );
+    if (new Date(occurrence.occurredAt).getTime() > now.getTime()) {
+      throw new Error("future savings event");
+    }
+    return occurrence;
+  } catch {
+    throw new LedgerDataError("留存时间无效", "invalid-settings");
+  }
+}
+
+function safeSnapshotMinor(value: bigint, label: string): number {
+  if (
+    value < BigInt(Number.MIN_SAFE_INTEGER) ||
+    value > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new LedgerDataError(`${label}超出安全金额范围`, "invalid-settings");
+  }
+  return Number(value);
+}
+
+async function ledgerBalanceMinorInTransaction(
+  database: LedgerDatabase,
+): Promise<number> {
+  const settings = (await database.settings.get("primary")) ?? createDefaultSettings();
+  return calculateLedgerSummary(
+    await database.entries.toArray(),
+    settings,
+    currentLocalMonthKey(),
+  ).balanceMinor;
+}
+
+async function retainedMinorInTransaction(
+  database: LedgerDatabase,
+  ignoreEventId?: string,
+): Promise<bigint> {
+  const events = await database.savingsEvents.toArray();
+  return calculateRetainedSavingsSummary(
+    ignoreEventId ? events.filter((event) => event.id !== ignoreEventId) : events,
+  ).totalRetainedMinor;
+}
+
+function assertSavingsFitsBalance(
+  retainedMinor: bigint,
+  balanceMinor: number,
+): void {
+  if (retainedMinor > BigInt(balanceMinor)) {
+    throw new LedgerDataError("留存金额不能超过当前未留存资金", "invalid-settings");
+  }
+}
+
+async function assertLinkedReleaseFitsExpense(
+  database: LedgerDatabase,
+  linkedExpenseEntryId: string,
+  amountMinor: number,
+  ignoreEventId?: string,
+): Promise<void> {
+  const [expense, linkedReleases] = await Promise.all([
+    database.entries.get(linkedExpenseEntryId),
+    database.savingsEvents
+      .where("linkedExpenseEntryId")
+      .equals(linkedExpenseEntryId)
+      .filter((event) =>
+        event.kind === "release"
+        && !event.deletedAt
+        && event.id !== ignoreEventId)
+      .toArray(),
+  ]);
+  if (!expense || expense.deletedAt || expense.amountMinor >= 0) {
+    throw new LedgerDataError("关联支出与取用金额不匹配", "invalid-settings");
+  }
+
+  let linkedTotalMinor = BigInt(amountMinor);
+  for (const release of linkedReleases) {
+    if (!Number.isSafeInteger(release.amountMinor) || release.amountMinor <= 0) {
+      throw new LedgerDataError("关联的留存记录金额无效", "invalid-settings");
+    }
+    linkedTotalMinor += BigInt(release.amountMinor);
+  }
+  if (linkedTotalMinor > -BigInt(expense.amountMinor)) {
+    throw new LedgerDataError("关联支出与取用金额不匹配", "invalid-settings");
+  }
+}
+
+export async function listSavingsEvents(
+  database = ledgerDb,
+): Promise<SavingsEvent[]> {
+  return database.savingsEvents.orderBy("occurredAt").reverse().toArray();
+}
+
+export async function listActiveSavingsEvents(
+  database = ledgerDb,
+): Promise<SavingsEvent[]> {
+  const events = await listSavingsEvents(database);
+  return events.filter((event) => !event.deletedAt);
+}
+
+export async function getSavingsEvent(
+  eventId: string,
+  database = ledgerDb,
+): Promise<SavingsEvent | undefined> {
+  return database.savingsEvents.get(eventId);
+}
+
+export async function setOpeningSavings(
+  amountMinor: number,
+  database = ledgerDb,
+  now = new Date(),
+  note = "初始留存",
+): Promise<SavingsEvent | undefined> {
+  assertSavingsAmount(amountMinor, true);
+  const normalizedNote = normalizedSavingsNote(note);
+  const occurrence = savingsOccurrence(undefined, now);
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existing = await database.savingsEvents.get(OPENING_SAVINGS_EVENT_ID);
+      const nowIso = now.toISOString();
+      if (amountMinor === 0) {
+        if (!existing || existing.deletedAt) return undefined;
+        const deleted: SavingsEvent = {
+          ...existing,
+          deletedAt: nowIso,
+          updatedAt: nowIso,
+        };
+        await database.savingsEvents.put(deleted);
+        await queueSyncMutation("savingsEvent", deleted.id, deleted, database, nowIso);
+        return deleted;
+      }
+
+      const retainedWithoutOpening = await retainedMinorInTransaction(
+        database,
+        OPENING_SAVINGS_EVENT_ID,
+      );
+      assertSavingsFitsBalance(
+        retainedWithoutOpening + BigInt(amountMinor),
+        await ledgerBalanceMinorInTransaction(database),
+      );
+      const event: SavingsEvent = {
+        id: OPENING_SAVINGS_EVENT_ID,
+        kind: "opening",
+        amountMinor,
+        note: normalizedNote,
+        ...(existing
+          ? {
+            occurredAt: existing.occurredAt,
+            localDateKey: existing.localDateKey,
+            localMonthKey: existing.localMonthKey,
+            timezoneOffsetMinutes: existing.timezoneOffsetMinutes,
+          }
+          : occurrence),
+        createdAt: existing?.createdAt ?? nowIso,
+        updatedAt: nowIso,
+      };
+      await database.savingsEvents.put(event);
+      await queueSyncMutation("savingsEvent", event.id, event, database, nowIso);
+      return event;
+    },
+  );
+}
+
+/** Product-facing alias for the opening retained-money setting. */
+export const setInitialSavings = setOpeningSavings;
+
+export async function recordSavingsEvent(
+  kind: Extract<SavingsEventKind, "reserve" | "release">,
+  input: SavingsEventInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  if (kind !== "reserve" && kind !== "release") {
+    throw new LedgerDataError("留存事件类型无效", "invalid-settings");
+  }
+  assertSavingsAmount(input.amountMinor);
+  if (input.id !== undefined && !SYNC_ID_PATTERN.test(input.id)) {
+    throw new LedgerDataError("留存事件 ID 无效", "invalid-settings");
+  }
+  if (kind === "reserve" && input.linkedExpenseEntryId !== undefined) {
+    throw new LedgerDataError("追加留存不能关联支出", "invalid-settings");
+  }
+  const occurrence = savingsOccurrence(input.occurredAtLocal, now);
+  const note = normalizedSavingsNote(input.note);
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const retainedMinor = await retainedMinorInTransaction(database);
+      if (kind === "reserve") {
+        assertSavingsFitsBalance(
+          retainedMinor + BigInt(input.amountMinor),
+          await ledgerBalanceMinorInTransaction(database),
+        );
+      } else {
+        if (BigInt(input.amountMinor) > retainedMinor) {
+          throw new LedgerDataError("取用金额不能超过当前已留存金额", "invalid-settings");
+        }
+        if (input.linkedExpenseEntryId) {
+          await assertLinkedReleaseFitsExpense(
+            database,
+            input.linkedExpenseEntryId,
+            input.amountMinor,
+          );
+        }
+      }
+      const nowIso = now.toISOString();
+      const event: SavingsEvent = {
+        id: input.id ?? createId(`savings-${kind}`),
+        kind,
+        amountMinor: input.amountMinor,
+        note,
+        ...occurrence,
+        ...(kind === "release" && input.linkedExpenseEntryId
+          ? { linkedExpenseEntryId: input.linkedExpenseEntryId }
+          : {}),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await database.savingsEvents.add(event);
+      await queueSyncMutation("savingsEvent", event.id, event, database, nowIso);
+      return event;
+    },
+  );
+}
+
+export function reserveSavings(
+  input: SavingsEventInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  return recordSavingsEvent("reserve", input, database, now);
+}
+
+export function releaseSavings(
+  input: SavingsEventInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  return recordSavingsEvent("release", input, database, now);
+}
+
+export async function updateSavingsEvent(
+  eventId: string,
+  input: Omit<SavingsEventInput, "id">,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  assertSavingsAmount(input.amountMinor);
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existing = await database.savingsEvents.get(eventId);
+      if (!existing) throw new LedgerDataError("找不到这条留存记录", "not-found");
+      if (existing.deletedAt) {
+        throw new LedgerDataError("已删除的留存记录不能编辑", "already-deleted");
+      }
+      if (existing.kind === "opening" || existing.kind === "cycle_settlement") {
+        throw new LedgerDataError("请使用对应的初始留存或周期结算入口", "invalid-settings");
+      }
+      const occurrence = input.occurredAtLocal
+        ? savingsOccurrence(input.occurredAtLocal, now)
+        : {
+          occurredAt: existing.occurredAt,
+          localDateKey: existing.localDateKey,
+          localMonthKey: existing.localMonthKey,
+          timezoneOffsetMinutes: existing.timezoneOffsetMinutes,
+        };
+      const note = input.note === undefined
+        ? existing.note
+        : normalizedSavingsNote(input.note);
+
+      const retainedWithoutCurrent = await retainedMinorInTransaction(database, eventId);
+      const linkedExpenseEntryId = existing.kind === "release"
+        ? input.linkedExpenseEntryId ?? existing.linkedExpenseEntryId
+        : undefined;
+      if (existing.kind === "reserve") {
+        assertSavingsFitsBalance(
+          retainedWithoutCurrent + BigInt(input.amountMinor),
+          await ledgerBalanceMinorInTransaction(database),
+        );
+      } else {
+        if (BigInt(input.amountMinor) > retainedWithoutCurrent) {
+          throw new LedgerDataError("取用金额不能超过当前已留存金额", "invalid-settings");
+        }
+        if (linkedExpenseEntryId) {
+          await assertLinkedReleaseFitsExpense(
+            database,
+            linkedExpenseEntryId,
+            input.amountMinor,
+            eventId,
+          );
+        }
+      }
+
+      const updated: SavingsEvent = {
+        ...existing,
+        amountMinor: input.amountMinor,
+        note,
+        ...occurrence,
+        ...(existing.kind === "release" && linkedExpenseEntryId
+          ? { linkedExpenseEntryId }
+          : {}),
+        updatedAt: now.toISOString(),
+      };
+      await database.savingsEvents.put(updated);
+      await queueSyncMutation(
+        "savingsEvent",
+        updated.id,
+        updated,
+        database,
+        updated.updatedAt,
+      );
+      return updated;
+    },
+  );
+}
+
+/** Product-facing aliases kept small so UI code can use domain language. */
+export const addSavings = reserveSavings;
+export const useSavings = releaseSavings;
+
+async function putSavingsSettlementInTransaction(
+  input: SavingsSettlementInput,
+  database: LedgerDatabase,
+  now: Date,
+  prospectiveBalanceMinor?: number,
+): Promise<SavingsEvent> {
+  assertSavingsAmount(input.amountMinor, true);
+  assertSavingsAmount(input.goalMinorSnapshot, true);
+  try {
+    localDateFromKey(input.cycleStartDateKey);
+    localDateFromKey(input.cycleEndDateKey);
+  } catch {
+    throw new LedgerDataError("结算周期日期无效", "invalid-settings");
+  }
+  if (input.cycleStartDateKey > input.cycleEndDateKey) {
+    throw new LedgerDataError("结算周期日期无效", "invalid-settings");
+  }
+  const occurrence = savingsOccurrence(input.occurredAtLocal, now);
+  if (occurrence.localDateKey <= input.cycleEndDateKey) {
+    throw new LedgerDataError("只能在周期结束后结算留存", "invalid-settings");
+  }
+  const note = normalizedSavingsNote(input.note);
+  const id = settlementSavingsEventId(input.cycleStartDateKey);
+  const allEvents = await database.savingsEvents.toArray();
+  const eventsWithoutCurrent = allEvents.filter((event) => event.id !== id);
+  const openingRetainedMinor = calculateRetainedSavingsSummary(
+    eventsWithoutCurrent.filter((event) =>
+      event.localDateKey < input.cycleStartDateKey ||
+      (
+        event.occurredAt <= occurrence.occurredAt
+        && (
+          event.kind === "opening"
+          || (
+            event.kind === "cycle_settlement"
+            && event.cycleEndDateKey < input.cycleStartDateKey
+          )
+        )
+      )),
+  ).totalRetainedMinor;
+  const cycleActivityMinor = calculateRetainedSavingsSummary(
+    eventsWithoutCurrent.filter((event) =>
+      event.kind !== "opening"
+      && !(
+        event.kind === "cycle_settlement"
+        && event.cycleEndDateKey < input.cycleStartDateKey
+      )
+      && event.localDateKey >= input.cycleStartDateKey
+      && event.localDateKey <= input.cycleEndDateKey),
+  ).totalRetainedMinor;
+  const closingRetainedMinor = openingRetainedMinor
+    + cycleActivityMinor
+    + BigInt(input.amountMinor);
+  const retainedAfterSettlement = calculateRetainedSavingsSummary(
+    eventsWithoutCurrent,
+  ).totalRetainedMinor + BigInt(input.amountMinor);
+  assertSavingsFitsBalance(
+    retainedAfterSettlement,
+    prospectiveBalanceMinor ?? await ledgerBalanceMinorInTransaction(database),
+  );
+  const existing = await database.savingsEvents.get(id);
+  const nowIso = now.toISOString();
+  const event: SavingsEvent = {
+    id,
+    kind: "cycle_settlement",
+    amountMinor: input.amountMinor,
+    note,
+    ...occurrence,
+    cycleStartDateKey: input.cycleStartDateKey,
+    cycleEndDateKey: input.cycleEndDateKey,
+    goalMinorSnapshot: input.goalMinorSnapshot,
+    openingRetainedMinor: safeSnapshotMinor(openingRetainedMinor, "期初留存"),
+    closingRetainedMinor: safeSnapshotMinor(closingRetainedMinor, "期末留存"),
+    netGrowthMinor: safeSnapshotMinor(
+      closingRetainedMinor - openingRetainedMinor,
+      "本周期留存净增长",
+    ),
+    createdAt: existing?.createdAt ?? nowIso,
+    updatedAt: nowIso,
+  };
+  await database.savingsEvents.put(event);
+  return event;
+}
+
+export async function settleSavingsCycle(
+  input: SavingsSettlementInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const event = await putSavingsSettlementInTransaction(input, database, now);
+      await queueSyncMutation("savingsEvent", event.id, event, database, now.toISOString());
+      const settings = await database.settings.get("primary");
+      if (
+        settings?.savingsTargetOverride?.targetPaydayDateKey ===
+          addLocalDays(input.cycleEndDateKey, 1)
+      ) {
+        const next = { ...settings, updatedAt: now.toISOString() };
+        delete next.savingsTargetOverride;
+        await database.settings.put(next);
+        await queueSyncMutation("settings", next.id, next, database, now.toISOString(), {
+          clearSavingsTargetOverride: true,
+        });
+      }
+      return event;
+    },
+  );
+}
+
+export const settleCycleSavings = settleSavingsCycle;
+
+export async function softDeleteSavingsEvent(
+  eventId: string,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  return database.transaction(
+    "rw",
+    [
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+    const existing = await database.savingsEvents.get(eventId);
+    if (!existing) throw new LedgerDataError("找不到这条留存记录", "not-found");
+    if (existing.deletedAt) {
+      throw new LedgerDataError("这条留存记录已经删除", "already-deleted");
+    }
+    const nowIso = now.toISOString();
+    const deleted: SavingsEvent = {
+      ...existing,
+      deletedAt: nowIso,
+      updatedAt: nowIso,
+    };
+    await database.savingsEvents.put(deleted);
+    await queueSyncMutation("savingsEvent", deleted.id, deleted, database, nowIso);
+    return deleted;
+    },
+  );
+}
+
+export async function undoDeleteSavingsEvent(
+  eventId: string,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<SavingsEvent> {
+  return database.transaction(
+    "rw",
+    [
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+    const existing = await database.savingsEvents.get(eventId);
+    if (!existing) throw new LedgerDataError("找不到这条留存记录", "not-found");
+    if (!existing.deletedAt) {
+      throw new LedgerDataError("这条留存记录并未删除", "not-deleted");
+    }
+    const restored: SavingsEvent = { ...existing, updatedAt: now.toISOString() };
+    delete restored.deletedAt;
+    await database.savingsEvents.put(restored);
+    await queueSyncMutation("savingsEvent", restored.id, restored, database, now.toISOString());
+    return restored;
+    },
+  );
+}
+
+export async function purgeDeletedSavingsEvent(
+  eventId: string,
+  database = ledgerDb,
+): Promise<void> {
+  await database.transaction(
+    "rw",
+    [
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+    ],
+    async () => {
+      const existing = await database.savingsEvents.get(eventId);
+      if (!existing) return;
+      if (!existing.deletedAt) {
+        throw new LedgerDataError("只能永久清理已删除的留存记录", "not-deleted");
+      }
+      const link = await database.syncState.get("primary");
+      if (link?.uploadApproved) {
+        const entityKey = syncEntityKey("savingsEvent", eventId);
+        const [outbox, entityState] = await Promise.all([
+          database.syncOutbox.get(entityKey),
+          database.entitySyncState.get(entityKey),
+        ]);
+        if (
+          !entityState?.tombstoneAcknowledged &&
+          (
+            outbox?.entityType !== "savingsEvent" ||
+            !("deletedAt" in outbox.payload) ||
+            !outbox.payload.deletedAt
+          )
+        ) {
+          throw new LedgerDataError(
+            "The cloud deletion must be durable before local data is purged",
+            "sync-tombstone-missing",
+          );
+        }
+      }
+      await database.savingsEvents.delete(eventId);
+    },
+  );
+}
+
 export interface ActualIncomeResult {
   entry?: LedgerEntry;
+  settlement?: SavingsEvent;
   settings: AppSettings;
+}
+
+export interface ActualIncomeOptions {
+  /** Omit to keep the legacy confirmation flow; zero records an explicit no-savings settlement. */
+  savingsAmountMinor?: number;
+  savingsNote?: string;
+}
+
+function defaultSavingsTargetMinor(plan: PayCyclePlan): number {
+  const targetMinor = plan.defaultSavingsTargetMinor ?? plan.cycleEndBalanceGoalMinor;
+  if (!Number.isSafeInteger(targetMinor)) {
+    throw new LedgerDataError("每周期留存目标无效", "invalid-settings");
+  }
+  return Math.max(targetMinor!, 0);
+}
+
+function settlementInputForActualIncome(
+  settings: AppSettings,
+  forecast: IncomeForecast,
+  options: ActualIncomeOptions,
+  now: Date,
+): SavingsSettlementInput {
+  if (!settings.payCycle || options.savingsAmountMinor === undefined) {
+    throw new LedgerDataError("实际收入结算缺少发薪周期", "invalid-settings");
+  }
+  const targetDate = localDateFromKey(forecast.targetPaydayDateKey);
+  const targetRegularRange = resolvePayCycleRange(settings.payCycle.paydayDay, targetDate);
+  const priorRange = resolvePayCycleRange(
+    settings.payCycle.paydayDay,
+    localDateFromKey(addLocalDays(targetRegularRange.cycleStartDateKey, -1)),
+  );
+  const localTime = currentLocalDateTimeInput(now).slice(11);
+  return {
+    cycleStartDateKey: priorRange.cycleStartDateKey,
+    cycleEndDateKey: addLocalDays(forecast.targetPaydayDateKey, -1),
+    goalMinorSnapshot:
+      settings.savingsTargetOverride?.targetPaydayDateKey === forecast.targetPaydayDateKey
+        ? settings.savingsTargetOverride.targetMinor
+        : defaultSavingsTargetMinor(settings.payCycle),
+    amountMinor: options.savingsAmountMinor,
+    note: options.savingsNote ?? "周期留存结算",
+    occurredAtLocal: `${forecast.targetPaydayDateKey}T${localTime}`,
+  };
 }
 
 export async function recordActualIncome(
   amountMinor: number,
   database = ledgerDb,
   now = new Date(),
+  options: ActualIncomeOptions = {},
 ): Promise<ActualIncomeResult> {
   if (
     !Number.isSafeInteger(amountMinor) ||
@@ -960,6 +1906,7 @@ export async function recordActualIncome(
       database.entries,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -994,15 +1941,47 @@ export async function recordActualIncome(
         await queueSyncMutation("entry", entry.id, entry, database, nowIso);
       }
 
+      let settlement: SavingsEvent | undefined;
+      if (options.savingsAmountMinor !== undefined) {
+        settlement = await putSavingsSettlementInTransaction(
+          settlementInputForActualIncome(current, forecast, options, now),
+          database,
+          now,
+        );
+        await queueSyncMutation(
+          "savingsEvent",
+          settlement.id,
+          settlement,
+          database,
+          nowIso,
+        );
+      }
+
       const settings: AppSettings = { ...current, updatedAt: nowIso };
       delete settings.incomeForecast;
+      delete settings.savingsTargetOverride;
+      delete settings.cycleSavingsTargetOverride;
       await database.settings.put(settings);
       await queueSyncMutation("settings", settings.id, settings, database, nowIso, {
         clearIncomeForecast: true,
+        clearSavingsTargetOverride: true,
       });
-      return { entry, settings };
+      return { entry, settlement, settings };
     },
   );
+}
+
+export function recordActualIncomeWithSavings(
+  amountMinor: number,
+  savingsAmountMinor: number,
+  database = ledgerDb,
+  now = new Date(),
+  savingsNote?: string,
+): Promise<ActualIncomeResult> {
+  return recordActualIncome(amountMinor, database, now, {
+    savingsAmountMinor,
+    ...(savingsNote ? { savingsNote } : {}),
+  });
 }
 
 function attachmentFromImage(
@@ -1069,6 +2048,7 @@ export async function createEntry(
     [
       database.entries,
       database.attachments,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1083,6 +2063,90 @@ export async function createEntry(
   return entry;
 }
 
+export async function createSavingsFundedExpense(
+  draft: EntryDraft,
+  savingsAmountMinor: number,
+  database = ledgerDb,
+  now = new Date(),
+  treatment: Extract<
+    EntryTreatment,
+    "ordinary_expense" | "one_time_expense" | "reimbursable_expense"
+  > = "one_time_expense",
+): Promise<SavingsFundedExpenseResult> {
+  assertSavingsAmount(savingsAmountMinor);
+  const valid = validateEntryDraft(draft);
+  if (
+    valid.amountMinor >= 0 ||
+    savingsAmountMinor > Math.abs(valid.amountMinor) ||
+    !treatmentMatchesAmountSafe(treatment, valid.amountMinor)
+  ) {
+    throw new LedgerDataError("留存取用金额必须由这笔支出承担", "invalid-settings");
+  }
+  const nowIso = now.toISOString();
+  const entryId = createId("entry");
+  const attachment = valid.image
+    ? attachmentFromImage(valid.image, entryId, nowIso)
+    : undefined;
+  const entry: LedgerEntry = {
+    id: entryId,
+    amountMinor: valid.amountMinor,
+    note: valid.note,
+    occurredAt: valid.occurredAt,
+    localDateKey: valid.localDateKey,
+    localMonthKey: valid.localMonthKey,
+    timezoneOffsetMinutes: valid.timezoneOffsetMinutes,
+    attachmentId: attachment?.id,
+    treatment,
+    confirmationStatus: "confirmed",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+  const savingsEvent: SavingsEvent = {
+    id: createId("savings-release"),
+    kind: "release",
+    amountMinor: savingsAmountMinor,
+    note: normalizedSavingsNote(valid.note || "取用留存支付"),
+    occurredAt: valid.occurredAt,
+    localDateKey: valid.localDateKey,
+    localMonthKey: valid.localMonthKey,
+    timezoneOffsetMinutes: valid.timezoneOffsetMinutes,
+    linkedExpenseEntryId: entryId,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  await database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.attachments,
+      database.savingsEvents,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const retainedMinor = await retainedMinorInTransaction(database);
+      if (BigInt(savingsAmountMinor) > retainedMinor) {
+        throw new LedgerDataError("取用金额不能超过当前已留存金额", "invalid-settings");
+      }
+      if (attachment) await database.attachments.add(attachment);
+      await database.entries.add(entry);
+      await database.savingsEvents.add(savingsEvent);
+      await queueSyncMutation("entry", entry.id, entry, database, nowIso);
+      await queueSyncMutation(
+        "savingsEvent",
+        savingsEvent.id,
+        savingsEvent,
+        database,
+        nowIso,
+      );
+    },
+  );
+  return { entry, savingsEvent };
+}
+
 export async function updateEntry(
   entryId: string,
   draft: EntryDraft,
@@ -1094,6 +2158,7 @@ export async function updateEntry(
     [
       database.entries,
       database.attachments,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1153,7 +2218,46 @@ export async function updateEntry(
           : undefined,
       updatedAt: nowIso,
     };
+    const linkedReleases = await database.savingsEvents
+      .where("linkedExpenseEntryId")
+      .equals(entryId)
+      .filter((event) => event.kind === "release" && !event.deletedAt)
+      .toArray();
+    const linkedAmountMinor = linkedReleases.reduce(
+      (total, event) => total + BigInt(event.amountMinor),
+      0n,
+    );
+    if (
+      linkedReleases.length > 0 &&
+      (
+        updated.amountMinor >= 0 ||
+        linkedAmountMinor > -BigInt(updated.amountMinor)
+      )
+    ) {
+      throw new LedgerDataError(
+        "修改后的支出不足以承担已关联的留存取用",
+        "invalid-settings",
+      );
+    }
     await database.entries.put(updated);
+    for (const release of linkedReleases) {
+      const updatedRelease: SavingsEvent = {
+        ...release,
+        occurredAt: updated.occurredAt,
+        localDateKey: updated.localDateKey,
+        localMonthKey: updated.localMonthKey,
+        timezoneOffsetMinutes: updated.timezoneOffsetMinutes,
+        updatedAt: nowIso,
+      };
+      await database.savingsEvents.put(updatedRelease);
+      await queueSyncMutation(
+        "savingsEvent",
+        updatedRelease.id,
+        updatedRelease,
+        database,
+        nowIso,
+      );
+    }
     await queueSyncMutation("entry", updated.id, updated, database, nowIso);
     return updated;
     },
@@ -1170,6 +2274,7 @@ export async function softDeleteEntry(
     [
       database.entries,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1201,6 +2306,26 @@ export async function softDeleteEntry(
           timestamp,
         );
       }
+      const linkedReleases = await database.savingsEvents
+        .where("linkedExpenseEntryId")
+        .equals(entryId)
+        .toArray();
+      for (const release of linkedReleases) {
+        if (release.deletedAt) continue;
+        const tombstone: SavingsEvent = {
+          ...release,
+          deletedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        await database.savingsEvents.put(tombstone);
+        await queueSyncMutation(
+          "savingsEvent",
+          tombstone.id,
+          tombstone,
+          database,
+          timestamp,
+        );
+      }
       await queueSyncMutation("entry", deleted.id, deleted, database, timestamp);
       return deleted;
     },
@@ -1217,6 +2342,7 @@ export async function undoDeleteEntry(
     [
       database.entries,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1267,6 +2393,18 @@ export async function undoDeleteEntry(
         }
       }
 
+      const linkedReleases = await database.savingsEvents
+        .where("linkedExpenseEntryId")
+        .equals(entryId)
+        .toArray();
+      for (const release of linkedReleases) {
+        if (release.deletedAt !== entryDeletedAt) continue;
+        const live: SavingsEvent = { ...release, updatedAt: nowIso };
+        delete live.deletedAt;
+        await database.savingsEvents.put(live);
+        await queueSyncMutation("savingsEvent", live.id, live, database, nowIso);
+      }
+
       await queueSyncMutation("entry", restored.id, restored, database, nowIso);
       return restored;
     },
@@ -1280,6 +2418,7 @@ export async function purgeDeletedEntry(entryId: string, database = ledgerDb): P
       database.entries,
       database.attachments,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1299,6 +2438,10 @@ export async function purgeDeletedEntry(entryId: string, database = ledgerDb): P
         await database.attachments.delete(existing.attachmentId);
       }
       await purgeRecoveryAllocationsForEntry(entryId, database);
+      await database.savingsEvents
+        .where("linkedExpenseEntryId")
+        .equals(entryId)
+        .delete();
       await database.entries.delete(entryId);
     },
   );
@@ -1338,6 +2481,7 @@ export async function purgeDeletedEntries(
       database.entries,
       database.attachments,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1373,6 +2517,10 @@ export async function purgeDeletedEntries(
     await database.attachments.bulkDelete(attachmentIds);
     for (const entry of entries) {
       await purgeRecoveryAllocationsForEntry(entry.id, database);
+      await database.savingsEvents
+        .where("linkedExpenseEntryId")
+        .equals(entry.id)
+        .delete();
     }
     await database.entries.bulkDelete(entries.map((entry) => entry.id));
     return entries.length;
@@ -1421,11 +2569,12 @@ function currentLocalPayload(
   entityType: SyncEntityType,
   entityId: string,
   database: LedgerDatabase,
-): Promise<LedgerEntry | AppSettings | RecoveryAllocation | undefined> {
+): Promise<SyncEntityPayload | undefined> {
   if (entityType === "entry") return database.entries.get(entityId);
   if (entityType === "recoveryAllocation") {
     return database.recoveryAllocations.get(entityId);
   }
+  if (entityType === "savingsEvent") return database.savingsEvents.get(entityId);
   return database.settings.get("primary");
 }
 
@@ -1433,7 +2582,7 @@ async function applyRemotePayload(
   change: {
     entityType: SyncEntityType;
     entityId: string;
-    payload: LedgerEntry | AppSettings | RecoveryAllocation;
+    payload: SyncEntityPayload;
   },
   database: LedgerDatabase,
 ): Promise<void> {
@@ -1447,6 +2596,15 @@ async function applyRemotePayload(
       await database.recoveryAllocations.delete(change.entityId);
     } else {
       await database.recoveryAllocations.put(allocation);
+    }
+    return;
+  }
+  if (change.entityType === "savingsEvent") {
+    const event = change.payload as SavingsEvent;
+    if (event.deletedAt) {
+      await database.savingsEvents.delete(change.entityId);
+    } else {
+      await database.savingsEvents.put(event);
     }
     return;
   }
@@ -1486,7 +2644,7 @@ async function applyRemotePayload(
 
 async function recordConflict(
   change: SyncChange,
-  localPayload: LedgerEntry | AppSettings | RecoveryAllocation,
+  localPayload: SyncEntityPayload,
   database: LedgerDatabase,
   nowIso: string,
 ): Promise<void> {
@@ -1501,6 +2659,9 @@ async function recordConflict(
     remoteVersion: change.version,
     ...(change.entityType === "settings" && change.claimLegacyIncomeForecast
       ? { claimLegacyIncomeForecast: true as const }
+      : {}),
+    ...(change.entityType === "settings" && change.claimLegacySavingsTarget
+      ? { claimLegacySavingsTarget: true as const }
       : {}),
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
@@ -1572,7 +2733,10 @@ async function applyRemoteChangesInTransaction(
           : false,
       updatedAt: nowIso,
     });
-    if (change.entityType === "settings" && change.claimLegacyIncomeForecast) {
+    if (
+      change.entityType === "settings"
+      && (change.claimLegacyIncomeForecast || change.claimLegacySavingsTarget)
+    ) {
       await queueSyncMutation(
         "settings",
         change.entityId,
@@ -1625,6 +2789,7 @@ export async function applyRemoteChanges(
       database.attachments,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1703,6 +2868,7 @@ export async function markPushResults(
       database.entries,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.entitySyncState,
       database.syncOutbox,
       database.syncConflicts,
@@ -1729,6 +2895,7 @@ export async function commitSyncBatch(
       database.attachments,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1766,6 +2933,7 @@ export async function resolveSyncConflict(
       database.attachments,
       database.settings,
       database.recoveryAllocations,
+      database.savingsEvents,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1805,7 +2973,10 @@ export async function resolveSyncConflict(
               : false,
           updatedAt: nowIso,
         });
-        if (entityType === "settings" && conflict.claimLegacyIncomeForecast) {
+        if (
+          entityType === "settings"
+          && (conflict.claimLegacyIncomeForecast || conflict.claimLegacySavingsTarget)
+        ) {
           await queueSyncMutation(
             "settings",
             entityId,
@@ -1846,6 +3017,10 @@ export async function resolveSyncConflict(
         ...(entityType === "settings" &&
           !Object.prototype.hasOwnProperty.call(localPayload, "incomeForecast")
           ? { clearIncomeForecast: true as const }
+          : {}),
+        ...(entityType === "settings" &&
+          !Object.prototype.hasOwnProperty.call(localPayload, "savingsTargetOverride")
+          ? { clearSavingsTargetOverride: true as const }
           : {}),
         createdAt: existingOutbox?.createdAt ?? nowIso,
         updatedAt: nowIso,
@@ -1913,6 +3088,8 @@ export interface LedgerReplacement {
   entries: LedgerEntry[];
   attachments: Attachment[];
   recoveryAllocations: RecoveryAllocation[];
+  /** Optional until backup payload v4 becomes the only writer. */
+  savingsEvents?: SavingsEvent[];
 }
 
 export async function replaceLedgerData(
@@ -1921,11 +3098,14 @@ export async function replaceLedgerData(
 ): Promise<void> {
   await database.transaction(
     "rw",
-    database.settings,
-    database.entries,
-    database.attachments,
-    database.recoveryAllocations,
-    database.syncState,
+    [
+      database.settings,
+      database.entries,
+      database.attachments,
+      database.recoveryAllocations,
+      database.savingsEvents,
+      database.syncState,
+    ],
     async () => {
       if (await database.syncState.get("primary")) {
         throw new LedgerDataError(
@@ -1935,6 +3115,7 @@ export async function replaceLedgerData(
       }
       await database.attachments.clear();
       await database.recoveryAllocations.clear();
+      await database.savingsEvents.clear();
       await database.entries.clear();
       await database.settings.clear();
       await database.settings.add(replacement.settings);
@@ -1944,6 +3125,9 @@ export async function replaceLedgerData(
       }
       if (replacement.recoveryAllocations.length) {
         await database.recoveryAllocations.bulkAdd(replacement.recoveryAllocations);
+      }
+      if (replacement.savingsEvents?.length) {
+        await database.savingsEvents.bulkAdd(replacement.savingsEvents);
       }
     },
   );

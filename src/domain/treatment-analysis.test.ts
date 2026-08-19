@@ -56,7 +56,9 @@ describe("treatment-aware balance and daily spend (P4)", () => {
       TEST_LEDGER_NOW,
     );
     expect(analysis.window.totalExpenseMinor).toBe(300);
-    expect(analysis.currentCycle.actualExpenseMinor).toBe(0);
+    // The due forecast keeps this ending cycle attached to the previous payday,
+    // so all gross outflows in that cycle remain visible in actual cashflow.
+    expect(analysis.currentCycle.actualExpenseMinor).toBe(50_300);
   });
 
   it("reduces ordinary expense baseline by recovery allocations only", () => {

@@ -3,6 +3,7 @@ import type {
   Attachment,
   LedgerEntry,
   RecoveryAllocation,
+  SavingsEvent,
 } from "../domain/types";
 import {
   assertSyncAccount,
@@ -172,10 +173,23 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
       payload: record.payload as RecoveryAllocation,
     };
   }
-  const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload;
+  if (record.entityType === "savingsEvent") {
+    return {
+      id: record.id,
+      entityType: "savingsEvent",
+      entityId: record.entityId,
+      baseVersion: record.baseVersion,
+      payload: record.payload as SavingsEvent,
+    };
+  }
+  const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload &
+    Record<string, unknown>;
+  delete payload.savingsTargetNeedsReview;
+  delete payload.cycleSavingsTargetOverride;
   if (record.clearMonthEndBalanceGoal) payload.monthEndBalanceGoalMinor = null;
   if (record.clearPayCycle) payload.payCycle = null;
   if (record.clearIncomeForecast) payload.incomeForecast = null;
+  if (record.clearSavingsTargetOverride) payload.savingsTargetOverride = null;
   return {
     id: record.id,
     entityType: "settings",

@@ -11,6 +11,7 @@ import {
   createEntry,
   linkSyncAccount,
   resolveSyncConflict,
+  reserveSavings,
   setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
@@ -194,7 +195,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 5,
+      schemaVersion: 6,
       mutations: [expect.objectContaining({
         entityType: "recoveryAllocation",
         entityId: allocation.id,
@@ -204,6 +205,39 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get(
       `recoveryAllocation:${allocation.id}`,
     )).toBeUndefined();
+  });
+
+  it("pushes and acknowledges an independent retained-money mutation", async () => {
+    await createEntry({
+      ...draft(),
+      kind: "income",
+      amount: "1000",
+      note: "opening funds",
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const event = await reserveSavings({
+      amountMinor: 50_000,
+      note: "本周期留存",
+      occurredAtLocal: "2026-07-30T13:00",
+    }, database);
+    const queued = (await database.syncOutbox.get(`savingsEvent:${event.id}`))!;
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+      nextCursor: "1",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 6,
+      mutations: [expect.objectContaining({
+        entityType: "savingsEvent",
+        entityId: event.id,
+        payload: event,
+      })],
+    }), 1);
+    expect(await database.syncOutbox.get(`savingsEvent:${event.id}`)).toBeUndefined();
   });
 
   it("pushes allocation tombstones before deleting their linked entry", async () => {
@@ -409,7 +443,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 5,
+      schemaVersion: 6,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
@@ -432,7 +466,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 5,
+      schemaVersion: 6,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
@@ -464,13 +498,13 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 5,
+      schemaVersion: 6,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
           payCycle: {
             paydayDay: 10,
-            cycleEndBalanceGoalMinor: 100_000,
+            defaultSavingsTargetMinor: 100_000,
           },
           incomeForecast: null,
         }),
@@ -520,7 +554,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 5,
+      schemaVersion: 6,
       cursor: "0",
       mutations: [],
     }), 1);
@@ -535,7 +569,7 @@ describe("sync engine", () => {
     });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 5,
+      syncProtocolVersion: 6,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",
@@ -612,7 +646,72 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 5,
+      syncProtocolVersion: 6,
+    });
+  });
+
+  it("claims a legacy balance floor during the v6 refresh and writes the savings target back", async () => {
+    await linkSyncAccount(session(), true, database);
+    const legacyState = (await database.syncState.get("primary"))!;
+    legacyState.syncProtocolVersion = 5;
+    legacyState.cursor = "8";
+    await database.syncState.put(legacyState);
+    await database.entitySyncState.put({
+      id: "settings:primary",
+      entityType: "settings",
+      entityId: "primary",
+      serverVersion: 1,
+      status: "clean",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    });
+    const remoteSettings = {
+      ...(await database.settings.get("primary"))!,
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+      savingsTargetNeedsReview: true as const,
+      updatedAt: "2026-08-09T01:00:00.000Z",
+    };
+    const api = apiClient(emptyResponse());
+    vi.mocked(api.sync).mockImplementation(async (request) => {
+      if (request.mutations.length === 0) {
+        return emptyResponse({
+          changes: [{
+            seq: "9",
+            entityType: "settings",
+            entityId: "primary",
+            version: 2,
+            payload: remoteSettings,
+            claimLegacySavingsTarget: true,
+          }],
+          nextCursor: "9",
+        });
+      }
+      return emptyResponse({
+        results: request.mutations.map((mutation) => ({
+          id: mutation.id,
+          status: "applied" as const,
+          version: 3,
+        })),
+        nextCursor: "9",
+      });
+    });
+
+    await syncNow(database, api);
+
+    const requests = vi.mocked(api.sync).mock.calls.map(([request]) => request);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ cursor: "0", mutations: [] });
+    expect(requests[1].mutations[0]).toMatchObject({
+      entityType: "settings",
+      baseVersion: 2,
+      payload: {
+        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+      },
+    });
+    expect(requests[1].mutations[0].payload).not.toHaveProperty("savingsTargetNeedsReview");
+    expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
+    expect(await database.settings.get("primary")).toMatchObject({
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+      savingsTargetNeedsReview: true,
     });
   });
 

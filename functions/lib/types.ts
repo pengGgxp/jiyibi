@@ -63,6 +63,30 @@ export interface RecoveryAllocationPayload {
   deletedAt?: string;
 }
 
+export type SavingsEventKind = "opening" | "reserve" | "release" | "cycle_settlement";
+
+export interface SavingsEventPayload {
+  id: string;
+  kind: SavingsEventKind;
+  amountMinor: number;
+  note: string;
+  occurredAt: string;
+  localDateKey: string;
+  localMonthKey: string;
+  timezoneOffsetMinutes: number;
+  linkedExpenseEntryId?: string;
+  cycleStartDateKey?: string;
+  cycleEndDateKey?: string;
+  goalMinorSnapshot?: number;
+  openingRetainedMinor?: number;
+  closingRetainedMinor?: number;
+  netGrowthMinor?: number;
+  transferToRetainedMinor?: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
 export interface AppSettingsPayload {
   id: "primary";
   currency: "CNY";
@@ -70,6 +94,7 @@ export interface AppSettingsPayload {
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlanPayload;
   incomeForecast?: IncomeForecastPayload;
+  savingsTargetOverride?: CycleSavingsTargetOverridePayload;
   schemaVersion: 1;
   updatedAt: string;
 }
@@ -85,11 +110,18 @@ export interface SyncAppSettingsPayload extends AppSettingsPayload {
 
 export interface PayCyclePlanPayload {
   paydayDay: number;
-  cycleEndBalanceGoalMinor: number;
+  defaultSavingsTargetMinor: number;
 }
 
-export interface LegacyPayCyclePlanPayload extends PayCyclePlanPayload {
-  monthlySalaryMinor: number;
+export interface LegacyPayCyclePlanPayload {
+  paydayDay: number;
+  cycleEndBalanceGoalMinor: number;
+  monthlySalaryMinor?: number;
+}
+
+export interface CycleSavingsTargetOverridePayload {
+  targetPaydayDateKey: string;
+  targetMinor: number;
 }
 
 export interface IncomeForecastPayload {
@@ -100,22 +132,29 @@ export interface IncomeForecastPayload {
 }
 
 export interface LegacyAppSettingsPayload
-  extends Omit<AppSettingsPayload, "payCycle" | "incomeForecast"> {
+  extends Omit<
+    AppSettingsPayload,
+    "payCycle" | "incomeForecast" | "savingsTargetOverride"
+  > {
   payCycle?: LegacyPayCyclePlanPayload;
 }
 
 export interface SettingsMutationPayload
   extends Omit<
     AppSettingsPayload,
-    "monthEndBalanceGoalMinor" | "payCycle" | "incomeForecast"
+    | "monthEndBalanceGoalMinor"
+    | "payCycle"
+    | "incomeForecast"
+    | "savingsTargetOverride"
   > {
   monthEndBalanceGoalMinor?: number | null;
   payCycle?: PayCyclePlanPayload | LegacyPayCyclePlanPayload | null;
   incomeForecast?: IncomeForecastPayload | null;
+  savingsTargetOverride?: CycleSavingsTargetOverridePayload | null;
 }
 
-export type SyncEntityType = "entry" | "settings" | "recoveryAllocation";
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5;
+export type SyncEntityType = "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
 interface SyncMutationBase {
   id: string;
@@ -129,6 +168,10 @@ export type SyncMutation =
   | SyncMutationBase & {
       entityType: "recoveryAllocation";
       payload: RecoveryAllocationPayload;
+    }
+  | SyncMutationBase & {
+      entityType: "savingsEvent";
+      payload: SavingsEventPayload;
     };
 
 export interface SyncRequestBody {
@@ -146,7 +189,8 @@ export interface RemoteChange {
     | LedgerEntryPayload
     | SyncAppSettingsPayload
     | LegacyAppSettingsPayload
-    | RecoveryAllocationPayload;
+    | RecoveryAllocationPayload
+    | SavingsEventPayload;
 }
 
 export type MutationResult =

@@ -258,6 +258,63 @@
   text-align: right;
 }
 
+.analysis-section-kicker {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-savings-section {
+  padding-top: 0.55rem;
+}
+
+.analysis-savings-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  color: #7b2b29;
+  background: var(--expense-soft);
+  border-left: 3px solid var(--expense);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.analysis-savings-warning svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 1rem;
+  margin-top: 0.08rem;
+}
+
+.analysis-savings-details {
+  margin-top: 0.55rem;
+}
+
+.analysis-savings-details table {
+  min-width: 31rem;
+}
+
+.analysis-table-wrap .analysis-table-action {
+  width: 7rem;
+  text-align: right;
+}
+
+.analysis-settlement-action {
+  min-height: 2.75rem;
+  padding-inline: 0.55rem;
+  white-space: nowrap;
+  font-size: 0.7rem;
+}
+
+.analysis-settlement-action svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
 .analysis-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -411,6 +468,20 @@
   height: 0.7rem;
   border-top: 0;
   background: var(--expense);
+  border-radius: 2px 2px 0 0;
+}
+
+.analysis-chart-key-line--savings {
+  height: 0.7rem;
+  border-top: 0;
+  background: var(--income);
+  border-radius: 2px 2px 0 0;
+}
+
+.analysis-chart-key-line--target {
+  height: 0.7rem;
+  border: 2px solid var(--muted-strong);
+  background: var(--surface-muted);
   border-radius: 2px 2px 0 0;
 }
 

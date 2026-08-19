@@ -1,6 +1,6 @@
 import { webcrypto } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { LedgerEntry, RecoveryAllocation } from "../domain/types";
+import type { LedgerEntry, RecoveryAllocation, SavingsEvent } from "../domain/types";
 import { SyncApiError, createSyncApiClient, type SyncFetch } from "./api";
 import {
   API_SCHEMA_VERSION,
@@ -85,7 +85,7 @@ function syncResponse(): SyncResponse {
           monthEndBalanceGoalMinor: 25_000,
           payCycle: {
             paydayDay: 10,
-            cycleEndBalanceGoalMinor: 100_000,
+            defaultSavingsTargetMinor: 100_000,
           },
           incomeForecast: {
             id: "forecast-2026-08-10",
@@ -420,7 +420,7 @@ describe("sync API client", () => {
       entityType: "settings",
       claimLegacyIncomeForecast: true,
       payload: {
-        payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 100_000 },
+        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
         incomeForecast: {
           id: "legacy-income-2026-08-10",
           targetPaydayDateKey: "2026-08-10",
@@ -431,6 +431,48 @@ describe("sync API client", () => {
     });
     expect(settingsChange.payload).not.toHaveProperty("_legacyMonthlySalaryMinor");
   });
+
+  it.each([
+    [25_000, 25_000, false],
+    [-25_000, 0, true],
+  ])(
+    "normalizes and claims a legacy balance floor: %s",
+    async (legacyTarget, expectedTarget, needsReview) => {
+      const response = syncResponse() as unknown as Record<string, unknown>;
+      response.results = [];
+      const changes = response.changes as Array<Record<string, unknown>>;
+      const settings = changes[1].payload as Record<string, unknown>;
+      settings.payCycle = {
+        paydayDay: 10,
+        cycleEndBalanceGoalMinor: legacyTarget,
+      };
+      const fetcher = mockFetch(jsonResponse(response));
+
+      const result = await createSyncApiClient(fetcher).sync({
+        schemaVersion: SYNC_SCHEMA_VERSION,
+        cursor: "0",
+        mutations: [],
+      }, 3);
+
+      const settingsChange = result.changes[1];
+      if (settingsChange.entityType !== "settings") {
+        throw new Error("Expected settings change");
+      }
+      expect(settingsChange).toMatchObject({
+        entityType: "settings",
+        claimLegacySavingsTarget: true,
+        payload: {
+          payCycle: { paydayDay: 10, defaultSavingsTargetMinor: expectedTarget },
+        },
+      });
+      if (needsReview) {
+        expect(settingsChange.payload).toHaveProperty("savingsTargetNeedsReview", true);
+      } else {
+        expect(settingsChange.payload).not.toHaveProperty("savingsTargetNeedsReview");
+      }
+      expect(settingsChange.payload.payCycle).not.toHaveProperty("cycleEndBalanceGoalMinor");
+    },
+  );
 
   it.each([0, 1.5, 9_000_000_000_000_001])(
     "rejects an invalid legacy salary hint: %s",
@@ -481,7 +523,7 @@ describe("sync API client", () => {
         monthEndBalanceGoalMinor: 25_000,
         payCycle: {
           paydayDay: 10,
-          cycleEndBalanceGoalMinor: 100_000,
+          defaultSavingsTargetMinor: 100_000,
         },
         incomeForecast: {
           targetPaydayDateKey: "2026-08-10",
@@ -506,6 +548,48 @@ describe("sync API client", () => {
     const fetcher = mockFetch(jsonResponse(response));
 
     await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).rejects.toMatchObject({ code: "invalid-response" });
+  });
+
+  it("accepts a version-six retained-money change and rejects an invalid amount", async () => {
+    const event: SavingsEvent = {
+      id: "savings-1",
+      kind: "reserve",
+      amountMinor: 50_000,
+      note: "本周期留存",
+      occurredAt: "2026-07-30T04:00:00.000Z",
+      localDateKey: "2026-07-30",
+      localMonthKey: "2026-07",
+      timezoneOffsetMinutes: -480,
+      createdAt: "2026-07-30T04:00:00.000Z",
+      updatedAt: "2026-07-30T04:00:00.000Z",
+    };
+    const response = syncResponse();
+    response.results = [];
+    response.changes.push({
+      seq: "9",
+      entityType: "savingsEvent",
+      entityId: event.id,
+      version: 1,
+      payload: event,
+    });
+    response.nextCursor = "9";
+
+    await expect(createSyncApiClient(mockFetch(jsonResponse(response))).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).resolves.toMatchObject({
+      changes: expect.arrayContaining([
+        expect.objectContaining({ entityType: "savingsEvent", payload: event }),
+      ]),
+    });
+
+    event.amountMinor = 0;
+    await expect(createSyncApiClient(mockFetch(jsonResponse(response))).sync({
       schemaVersion: SYNC_SCHEMA_VERSION,
       cursor: "0",
       mutations: [],

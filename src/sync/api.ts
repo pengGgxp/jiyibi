@@ -8,10 +8,12 @@ import {
 import type {
   AppSettings,
   Attachment,
+  CycleSavingsTargetOverride,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
   RecoveryAllocation,
+  SavingsEvent,
 } from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
 import {
@@ -214,6 +216,7 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
         "monthEndBalanceGoalMinor",
         "payCycle",
         "incomeForecast",
+        "savingsTargetOverride",
         "_legacyMonthlySalaryMinor",
       ],
     ) &&
@@ -227,6 +230,8 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
     (value.payCycle === undefined || isPayCyclePlan(value.payCycle)) &&
     (value.incomeForecast === undefined ||
       (value.payCycle !== undefined && isIncomeForecast(value.incomeForecast))) &&
+    (value.savingsTargetOverride === undefined ||
+      (value.payCycle !== undefined && isSavingsTargetOverride(value.savingsTargetOverride))) &&
     (value._legacyMonthlySalaryMinor === undefined || (
       Number.isSafeInteger(value._legacyMonthlySalaryMinor) &&
       Number(value._legacyMonthlySalaryMinor) > 0 &&
@@ -242,12 +247,27 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
 function isPayCyclePlan(value: unknown): value is PayCyclePlan {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ["paydayDay", "cycleEndBalanceGoalMinor"]) &&
     Number.isInteger(value.paydayDay) &&
     Number(value.paydayDay) >= 1 &&
     Number(value.paydayDay) <= 31 &&
-    Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
-    Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR
+    ((hasExactKeys(value, ["paydayDay", "defaultSavingsTargetMinor"]) &&
+      Number.isSafeInteger(value.defaultSavingsTargetMinor) &&
+      Number(value.defaultSavingsTargetMinor) >= 0 &&
+      Number(value.defaultSavingsTargetMinor) <= MAX_AMOUNT_MINOR) ||
+      (hasExactKeys(value, ["paydayDay", "cycleEndBalanceGoalMinor"]) &&
+        Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
+        Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR))
+  );
+}
+
+function isSavingsTargetOverride(value: unknown): value is CycleSavingsTargetOverride {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["targetPaydayDateKey", "targetMinor"]) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) >= 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR
   );
 }
 
@@ -297,6 +317,58 @@ function isRecoveryAllocation(value: unknown): value is RecoveryAllocation {
   );
 }
 
+function isSavingsEvent(value: unknown): value is SavingsEvent {
+  if (!isRecord(value) || typeof value.id !== "string" ||
+      !SYNC_ID_PATTERN.test(value.id) ||
+      !hasExactKeys(value, [
+        "id", "kind", "amountMinor", "note", "occurredAt", "localDateKey",
+        "localMonthKey", "timezoneOffsetMinutes", "createdAt", "updatedAt",
+      ], [
+        "deletedAt", "linkedExpenseEntryId", "cycleStartDateKey", "cycleEndDateKey",
+        "goalMinorSnapshot", "openingRetainedMinor", "closingRetainedMinor",
+        "netGrowthMinor", "transferToRetainedMinor",
+      ])) return false;
+  const isSettlement = value.kind === "cycle_settlement";
+  if (!(["opening", "reserve", "release", "cycle_settlement"] as unknown[]).includes(value.kind)) return false;
+  if (!Number.isSafeInteger(value.amountMinor) ||
+      Number(value.amountMinor) < (isSettlement ? 0 : 1) ||
+      Number(value.amountMinor) > MAX_AMOUNT_MINOR ||
+      typeof value.note !== "string" || value.note.length > 200 ||
+      !isIsoDate(value.occurredAt) || !isLocalDateKey(value.localDateKey) ||
+      value.localMonthKey !== value.localDateKey.slice(0, 7) ||
+      !Number.isInteger(value.timezoneOffsetMinutes) ||
+      Math.abs(Number(value.timezoneOffsetMinutes)) > 14 * 60 ||
+      !isIsoDate(value.createdAt) || !isIsoDate(value.updatedAt) ||
+      new Date(value.updatedAt).getTime() < new Date(value.createdAt).getTime() ||
+      (value.deletedAt !== undefined && (!isIsoDate(value.deletedAt) || value.deletedAt !== value.updatedAt))) {
+    return false;
+  }
+  if (!hasConsistentLocalDate(value as unknown as LedgerEntry)) return false;
+  if (value.kind === "release" && value.linkedExpenseEntryId !== undefined &&
+      (typeof value.linkedExpenseEntryId !== "string" ||
+        !SYNC_ID_PATTERN.test(value.linkedExpenseEntryId))) return false;
+  if (value.kind !== "release" && value.linkedExpenseEntryId !== undefined) return false;
+  if (!isSettlement) {
+    return value.cycleStartDateKey === undefined && value.cycleEndDateKey === undefined &&
+      value.goalMinorSnapshot === undefined && value.openingRetainedMinor === undefined &&
+      value.closingRetainedMinor === undefined && value.netGrowthMinor === undefined &&
+      value.transferToRetainedMinor === undefined;
+  }
+  return isLocalDateKey(value.cycleStartDateKey) &&
+    isLocalDateKey(value.cycleEndDateKey) &&
+    value.cycleStartDateKey <= value.cycleEndDateKey &&
+    Number.isSafeInteger(value.goalMinorSnapshot) && Number(value.goalMinorSnapshot) >= 0 &&
+    Number(value.goalMinorSnapshot) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.openingRetainedMinor) &&
+    Math.abs(Number(value.openingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.closingRetainedMinor) &&
+    Math.abs(Number(value.closingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.netGrowthMinor) &&
+    Math.abs(Number(value.netGrowthMinor)) <= MAX_AMOUNT_MINOR &&
+    Number(value.netGrowthMinor) === Number(value.closingRetainedMinor) - Number(value.openingRetainedMinor) &&
+    (value.transferToRetainedMinor === undefined || value.transferToRetainedMinor === value.amountMinor);
+}
+
 function isSyncChange(value: unknown): value is SyncChange {
   if (
     !isRecord(value) ||
@@ -317,6 +389,9 @@ function isSyncChange(value: unknown): value is SyncChange {
   }
   if (value.entityType === "recoveryAllocation") {
     return isRecoveryAllocation(value.payload) && value.payload.id === value.entityId;
+  }
+  if (value.entityType === "savingsEvent") {
+    return isSavingsEvent(value.payload) && value.payload.id === value.entityId;
   }
   return false;
 }
@@ -426,37 +501,46 @@ function isSyncResponse(value: unknown): value is SyncResponse {
   );
 }
 
-function normalizeLegacyIncomeChange(change: SyncChange, now: Date): SyncChange {
+function normalizeLegacySettingsChange(change: SyncChange, now: Date): SyncChange {
   if (change.entityType !== "settings") return change;
   const raw = change.payload as SyncSettingsResponsePayload;
   const legacySalary = raw._legacyMonthlySalaryMinor;
-  if (legacySalary === undefined) return change;
+  const legacySavingsTarget = raw.payCycle?.cycleEndBalanceGoalMinor;
+  if (legacySalary === undefined && legacySavingsTarget === undefined) return change;
 
   const settings = { ...raw };
   delete settings._legacyMonthlySalaryMinor;
-  const targetPaydayDateKey = resolveNextPaydayDateKey(settings.payCycle!.paydayDay, now);
+  if (legacySavingsTarget !== undefined && settings.payCycle) {
+    settings.payCycle = {
+      paydayDay: settings.payCycle.paydayDay,
+      defaultSavingsTargetMinor: Math.max(legacySavingsTarget, 0),
+    };
+    if (legacySavingsTarget < 0) settings.savingsTargetNeedsReview = true;
+  }
+  if (legacySalary !== undefined) {
+    const targetPaydayDateKey = resolveNextPaydayDateKey(settings.payCycle!.paydayDay, now);
+    settings.incomeForecast = {
+      id: `legacy-income-${targetPaydayDateKey}`,
+      targetPaydayDateKey,
+      minimumIncomeMinor: 0,
+      expectedIncomeMinor: legacySalary,
+    };
+  }
   return {
     ...change,
-    payload: {
-      ...settings,
-      incomeForecast: {
-        id: `legacy-income-${targetPaydayDateKey}`,
-        targetPaydayDateKey,
-        minimumIncomeMinor: 0,
-        expectedIncomeMinor: legacySalary,
-      },
-    },
-    claimLegacyIncomeForecast: true,
+    payload: settings,
+    ...(legacySalary !== undefined ? { claimLegacyIncomeForecast: true as const } : {}),
+    ...(legacySavingsTarget !== undefined ? { claimLegacySavingsTarget: true as const } : {}),
   };
 }
 
-function normalizeLegacyIncomeResponse(response: SyncResponse, now: Date): SyncResponse {
+function normalizeLegacySettingsResponse(response: SyncResponse, now: Date): SyncResponse {
   return {
     ...response,
     results: response.results.map((result) => result.status === "conflict"
-      ? { ...result, remote: normalizeLegacyIncomeChange(result.remote, now) }
+      ? { ...result, remote: normalizeLegacySettingsChange(result.remote, now) }
       : result),
-    changes: response.changes.map((change) => normalizeLegacyIncomeChange(change, now)),
+    changes: response.changes.map((change) => normalizeLegacySettingsChange(change, now)),
   };
 }
 
@@ -709,7 +793,7 @@ export function createSyncApiClient(
         },
         body: JSON.stringify(syncRequest),
       });
-      return validateSyncResponseForRequest(normalizeLegacyIncomeResponse(
+      return validateSyncResponseForRequest(normalizeLegacySettingsResponse(
         await parseJsonResponse(response, isSyncResponse),
         now(),
       ), syncRequest);

@@ -1,10 +1,12 @@
 import type {
   AppSettings,
   Attachment,
+  CycleSavingsTargetOverride,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
   RecoveryAllocation,
+  SavingsEvent,
 } from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
 import {
@@ -20,18 +22,19 @@ import {
   type LedgerDatabase,
   type LedgerReplacement,
   ledgerDb,
-  migrateLegacyIncomeSettings,
+  migrateLegacySavingsSettings,
   replaceLedgerData,
 } from "./database";
 
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
-export const BACKUP_PAYLOAD_SCHEMA_VERSION = 3 as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 4 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
 export const MAX_BACKUP_RECOVERY_ALLOCATIONS = 25_000;
+export const MAX_BACKUP_SAVINGS_EVENTS = 25_000;
 export const MAX_BACKUP_ATTACHMENTS = 2_500;
 export const MAX_BACKUP_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -101,7 +104,7 @@ interface BackupPayloadV2 {
   attachments: SerializedAttachment[];
 }
 
-interface BackupPayloadV3 {
+interface BackupPayloadV4 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
@@ -109,16 +112,19 @@ interface BackupPayloadV3 {
   entries: LedgerEntry[];
   attachments: SerializedAttachment[];
   recoveryAllocations: RecoveryAllocation[];
+  savingsEvents: SavingsEvent[];
 }
 
 export interface BackupPreview {
   exportedAt: string;
   entryCount: number;
   attachmentCount: number;
+  savingsEventCount?: number;
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
   incomeForecast?: IncomeForecast;
+  savingsTargetOverride?: CycleSavingsTargetOverride;
   currency: "CNY";
 }
 
@@ -321,7 +327,7 @@ function hasConsistentLocalDate(
   return localDateKey === expectedDateKey && localMonthKey === expectedDateKey.slice(0, 7);
 }
 
-function validatePayCycleBase(value: unknown): value is PayCyclePlan {
+function validateLegacyPayCycleBase(value: unknown): value is PayCyclePlan {
   return (
     isRecord(value) &&
     Number.isInteger(value.paydayDay) &&
@@ -332,20 +338,44 @@ function validatePayCycleBase(value: unknown): value is PayCyclePlan {
   );
 }
 
-function validatePayCycle(value: unknown): value is PayCyclePlan {
+function validatePreSavingsPayCycle(value: unknown): value is PayCyclePlan {
   return (
-    validatePayCycleBase(value) &&
+    validateLegacyPayCycleBase(value) &&
     !Object.prototype.hasOwnProperty.call(value, "monthlySalaryMinor")
   );
 }
 
-function validateLegacyPayCycle(value: unknown): value is LegacyPayCyclePlan {
+function validatePayCycle(value: unknown): value is PayCyclePlan {
   return (
-    validatePayCycleBase(value) &&
+    isRecord(value) &&
+    Number.isInteger(value.paydayDay) &&
+    Number(value.paydayDay) >= 1 &&
+    Number(value.paydayDay) <= 31 &&
+    Number.isSafeInteger(value.defaultSavingsTargetMinor) &&
+    Number(value.defaultSavingsTargetMinor) >= 0 &&
+    Number(value.defaultSavingsTargetMinor) <= MAX_AMOUNT_MINOR &&
+    !Object.prototype.hasOwnProperty.call(value, "cycleEndBalanceGoalMinor") &&
+    !Object.prototype.hasOwnProperty.call(value, "monthlySalaryMinor")
+  );
+}
+
+function validateLegacySalaryPayCycle(value: unknown): value is LegacyPayCyclePlan {
+  return (
+    validateLegacyPayCycleBase(value) &&
     isRecord(value) &&
     Number.isSafeInteger(value.monthlySalaryMinor) &&
     Number(value.monthlySalaryMinor) > 0 &&
     Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function validateSavingsTargetOverride(value: unknown): value is CycleSavingsTargetOverride {
+  return (
+    isRecord(value) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) >= 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR
   );
 }
 
@@ -379,6 +409,31 @@ function validateSettings(value: unknown): value is AppSettings {
     (value.payCycle === undefined || validatePayCycle(value.payCycle)) &&
     (value.incomeForecast === undefined ||
       (value.payCycle !== undefined && validateIncomeForecast(value.incomeForecast))) &&
+    (value.savingsTargetOverride === undefined ||
+      (value.payCycle !== undefined &&
+        validateSavingsTargetOverride(value.savingsTargetOverride))) &&
+    (value.savingsTargetNeedsReview === undefined || value.savingsTargetNeedsReview === true) &&
+    value.cycleSavingsTargetOverride === undefined &&
+    isIsoDate(value.updatedAt)
+  );
+}
+
+function validatePreSavingsSettings(value: unknown): value is AppSettings {
+  return (
+    isRecord(value) &&
+    value.id === "primary" &&
+    value.currency === "CNY" &&
+    value.schemaVersion === DATABASE_SCHEMA_VERSION &&
+    Number.isSafeInteger(value.initialBalanceMinor) &&
+    Math.abs(Number(value.initialBalanceMinor)) <= MAX_AMOUNT_MINOR &&
+    (value.monthEndBalanceGoalMinor === undefined ||
+      (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
+        Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
+    (value.payCycle === undefined || validatePreSavingsPayCycle(value.payCycle)) &&
+    (value.incomeForecast === undefined ||
+      (value.payCycle !== undefined && validateIncomeForecast(value.incomeForecast))) &&
+    value.savingsTargetOverride === undefined &&
+    value.cycleSavingsTargetOverride === undefined &&
     isIsoDate(value.updatedAt)
   );
 }
@@ -394,7 +449,7 @@ function validateLegacySettings(value: unknown): value is LegacyAppSettings {
     (value.monthEndBalanceGoalMinor === undefined ||
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
-    (value.payCycle === undefined || validateLegacyPayCycle(value.payCycle)) &&
+    (value.payCycle === undefined || validateLegacySalaryPayCycle(value.payCycle)) &&
     value.incomeForecast === undefined &&
     isIsoDate(value.updatedAt)
   );
@@ -507,26 +562,135 @@ function validateRecoveryAllocations(
   return allocations;
 }
 
-function parsePayload(value: unknown, now = new Date()): BackupPayloadV3 {
+function validateSavingsEventShape(value: unknown): value is SavingsEvent {
+  if (!isRecord(value) || typeof value.id !== "string" || !SYNC_ID_PATTERN.test(value.id)) {
+    return false;
+  }
+  const common =
+    (value.kind === "opening" || value.kind === "reserve" ||
+      value.kind === "release" || value.kind === "cycle_settlement") &&
+    Number.isSafeInteger(value.amountMinor) &&
+    Number(value.amountMinor) >= (value.kind === "cycle_settlement" ? 0 : 1) &&
+    Number(value.amountMinor) <= MAX_AMOUNT_MINOR &&
+    typeof value.note === "string" &&
+    value.note.length <= 200 &&
+    isIsoDate(value.occurredAt) &&
+    isLocalDateKey(value.localDateKey) &&
+    value.localMonthKey === value.localDateKey.slice(0, 7) &&
+    Number.isInteger(value.timezoneOffsetMinutes) &&
+    Math.abs(Number(value.timezoneOffsetMinutes)) <= 14 * 60 &&
+    hasConsistentLocalDate(
+      value.occurredAt as string,
+      value.timezoneOffsetMinutes as number,
+      value.localDateKey as string,
+      value.localMonthKey as string,
+    ) &&
+    isIsoDate(value.createdAt) &&
+    isIsoDate(value.updatedAt) &&
+    new Date(value.updatedAt).getTime() >= new Date(value.createdAt).getTime() &&
+    value.deletedAt === undefined;
+  if (!common) return false;
+  if (value.kind === "release" && value.linkedExpenseEntryId !== undefined &&
+      (typeof value.linkedExpenseEntryId !== "string" || !SYNC_ID_PATTERN.test(value.linkedExpenseEntryId))) {
+    return false;
+  }
+  if (value.kind !== "release" && value.linkedExpenseEntryId !== undefined) return false;
+  if (value.kind !== "cycle_settlement") {
+    return value.cycleStartDateKey === undefined &&
+      value.cycleEndDateKey === undefined &&
+      value.goalMinorSnapshot === undefined &&
+      value.openingRetainedMinor === undefined &&
+      value.closingRetainedMinor === undefined &&
+      value.netGrowthMinor === undefined &&
+      value.transferToRetainedMinor === undefined;
+  }
+  return (
+    isLocalDateKey(value.cycleStartDateKey) &&
+    isLocalDateKey(value.cycleEndDateKey) &&
+    value.cycleStartDateKey <= value.cycleEndDateKey &&
+    Number.isSafeInteger(value.goalMinorSnapshot) &&
+    Number(value.goalMinorSnapshot) >= 0 &&
+    Number(value.goalMinorSnapshot) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.openingRetainedMinor) &&
+    Math.abs(Number(value.openingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.closingRetainedMinor) &&
+    Math.abs(Number(value.closingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(value.netGrowthMinor) &&
+    Number(value.netGrowthMinor) ===
+      Number(value.closingRetainedMinor) - Number(value.openingRetainedMinor) &&
+    (value.transferToRetainedMinor === undefined ||
+      (Number.isSafeInteger(value.transferToRetainedMinor) &&
+        Number(value.transferToRetainedMinor) === Number(value.amountMinor)))
+  );
+}
+
+function validateSavingsEvents(
+  values: unknown[],
+  entriesById: ReadonlyMap<string, LedgerEntry>,
+): SavingsEvent[] {
+  if (values.length > MAX_BACKUP_SAVINGS_EVENTS) {
+    throw new BackupError(
+      `备份留存事件不能超过 ${MAX_BACKUP_SAVINGS_EVENTS} 条`,
+      "limit-exceeded",
+    );
+  }
+  const ids = new Set<string>();
+  const settlementCycles = new Set<string>();
+  const linkedReleaseTotals = new Map<string, bigint>();
+  const events: SavingsEvent[] = [];
+  for (const value of values) {
+    if (!validateSavingsEventShape(value) || ids.has(value.id)) {
+      throw new BackupError("备份中的留存事件无效", "invalid-payload");
+    }
+    if (value.kind === "cycle_settlement") {
+      if (settlementCycles.has(value.cycleStartDateKey)) {
+        throw new BackupError("同一周期存在多个留存结算", "invalid-payload");
+      }
+      settlementCycles.add(value.cycleStartDateKey);
+    }
+    if (value.kind === "release" && value.linkedExpenseEntryId) {
+      const linked = entriesById.get(value.linkedExpenseEntryId);
+      if (!linked || linked.amountMinor >= 0) {
+        throw new BackupError("留存取用关联的支出不存在", "invalid-payload");
+      }
+      const linkedTotal = (linkedReleaseTotals.get(linked.id) ?? 0n)
+        + BigInt(value.amountMinor);
+      if (linkedTotal > -BigInt(linked.amountMinor)) {
+        throw new BackupError("留存取用金额超过关联支出", "invalid-payload");
+      }
+      linkedReleaseTotals.set(linked.id, linkedTotal);
+    }
+    ids.add(value.id);
+    events.push(structuredClone(value));
+  }
+  return events;
+}
+
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV4 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
-  const supportedSchema = value.schemaVersion === DATABASE_SCHEMA_VERSION
-    || value.schemaVersion === 2
-    || value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
+  const schemaVersion = value.schemaVersion;
+  const supportedSchema = schemaVersion === DATABASE_SCHEMA_VERSION
+    || schemaVersion === 2
+    || schemaVersion === 3
+    || schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
   if (!supportedSchema) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
   }
-  const settingsAreValid = value.schemaVersion === DATABASE_SCHEMA_VERSION
+  const settingsAreValid = schemaVersion === DATABASE_SCHEMA_VERSION
     ? validateLegacySettings(value.settings)
-    : validateSettings(value.settings);
+    : schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
+      ? validatePreSavingsSettings(value.settings)
+      : validateSettings(value.settings);
   if (
     !isIsoDate(value.exportedAt) ||
     !settingsAreValid ||
     !Array.isArray(value.entries) ||
     !Array.isArray(value.attachments) ||
-    (value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
-      && !Array.isArray(value.recoveryAllocations))
+    (schemaVersion >= 3 && !Array.isArray(value.recoveryAllocations)) ||
+    (schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION &&
+      !Array.isArray(value.savingsEvents))
   ) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
@@ -537,7 +701,7 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV3 {
   if (value.attachments.length > MAX_BACKUP_ATTACHMENTS) {
     throw new BackupError(`备份截图不能超过 ${MAX_BACKUP_ATTACHMENTS} 张`, "limit-exceeded");
   }
-  const requireAnalysisFields = value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
+  const requireAnalysisFields = schemaVersion >= 3;
   if (!value.entries.every((entry) => validateEntry(entry, requireAnalysisFields))) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
@@ -615,14 +779,22 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV3 {
   }
 
   const recoveryAllocations = validateRecoveryAllocations(
-    value.schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
+    schemaVersion >= 3
       ? value.recoveryAllocations as unknown[]
       : [],
     entriesById,
   );
-  const settings = value.schemaVersion === DATABASE_SCHEMA_VERSION
-    ? migrateLegacyIncomeSettings((value as unknown as BackupPayloadV1).settings, now)
-    : structuredClone(value.settings as AppSettings);
+  const savingsEvents = validateSavingsEvents(
+    schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
+      ? value.savingsEvents as unknown[]
+      : [],
+    entriesById,
+  );
+  const settings = schemaVersion === DATABASE_SCHEMA_VERSION
+    ? migrateLegacySavingsSettings((value as unknown as BackupPayloadV1).settings, now)
+    : schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
+      ? migrateLegacySavingsSettings(value.settings as AppSettings, now)
+      : structuredClone(value.settings as AppSettings);
   return {
     format: BACKUP_PAYLOAD_FORMAT,
     schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
@@ -631,16 +803,18 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV3 {
     entries: normalizedEntries,
     attachments: value.attachments as BackupPayloadV2["attachments"],
     recoveryAllocations,
+    savingsEvents,
   };
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV3> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV4> {
   const snapshot = await database.transaction(
     "r",
     database.settings,
     database.entries,
     database.attachments,
     database.recoveryAllocations,
+    database.savingsEvents,
     async () => {
       const settings = await database.settings.get("primary");
       const entries = (await database.entries.toArray()).filter((entry) => !entry.deletedAt);
@@ -652,7 +826,10 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
           && entryIds.has(allocation.refundEntryId)
           && entryIds.has(allocation.expenseEntryId),
       );
-      return { settings, entries, attachments, recoveryAllocations };
+      const savingsEvents = (await database.savingsEvents.toArray()).filter(
+        (event) => !event.deletedAt,
+      );
+      return { settings, entries, attachments, recoveryAllocations, savingsEvents };
     },
   );
   if (!snapshot.settings || !validateSettings(snapshot.settings)) {
@@ -664,7 +841,14 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
   if (snapshot.attachments.length > MAX_BACKUP_ATTACHMENTS) {
     throw new BackupError(`本地截图不能超过 ${MAX_BACKUP_ATTACHMENTS} 张`, "limit-exceeded");
   }
+  if (snapshot.savingsEvents.length > MAX_BACKUP_SAVINGS_EVENTS) {
+    throw new BackupError(`本地留存事件不能超过 ${MAX_BACKUP_SAVINGS_EVENTS} 条`, "limit-exceeded");
+  }
   const entriesById = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
+  const validatedSavingsEvents = validateSavingsEvents(
+    snapshot.savingsEvents,
+    entriesById,
+  );
   const attachmentsById = new Map(snapshot.attachments.map((attachment) => [attachment.id, attachment]));
   let totalAttachmentBytes = 0;
   for (const attachment of snapshot.attachments) {
@@ -711,6 +895,7 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
     entries: snapshot.entries,
     attachments,
     recoveryAllocations: snapshot.recoveryAllocations,
+    savingsEvents: validatedSavingsEvents,
   };
 }
 
@@ -821,6 +1006,7 @@ export async function decryptBackup(
       exportedAt: payload.exportedAt,
       entryCount: payload.entries.length,
       attachmentCount: attachments.length,
+      savingsEventCount: payload.savingsEvents.length,
       initialBalanceMinor: payload.settings.initialBalanceMinor,
       monthEndBalanceGoalMinor: payload.settings.monthEndBalanceGoalMinor,
       ...(payload.settings.payCycle
@@ -829,6 +1015,9 @@ export async function decryptBackup(
       ...(payload.settings.incomeForecast
         ? { incomeForecast: structuredClone(payload.settings.incomeForecast) }
         : {}),
+      ...(payload.settings.savingsTargetOverride
+        ? { savingsTargetOverride: structuredClone(payload.settings.savingsTargetOverride) }
+        : {}),
       currency: payload.settings.currency,
     },
     replacement: {
@@ -836,6 +1025,7 @@ export async function decryptBackup(
       entries: structuredClone(payload.entries),
       attachments,
       recoveryAllocations: structuredClone(payload.recoveryAllocations),
+      savingsEvents: structuredClone(payload.savingsEvents),
     },
   };
 }
@@ -861,6 +1051,7 @@ export async function restorePreparedBackup(
       dataBase64: "AA==",
     })),
     recoveryAllocations: prepared.replacement.recoveryAllocations,
+    savingsEvents: prepared.replacement.savingsEvents ?? [],
   };
   try {
     parsePayload(payload);

@@ -65,7 +65,7 @@ function treatmentBadge(entry: LedgerEntry): string | undefined {
     case "refund_reimbursement":
       return "退款";
     case "account_transfer":
-      return "账户转账";
+      return "账户间转账";
     default:
       return undefined;
   }

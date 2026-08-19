@@ -21,6 +21,7 @@ import {
 import {
   entryToLocalDateTimeInput,
   formatCny,
+  savingsTargetFromPlan,
   type AppSettings,
   type Attachment,
   type LedgerEntry,
@@ -141,7 +142,7 @@ function formatEntryConflict(entry: LedgerEntry): string {
 
 function formatSettingsConflict(settings: AppSettings): string {
   const plan = settings.payCycle
-    ? `每月 ${settings.payCycle.paydayDay} 日发薪，周期底线 ${formatCny(settings.payCycle.cycleEndBalanceGoalMinor)}`
+    ? `每月 ${settings.payCycle.paydayDay} 日发薪，每周期留存 ${formatCny(savingsTargetFromPlan(settings.payCycle))}`
     : settings.monthEndBalanceGoalMinor === undefined
       ? "发薪周期未设置"
       : `旧版自然月底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;

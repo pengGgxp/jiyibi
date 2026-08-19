@@ -4,6 +4,7 @@ import {
   getSettings,
   listActiveEntries,
   listActiveRecoveryAllocations,
+  listActiveSavingsEvents,
 } from "../data";
 import {
   calculateLedgerSummary,
@@ -16,6 +17,7 @@ import {
   type LedgerSummary,
   type PayCycleStatus,
   type RecoveryAllocation,
+  type SavingsEvent,
   type SpendingAnalysis,
 } from "../domain";
 
@@ -23,6 +25,7 @@ interface LedgerSnapshot {
   entries: LedgerEntry[];
   settings: AppSettings;
   allocations: RecoveryAllocation[];
+  savingsEvents: SavingsEvent[];
 }
 
 export interface LedgerState {
@@ -31,6 +34,7 @@ export interface LedgerState {
   summary?: LedgerSummary;
   payCycleStatus?: PayCycleStatus;
   analysis?: SpendingAnalysis;
+  savingsEvents: SavingsEvent[];
   analysisError?: Error;
   loading: boolean;
   error?: Error;
@@ -43,12 +47,13 @@ export function useLedger(): LedgerState {
 
   useEffect(() => {
     const subscription = liveQuery(async () => {
-      const [entries, settings, allocations] = await Promise.all([
+      const [entries, settings, allocations, savingsEvents] = await Promise.all([
         listActiveEntries(),
         getSettings(),
         listActiveRecoveryAllocations(),
+        listActiveSavingsEvents(),
       ]);
-      return { entries, settings, allocations };
+      return { entries, settings, allocations, savingsEvents };
     }).subscribe({
       next: (nextSnapshot) => {
         setSnapshot(nextSnapshot);
@@ -129,6 +134,10 @@ export function useLedger(): LedgerState {
           snapshot.settings.incomeForecast,
           new Date(year, month - 1, day, 12),
           snapshot.allocations,
+          {
+            savingsEvents: snapshot.savingsEvents,
+            targetOverride: snapshot.settings.savingsTargetOverride,
+          },
         ),
       };
     } catch (reason) {
@@ -142,6 +151,7 @@ export function useLedger(): LedgerState {
 
   return {
     entries: snapshot?.entries ?? [],
+    savingsEvents: snapshot?.savingsEvents ?? [],
     settings: snapshot?.settings,
     summary,
     payCycleStatus,

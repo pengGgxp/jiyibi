@@ -85,7 +85,8 @@ describe("representative test ledgers (spec §7)", () => {
     const analysis = analyze(testLedgers.deletedAndFuture);
     expect(analysis.window.startDateKey).toBe("2026-07-12");
     expect(analysis.window.totalExpenseMinor).toBe(300);
-    expect(analysis.currentCycle.actualExpenseMinor).toBe(400);
+    // On the due date, the ending cycle still includes prior-cycle outflows and today.
+    expect(analysis.currentCycle.actualExpenseMinor).toBe(700);
     expect(analysis.dailyExpenses.some((day) => day.expenseMinor === 50_000)).toBe(false);
     expect(analysis.dailyExpenses.some((day) => day.expenseMinor === 70_000)).toBe(false);
   });

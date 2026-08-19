@@ -935,6 +935,79 @@ input::placeholder {
   font-variant-numeric: tabular-nums;
 }
 
+.summary-savings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 1rem;
+  margin: 1rem 0 0;
+  padding-block: 0.85rem;
+  border-block: 1px solid rgb(232 243 237 / 0.17);
+}
+
+.summary-savings-grid > div {
+  min-width: 0;
+}
+
+.summary-savings-grid dt,
+.summary-savings-grid dd {
+  overflow-wrap: anywhere;
+}
+
+.summary-savings-grid dt {
+  color: #aebfb6;
+  font-size: 0.65rem;
+}
+
+.summary-savings-grid dd {
+  margin-top: 0.18rem;
+  color: #f4f9f6;
+  font-size: 0.78rem;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-savings-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin-top: 0.65rem !important;
+  color: #f5d59b;
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.summary-savings-warning svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 0.95rem;
+  margin-top: 0.05rem;
+}
+
+.summary-savings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.45rem;
+}
+
+.summary-savings-actions .secondary-button,
+.summary-savings-actions .text-button {
+  min-height: 2.75rem;
+  padding-inline: 0.65rem;
+  color: #edf5f1;
+  font-size: 0.7rem;
+}
+
+.summary-savings-actions .secondary-button {
+  background: rgb(238 247 242 / 0.1);
+  box-shadow: inset 0 0 0 1px rgb(232 243 237 / 0.2);
+}
+
+.summary-savings-actions svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
 .initial-balance {
   margin-top: 0.45rem !important;
   color: #aebfb6;
@@ -1799,7 +1872,9 @@ input::placeholder {
 }
 
 .income-dialog-form,
-.income-dialog-fields {
+.income-dialog-fields,
+.income-settlement-fields,
+.savings-dialog-form {
   display: grid;
   gap: 1rem;
 }
@@ -1841,6 +1916,39 @@ input::placeholder {
   margin-top: 0.15rem;
   color: var(--ink-soft);
   font-size: 0.84rem;
+}
+
+.income-target-date--editable {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(9.5rem, auto);
+}
+
+.income-target-date--editable label small,
+.income-target-date--editable label span {
+  display: block;
+}
+
+.income-target-date--editable label span,
+.income-target-date--editable > p {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.income-target-date--editable input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.55rem 0.65rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+
+.income-target-date--editable > p {
+  grid-column: 2 / -1;
+  margin: -0.25rem 0 0;
 }
 
 .income-dialog-fields > .field-help {
@@ -2258,6 +2366,130 @@ input::placeholder {
   gap: 0.7rem;
   align-items: end;
   margin-top: 1rem;
+}
+
+.income-settlement-summary,
+.savings-settlement-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0.75rem 0.8rem;
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.savings-settlement-summary {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+}
+
+.income-settlement-summary div,
+.savings-settlement-summary div {
+  min-width: 0;
+}
+
+.income-settlement-summary dt,
+.savings-settlement-summary dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.income-settlement-summary dd,
+.savings-settlement-summary dd {
+  margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+}
+
+.savings-balance-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.75rem 0.8rem;
+  background: var(--surface-quiet);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.savings-balance-note svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  color: var(--brand);
+}
+
+.savings-balance-note span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.savings-balance-note strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.segmented-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.segmented-field legend {
+  margin-bottom: 0.4rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.2rem;
+  padding: 0.2rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.segmented-control button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.6rem;
+  color: var(--muted-strong);
+  background: transparent;
+  border-radius: 5px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.segmented-control button.is-active {
+  color: var(--ink-soft);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(18 38 29 / 0.12);
+}
+
+.segmented-control svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 0.9rem;
+}
+
+.settings-subform {
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
 }
 
 .goal-setting-form {
@@ -2926,8 +3158,13 @@ input::placeholder {
 }
 
 @media (max-width: 39.99rem) {
+  .app-header {
+    min-height: 3.5rem;
+    padding-block: max(0.35rem, env(safe-area-inset-top)) 0.35rem;
+  }
+
   .primary-navigation {
-    padding-top: 0.35rem;
+    padding-top: 0;
   }
 
   .primary-navigation-link {
@@ -2937,6 +3174,96 @@ input::placeholder {
 
   .workspace-grid .summary-panel {
     order: -1;
+    padding: 0.75rem;
+  }
+
+  main {
+    padding-top: 0.6rem;
+  }
+
+  .workspace-grid {
+    gap: 0.65rem;
+  }
+
+  .composer-panel {
+    padding: 1rem;
+  }
+
+  .composer-panel .section-heading {
+    margin-bottom: 0.75rem;
+  }
+
+  /* Keep the mobile first screen focused on the balance decision and the
+     quick-entry action; longer explanations remain available in analysis. */
+  .summary-panel .balance-value {
+    margin-top: 0.25rem !important;
+    font-size: 1.75rem;
+  }
+
+  .summary-savings-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.25rem 0.55rem;
+    margin-top: 0.3rem;
+    padding-block: 0.35rem;
+  }
+
+  .summary-savings-grid dt {
+    font-size: 0.58rem;
+  }
+
+  .summary-savings-grid dd {
+    margin-top: 0.1rem;
+    font-size: 0.68rem;
+  }
+
+  .summary-savings-actions {
+    margin-top: 0.2rem;
+  }
+
+  .summary-confidence {
+    display: none;
+  }
+
+  .summary-forecast-list {
+    margin-top: 0.25rem;
+  }
+
+  .summary-forecast {
+    padding-block: 0.35rem;
+  }
+
+  .summary-forecast > p {
+    display: none;
+  }
+
+  .summary-income-scenarios {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-column: 1 / -1;
+    gap: 0.3rem;
+    margin-top: 0.2rem;
+  }
+
+  .summary-income-scenario {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 0.25rem 0.35rem;
+  }
+
+  .summary-income-scenario > span {
+    display: block;
+  }
+
+  .summary-income-scenario strong {
+    display: block;
+    margin-top: 0.12rem;
+    text-align: left;
+  }
+
+  .summary-income-scenario p {
+    display: none;
+  }
+
+  .summary-allowance > div {
+    padding-block: 0.35rem 0.15rem;
   }
 
   .local-status span {
@@ -2971,6 +3298,27 @@ input::placeholder {
 
   .income-dialog-fields {
     grid-template-columns: 1fr;
+  }
+
+  .income-settlement-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .income-settlement-summary > div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .savings-settlement-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .income-target-date--editable {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .income-target-date--editable input,
+  .income-target-date--editable > p {
+    grid-column: 2;
   }
 
   .income-dialog-fields > .field-help {

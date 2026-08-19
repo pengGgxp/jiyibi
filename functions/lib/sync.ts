@@ -7,6 +7,7 @@ import type {
   LedgerEntryPayload,
   MutationResult,
   RecoveryAllocationPayload,
+  SavingsEventPayload,
   RemoteChange,
   SettingsMutationPayload,
   SyncAppSettingsPayload,
@@ -21,7 +22,7 @@ const CHANGE_PAGE_SIZE = 100;
 interface ChangeRow {
   cursor: string;
   mutation_id: string;
-  entity_type: "entry" | "settings" | "recoveryAllocation";
+  entity_type: "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
   entity_id: string;
   entity_version: number;
   mutation_hash: string;
@@ -37,6 +38,9 @@ interface ChangeRow {
   settings_income_forecast_target_payday_date_key?: string | null;
   settings_minimum_income_minor?: number | null;
   settings_expected_income_minor?: number | null;
+  settings_default_savings_target_minor?: number | null;
+  settings_savings_override_target_payday_date_key?: string | null;
+  settings_savings_override_target_minor?: number | null;
   settings_schema_version?: number | null;
   settings_updated_at?: string | null;
   entry_id?: string | null;
@@ -54,6 +58,24 @@ interface ChangeRow {
   entry_created_at?: string | null;
   entry_updated_at?: string | null;
   entry_deleted_at?: string | null;
+  savings_id?: string | null;
+  savings_kind?: string | null;
+  savings_amount_minor?: number | null;
+  savings_note?: string | null;
+  savings_occurred_at?: string | null;
+  savings_local_date_key?: string | null;
+  savings_local_month_key?: string | null;
+  savings_timezone_offset_minutes?: number | null;
+  savings_linked_expense_entry_id?: string | null;
+  savings_cycle_start_date_key?: string | null;
+  savings_cycle_end_date_key?: string | null;
+  savings_goal_minor_snapshot?: number | null;
+  savings_opening_retained_minor?: number | null;
+  savings_closing_retained_minor?: number | null;
+  savings_net_growth_minor?: number | null;
+  savings_created_at?: string | null;
+  savings_updated_at?: string | null;
+  savings_deleted_at?: string | null;
 }
 
 const SETTINGS_PROJECTION_COLUMNS = `
@@ -69,6 +91,10 @@ const SETTINGS_PROJECTION_COLUMNS = `
     AS settings_income_forecast_target_payday_date_key,
   current_settings.minimum_income_minor AS settings_minimum_income_minor,
   current_settings.expected_income_minor AS settings_expected_income_minor,
+  current_settings.default_savings_target_minor AS settings_default_savings_target_minor,
+  current_settings.savings_override_target_payday_date_key
+    AS settings_savings_override_target_payday_date_key,
+  current_settings.savings_override_target_minor AS settings_savings_override_target_minor,
   current_settings.schema_version AS settings_schema_version,
   current_settings.updated_at AS settings_updated_at`;
 
@@ -103,6 +129,33 @@ const ENTRY_PROJECTION_JOIN = `
    AND current_entry.account_generation = current_change.account_generation
    AND current_entry.id = current_change.entity_id`;
 
+const SAVINGS_PROJECTION_COLUMNS = `
+  current_savings.id AS savings_id,
+  current_savings.kind AS savings_kind,
+  current_savings.amount_minor AS savings_amount_minor,
+  current_savings.note AS savings_note,
+  current_savings.occurred_at AS savings_occurred_at,
+  current_savings.local_date_key AS savings_local_date_key,
+  current_savings.local_month_key AS savings_local_month_key,
+  current_savings.timezone_offset_minutes AS savings_timezone_offset_minutes,
+  current_savings.linked_expense_entry_id AS savings_linked_expense_entry_id,
+  current_savings.cycle_start_date_key AS savings_cycle_start_date_key,
+  current_savings.cycle_end_date_key AS savings_cycle_end_date_key,
+  current_savings.goal_minor_snapshot AS savings_goal_minor_snapshot,
+  current_savings.opening_retained_minor AS savings_opening_retained_minor,
+  current_savings.closing_retained_minor AS savings_closing_retained_minor,
+  current_savings.net_growth_minor AS savings_net_growth_minor,
+  current_savings.created_at AS savings_created_at,
+  current_savings.updated_at AS savings_updated_at,
+  current_savings.deleted_at AS savings_deleted_at`;
+
+const SAVINGS_PROJECTION_JOIN = `
+  LEFT JOIN savings_events AS current_savings
+    ON current_change.entity_type = 'savingsEvent'
+   AND current_savings.user_id = current_change.user_id
+   AND current_savings.account_generation = current_change.account_generation
+   AND current_savings.id = current_change.entity_id`;
+
 interface VersionRow {
   version: number;
 }
@@ -110,17 +163,20 @@ interface VersionRow {
 function payloadFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
-): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload | RecoveryAllocationPayload {
+): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload | RecoveryAllocationPayload | SavingsEventPayload {
   try {
     const payload = JSON.parse(row.payload_json) as unknown;
     if (row.entity_type === "recoveryAllocation") {
       return payload as RecoveryAllocationPayload;
     }
+    if (row.entity_type === "savingsEvent") {
+      return savingsEventPayloadFromRow(row) ?? payload as SavingsEventPayload;
+    }
     if (row.entity_type === "entry") {
       return entryPayloadFromRow(row, protocolVersion) ?? payload as LedgerEntryPayload;
     }
     return projectSettingsPayload(
-      settingsPayloadFromRow(row) ?? payload,
+      settingsPayloadFromRow(row, protocolVersion) ?? payload,
       protocolVersion,
     );
   } catch {
@@ -163,7 +219,39 @@ function entryPayloadFromRow(
   return payload;
 }
 
-function settingsPayloadFromRow(row: ChangeRow): Record<string, unknown> | null {
+function savingsEventPayloadFromRow(row: ChangeRow): SavingsEventPayload | null {
+  if (typeof row.savings_id !== "string" || typeof row.savings_kind !== "string") return null;
+  const payload: SavingsEventPayload = {
+    id: row.savings_id,
+    kind: row.savings_kind as SavingsEventPayload["kind"],
+    amountMinor: Number(row.savings_amount_minor),
+    note: String(row.savings_note ?? ""),
+    occurredAt: String(row.savings_occurred_at),
+    localDateKey: String(row.savings_local_date_key),
+    localMonthKey: String(row.savings_local_month_key),
+    timezoneOffsetMinutes: Number(row.savings_timezone_offset_minutes),
+    createdAt: String(row.savings_created_at),
+    updatedAt: String(row.savings_updated_at),
+  };
+  if (row.savings_linked_expense_entry_id) {
+    payload.linkedExpenseEntryId = row.savings_linked_expense_entry_id;
+  }
+  if (row.savings_cycle_start_date_key) {
+    payload.cycleStartDateKey = row.savings_cycle_start_date_key;
+    payload.cycleEndDateKey = String(row.savings_cycle_end_date_key);
+    payload.goalMinorSnapshot = Number(row.savings_goal_minor_snapshot);
+    payload.openingRetainedMinor = Number(row.savings_opening_retained_minor);
+    payload.closingRetainedMinor = Number(row.savings_closing_retained_minor);
+    payload.netGrowthMinor = Number(row.savings_net_growth_minor);
+  }
+  if (row.savings_deleted_at) payload.deletedAt = row.savings_deleted_at;
+  return payload;
+}
+
+function settingsPayloadFromRow(
+  row: ChangeRow,
+  protocolVersion: SyncProtocolVersion,
+): Record<string, unknown> | null {
   // Unit-test doubles and pre-v4 code paths may not include the joined columns.
   // In production a settings change always has a current ledger_settings row.
   if (typeof row.settings_id !== "string") return null;
@@ -178,7 +266,15 @@ function settingsPayloadFromRow(row: ChangeRow): Record<string, unknown> | null 
       row.settings_month_end_balance_goal_minor !== undefined) {
     payload.monthEndBalanceGoalMinor = row.settings_month_end_balance_goal_minor;
   }
-  if (row.settings_payday_day !== null && row.settings_payday_day !== undefined &&
+  if (protocolVersion >= 6 &&
+      row.settings_payday_day !== null && row.settings_payday_day !== undefined &&
+      (row.settings_default_savings_target_minor !== null &&
+        row.settings_default_savings_target_minor !== undefined)) {
+    payload.payCycle = {
+      paydayDay: row.settings_payday_day,
+      defaultSavingsTargetMinor: row.settings_default_savings_target_minor,
+    };
+  } else if (row.settings_payday_day !== null && row.settings_payday_day !== undefined &&
       row.settings_cycle_end_balance_goal_minor !== null &&
       row.settings_cycle_end_balance_goal_minor !== undefined) {
     payload.payCycle = {
@@ -194,6 +290,15 @@ function settingsPayloadFromRow(row: ChangeRow): Record<string, unknown> | null 
       targetPaydayDateKey: row.settings_income_forecast_target_payday_date_key,
       minimumIncomeMinor: row.settings_minimum_income_minor,
       expectedIncomeMinor: row.settings_expected_income_minor,
+    };
+  }
+  if (row.settings_savings_override_target_payday_date_key !== null &&
+      row.settings_savings_override_target_payday_date_key !== undefined &&
+      row.settings_savings_override_target_minor !== null &&
+      row.settings_savings_override_target_minor !== undefined) {
+    payload.savingsTargetOverride = {
+      targetPaydayDateKey: row.settings_savings_override_target_payday_date_key,
+      targetMinor: row.settings_savings_override_target_minor,
     };
   }
   if (row.settings_monthly_salary_minor !== null &&
@@ -225,10 +330,28 @@ function projectSettingsPayload(
   }
 
   const storedCycle = isRecord(value.payCycle) ? value.payCycle : undefined;
-  const canonicalCycle = storedCycle
+  const storedLegacyGoal = storedCycle && Number.isSafeInteger(
+    storedCycle.cycleEndBalanceGoalMinor,
+  )
+    ? Number(storedCycle.cycleEndBalanceGoalMinor)
+    : storedCycle && Number.isSafeInteger(storedCycle.defaultSavingsTargetMinor)
+      ? Number(storedCycle.defaultSavingsTargetMinor)
+      : undefined;
+  const legacyCycle = storedCycle && storedLegacyGoal !== undefined
     ? {
         paydayDay: storedCycle.paydayDay as number,
-        cycleEndBalanceGoalMinor: storedCycle.cycleEndBalanceGoalMinor as number,
+        cycleEndBalanceGoalMinor: storedLegacyGoal,
+      }
+    : undefined;
+  const targetFromStored = storedCycle && Number.isSafeInteger(storedCycle.defaultSavingsTargetMinor)
+    ? Number(storedCycle.defaultSavingsTargetMinor)
+    : legacyCycle
+      ? Math.max(legacyCycle.cycleEndBalanceGoalMinor, 0)
+      : undefined;
+  const canonicalCycle = storedCycle && targetFromStored !== undefined
+    ? {
+        paydayDay: storedCycle.paydayDay as number,
+        defaultSavingsTargetMinor: targetFromStored,
       }
     : undefined;
   const forecast = isRecord(value.incomeForecast)
@@ -240,20 +363,30 @@ function projectSettingsPayload(
     ? value._legacyMonthlySalaryMinor
     : storedCycle?.monthlySalaryMinor;
 
-  if (protocolVersion === 3 && canonicalCycle) {
+  if (protocolVersion === 3 && legacyCycle) {
     if (Number.isSafeInteger(legacySalary) && Number(legacySalary) > 0) {
       (base as LegacyAppSettingsPayload).payCycle = {
-        ...canonicalCycle,
+        ...legacyCycle,
         monthlySalaryMinor: Number(legacySalary),
       } satisfies LegacyPayCyclePlanPayload;
     }
   }
 
-  if (protocolVersion >= 4) {
-    if (canonicalCycle) base.payCycle = canonicalCycle;
+  if (protocolVersion >= 4 && protocolVersion < 6) {
+    if (legacyCycle) (base as unknown as Record<string, unknown>).payCycle = legacyCycle;
     if (forecast) base.incomeForecast = forecast;
     if (!forecast && Number.isSafeInteger(legacySalary) && Number(legacySalary) > 0) {
       base._legacyMonthlySalaryMinor = Number(legacySalary);
+    }
+  }
+  if (protocolVersion >= 6) {
+    if (canonicalCycle) base.payCycle = canonicalCycle;
+    if (forecast) base.incomeForecast = forecast;
+    if (isRecord(value.savingsTargetOverride)) {
+      base.savingsTargetOverride = {
+        targetPaydayDateKey: value.savingsTargetOverride.targetPaydayDateKey as string,
+        targetMinor: value.savingsTargetOverride.targetMinor as number,
+      };
     }
   }
   return base;
@@ -295,7 +428,8 @@ function changeFromRow(
   if (
     row.entity_type !== "entry" &&
     row.entity_type !== "settings" &&
-    row.entity_type !== "recoveryAllocation"
+    row.entity_type !== "recoveryAllocation" &&
+    row.entity_type !== "savingsEvent"
   ) {
     throw new Error("Stored sync entity type is invalid");
   }
@@ -343,10 +477,12 @@ async function latestRemoteChange(
               current_change.mutation_hash,
               current_change.payload_json,
               ${SETTINGS_PROJECTION_COLUMNS},
-              ${ENTRY_PROJECTION_COLUMNS}
+              ${ENTRY_PROJECTION_COLUMNS},
+              ${SAVINGS_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
        ${ENTRY_PROJECTION_JOIN}
+       ${SAVINGS_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
          AND current_change.account_generation = ?
          AND current_change.entity_type = ?
@@ -592,6 +728,79 @@ async function writeRecoveryAllocation(
     .first<VersionRow>();
 }
 
+async function writeSavingsEvent(
+  db: D1Database,
+  userId: string,
+  generation: number,
+  mutation: SyncMutation,
+): Promise<VersionRow | null> {
+  const event = mutation.payload as SavingsEventPayload;
+  const now = new Date().toISOString();
+  const mutationHash = await syncMutationHash(mutation);
+  const values = [
+    event.kind,
+    event.amountMinor,
+    event.note,
+    event.occurredAt,
+    event.localDateKey,
+    event.localMonthKey,
+    event.timezoneOffsetMinutes,
+    event.linkedExpenseEntryId ?? null,
+    event.cycleStartDateKey ?? null,
+    event.cycleEndDateKey ?? null,
+    event.goalMinorSnapshot ?? null,
+    event.openingRetainedMinor ?? null,
+    event.closingRetainedMinor ?? null,
+    event.netGrowthMinor ?? null,
+    event.createdAt,
+    event.updatedAt,
+    event.deletedAt ?? null,
+  ] as const;
+  if (mutation.baseVersion === 0) {
+    return db
+      .prepare(
+        `INSERT INTO savings_events (
+           user_id, account_generation, id, kind, amount_minor, note,
+           occurred_at, local_date_key, local_month_key, timezone_offset_minutes,
+           linked_expense_entry_id, cycle_start_date_key, cycle_end_date_key,
+           goal_minor_snapshot, opening_retained_minor, closing_retained_minor,
+           net_growth_minor, created_at, updated_at, deleted_at, version,
+           last_mutation_id, last_mutation_hash, server_updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ON CONFLICT(user_id, id) DO NOTHING
+         RETURNING version`,
+      )
+      .bind(userId, generation, event.id, ...values, mutation.id, mutationHash, now)
+      .first<VersionRow>();
+  }
+  return db
+    .prepare(
+      `UPDATE savings_events SET
+         kind = ?, amount_minor = ?, note = ?, occurred_at = ?,
+         local_date_key = ?, local_month_key = ?, timezone_offset_minutes = ?,
+         linked_expense_entry_id = ?, cycle_start_date_key = ?, cycle_end_date_key = ?,
+         goal_minor_snapshot = ?, opening_retained_minor = ?,
+         closing_retained_minor = ?, net_growth_minor = ?, created_at = ?,
+         updated_at = ?, deleted_at = ?, version = version + 1,
+         last_mutation_id = ?, last_mutation_hash = ?, server_updated_at = ?
+       WHERE user_id = ? AND account_generation = ? AND id = ? AND version = ?
+         AND last_mutation_id <> ?
+       RETURNING version`,
+    )
+    .bind(
+      ...values,
+      mutation.id,
+      mutationHash,
+      now,
+      userId,
+      generation,
+      event.id,
+      mutation.baseVersion,
+      mutation.id,
+    )
+    .first<VersionRow>();
+}
+
 async function writeSettings(
   db: D1Database,
   userId: string,
@@ -610,8 +819,18 @@ async function writeSettings(
   const writesForecast = protocolVersion >= 4 &&
     Object.prototype.hasOwnProperty.call(settings, "incomeForecast");
   const incomeForecast = settings.incomeForecast ?? null;
+  const writesSavingsOverride = protocolVersion >= 6 &&
+    Object.prototype.hasOwnProperty.call(settings, "savingsTargetOverride");
+  const savingsTargetOverride = settings.savingsTargetOverride ?? null;
+  const writesCanonicalSavingsPlan = protocolVersion >= 6 && writesPayCycle;
   const legacyPayCycle = protocolVersion === 3 && payCycle
     ? payCycle as LegacyPayCyclePlanPayload
+    : null;
+  const legacyCycleGoal = payCycle && "cycleEndBalanceGoalMinor" in payCycle
+    ? payCycle.cycleEndBalanceGoalMinor
+    : null;
+  const canonicalSavingsTarget = payCycle && "defaultSavingsTargetMinor" in payCycle
+    ? payCycle.defaultSavingsTargetMinor
     : null;
   const writesCompatibilitySalary = (protocolVersion === 3 && writesPayCycle) ||
     writesForecast ||
@@ -621,8 +840,7 @@ async function writeSettings(
     : incomeForecast && incomeForecast.expectedIncomeMinor > 0
       ? incomeForecast.expectedIncomeMinor
       : null;
-  const writesCanonicalPayCycle = protocolVersion >= 4 && writesPayCycle;
-  const suppliesCanonicalPayCycle = writesCanonicalPayCycle && payCycle !== null;
+  const suppliesPayCycle = writesPayCycle && payCycle !== null;
   if (mutation.baseVersion === 0) {
     return db
       .prepare(
@@ -631,9 +849,11 @@ async function writeSettings(
            month_end_balance_goal_minor, payday_day, monthly_salary_minor,
            cycle_end_balance_goal_minor, income_forecast_id,
            income_forecast_target_payday_date_key, minimum_income_minor,
-           expected_income_minor, schema_version, updated_at, version,
+           expected_income_minor, default_savings_target_minor,
+           savings_override_target_payday_date_key, savings_override_target_minor,
+           schema_version, updated_at, version,
            last_mutation_id, last_mutation_hash, server_updated_at
-         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
+         ) VALUES (?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id) DO NOTHING
          RETURNING version`,
       )
@@ -644,11 +864,14 @@ async function writeSettings(
         writesGoal ? settings.monthEndBalanceGoalMinor ?? null : null,
         writesPayCycle ? payCycle?.paydayDay ?? null : null,
         writesCompatibilitySalary ? compatibilitySalary : null,
-        writesPayCycle ? payCycle?.cycleEndBalanceGoalMinor ?? null : null,
+        writesPayCycle ? legacyCycleGoal ?? canonicalSavingsTarget ?? null : null,
         writesForecast ? incomeForecast?.id ?? null : null,
         writesForecast ? incomeForecast?.targetPaydayDateKey ?? null : null,
         writesForecast ? incomeForecast?.minimumIncomeMinor ?? null : null,
         writesForecast ? incomeForecast?.expectedIncomeMinor ?? null : null,
+        writesCanonicalSavingsPlan ? canonicalSavingsTarget : null,
+        writesSavingsOverride ? savingsTargetOverride?.targetPaydayDateKey ?? null : null,
+        writesSavingsOverride ? savingsTargetOverride?.targetMinor ?? null : null,
         settings.updatedAt,
         mutation.id,
         mutationHash,
@@ -662,7 +885,10 @@ async function writeSettings(
          currency = 'CNY', initial_balance_minor = ?,
          month_end_balance_goal_minor = CASE WHEN ? = 1 THEN ?
            ELSE month_end_balance_goal_minor END,
-         payday_day = CASE WHEN ? = 1 THEN ? ELSE payday_day END,
+         payday_day = CASE
+           WHEN ? = 1 AND (? = 1 OR ? IS NOT NULL
+             OR default_savings_target_minor IS NULL) THEN ?
+           ELSE payday_day END,
          monthly_salary_minor = CASE
            WHEN ? = 1 AND (? IS NULL OR ? = 1 OR payday_day IS NOT NULL) THEN ?
            ELSE monthly_salary_minor END,
@@ -673,6 +899,12 @@ async function writeSettings(
            ELSE income_forecast_target_payday_date_key END,
          minimum_income_minor = CASE WHEN ? = 1 THEN ? ELSE minimum_income_minor END,
          expected_income_minor = CASE WHEN ? = 1 THEN ? ELSE expected_income_minor END,
+         default_savings_target_minor = CASE WHEN ? = 1 THEN ?
+           ELSE default_savings_target_minor END,
+         savings_override_target_payday_date_key = CASE WHEN ? = 1 THEN ?
+           ELSE savings_override_target_payday_date_key END,
+         savings_override_target_minor = CASE WHEN ? = 1 THEN ?
+           ELSE savings_override_target_minor END,
          schema_version = 1, updated_at = ?, version = version + 1, last_mutation_id = ?,
          last_mutation_hash = ?, server_updated_at = ?
        WHERE user_id = ? AND account_generation = ?
@@ -683,14 +915,16 @@ async function writeSettings(
       settings.initialBalanceMinor,
       writesGoal ? 1 : 0,
       settings.monthEndBalanceGoalMinor ?? null,
-      writesCanonicalPayCycle ? 1 : 0,
+      writesPayCycle ? 1 : 0,
+      protocolVersion >= 6 ? 1 : 0,
+      payCycle?.paydayDay ?? null,
       payCycle?.paydayDay ?? null,
       writesCompatibilitySalary ? 1 : 0,
       compatibilitySalary,
-      suppliesCanonicalPayCycle ? 1 : 0,
+      suppliesPayCycle ? 1 : 0,
       compatibilitySalary,
-      writesCanonicalPayCycle ? 1 : 0,
-      payCycle?.cycleEndBalanceGoalMinor ?? null,
+      writesPayCycle ? 1 : 0,
+      legacyCycleGoal ?? canonicalSavingsTarget ?? null,
       writesForecast ? 1 : 0,
       incomeForecast?.id ?? null,
       writesForecast ? 1 : 0,
@@ -699,6 +933,12 @@ async function writeSettings(
       incomeForecast?.minimumIncomeMinor ?? null,
       writesForecast ? 1 : 0,
       incomeForecast?.expectedIncomeMinor ?? null,
+      writesCanonicalSavingsPlan ? 1 : 0,
+      canonicalSavingsTarget,
+      writesSavingsOverride ? 1 : 0,
+      savingsTargetOverride?.targetPaydayDateKey ?? null,
+      writesSavingsOverride ? 1 : 0,
+      savingsTargetOverride?.targetMinor ?? null,
       settings.updatedAt,
       mutation.id,
       mutationHash,
@@ -740,6 +980,8 @@ export async function applyMutation(
       written = await writeEntry(db, userId, generation, mutation);
     } else if (mutation.entityType === "recoveryAllocation") {
       written = await writeRecoveryAllocation(db, userId, generation, mutation);
+    } else if (mutation.entityType === "savingsEvent") {
+      written = await writeSavingsEvent(db, userId, generation, mutation);
     } else {
       written = await writeSettings(db, userId, generation, mutation, protocolVersion);
     }
@@ -813,14 +1055,17 @@ export async function pullChanges(
               current_change.mutation_hash,
               current_change.payload_json,
               ${SETTINGS_PROJECTION_COLUMNS},
-              ${ENTRY_PROJECTION_COLUMNS}
+              ${ENTRY_PROJECTION_COLUMNS},
+              ${SAVINGS_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
        ${ENTRY_PROJECTION_JOIN}
+       ${SAVINGS_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
           AND current_change.account_generation = ?
          AND current_change.seq > CAST(? AS INTEGER)
          AND (? >= 5 OR current_change.entity_type <> 'recoveryAllocation')
+         AND (? >= 6 OR current_change.entity_type <> 'savingsEvent')
          AND NOT EXISTS (
            SELECT 1
            FROM sync_changes AS newer_change
@@ -833,7 +1078,7 @@ export async function pullChanges(
        ORDER BY current_change.seq ASC
        LIMIT ?`,
     )
-    .bind(userId, generation, cursor, protocolVersion, CHANGE_PAGE_SIZE + 1)
+    .bind(userId, generation, cursor, protocolVersion, protocolVersion, CHANGE_PAGE_SIZE + 1)
     .all<ChangeRow>();
   const hasMore = result.results.length > CHANGE_PAGE_SIZE;
   const page = result.results.slice(0, CHANGE_PAGE_SIZE);
@@ -875,14 +1120,16 @@ export async function assertLegacyClientCompatible(
   generation: number,
   protocolVersion: SyncProtocolVersion,
 ): Promise<void> {
-  if (protocolVersion >= 5) return;
+  if (protocolVersion >= 6) return;
+  const checksV5Semantics = protocolVersion < 5;
   const row = await db
     .prepare(
       `SELECT CASE WHEN EXISTS (
          SELECT 1 FROM ledger_entries
          WHERE user_id = ? AND account_generation = ?
-           AND deleted_at IS NULL
-           AND (
+            AND deleted_at IS NULL
+            AND ? = 1
+            AND (
              treatment <> CASE WHEN amount_minor < 0
                THEN 'ordinary_expense' ELSE 'ordinary_income' END
              OR confirmation_status <> 'not_needed'
@@ -891,10 +1138,36 @@ export async function assertLegacyClientCompatible(
            )
        ) OR EXISTS (
          SELECT 1 FROM recovery_allocations
+          WHERE user_id = ? AND account_generation = ? AND deleted_at IS NULL
+            AND ? = 1
+       ) OR EXISTS (
+         SELECT 1 FROM savings_events
          WHERE user_id = ? AND account_generation = ? AND deleted_at IS NULL
+       ) OR EXISTS (
+         SELECT 1 FROM ledger_settings
+         WHERE user_id = ? AND account_generation = ?
+           AND default_savings_target_minor IS NOT NULL
+           AND default_savings_target_minor <> 0
+       ) OR EXISTS (
+         SELECT 1 FROM ledger_settings
+         WHERE user_id = ? AND account_generation = ?
+           AND savings_override_target_minor IS NOT NULL
        ) THEN 1 ELSE 0 END AS requires_upgrade`,
     )
-    .bind(userId, generation, userId, generation)
+    .bind(
+      userId,
+      generation,
+      checksV5Semantics ? 1 : 0,
+      userId,
+      generation,
+      checksV5Semantics ? 1 : 0,
+      userId,
+      generation,
+      userId,
+      generation,
+      userId,
+      generation,
+    )
     .first<{ requires_upgrade: number }>();
   if (row?.requires_upgrade === 1) {
     throw new ApiError(

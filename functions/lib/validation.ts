@@ -2,6 +2,7 @@ import { ApiError } from "./errors";
 import type {
   LedgerEntryPayload,
   RecoveryAllocationPayload,
+  SavingsEventPayload,
   SettingsMutationPayload,
   SyncMutation,
   SyncProtocolVersion,
@@ -70,6 +71,7 @@ const ENTRY_TREATMENTS = new Set([
   "account_transfer",
 ]);
 const CONFIRMATION_STATUSES = new Set(["not_needed", "pending", "confirmed"]);
+const SAVINGS_EVENT_KINDS = new Set(["opening", "reserve", "release", "cycle_settlement"]);
 
 function treatmentMatchesAmount(treatment: unknown, amountMinor: number): boolean {
   if (treatment === "account_transfer") return amountMinor !== 0;
@@ -203,6 +205,99 @@ function validateRecoveryAllocationPayload(
   return allocation;
 }
 
+function validateSavingsEventPayload(
+  value: unknown,
+  entityId: string,
+): SavingsEventPayload {
+  const commonRequired = [
+    "id",
+    "kind",
+    "amountMinor",
+    "note",
+    "occurredAt",
+    "localDateKey",
+    "localMonthKey",
+    "timezoneOffsetMinutes",
+    "createdAt",
+    "updatedAt",
+  ] as const;
+  const settlementFields = [
+    "cycleStartDateKey",
+    "cycleEndDateKey",
+    "goalMinorSnapshot",
+    "openingRetainedMinor",
+    "closingRetainedMinor",
+    "netGrowthMinor",
+  ] as const;
+  if (!isRecord(value) || !SAVINGS_EVENT_KINDS.has(value.kind as string)) {
+    throw new ApiError(400, "invalid_savings_event", "Savings event payload is invalid");
+  }
+  const isSettlement = value.kind === "cycle_settlement";
+  if (!hasOnlyKeys(
+    value,
+    isSettlement ? [...commonRequired, ...settlementFields] : commonRequired,
+    isSettlement
+      ? ["transferToRetainedMinor", "deletedAt"]
+      : value.kind === "release"
+        ? ["linkedExpenseEntryId", "deletedAt"]
+        : ["deletedAt"],
+  )) {
+    throw new ApiError(
+      400,
+      "invalid_savings_event",
+      "Savings event payload has invalid fields",
+    );
+  }
+  const event = value as unknown as SavingsEventPayload;
+  const hasValidAmount = Number.isSafeInteger(event.amountMinor)
+    && event.amountMinor >= (isSettlement ? 0 : 1)
+    && event.amountMinor <= MAX_AMOUNT_MINOR;
+  const hasValidSettlement = !isSettlement || (
+    isLocalDateKey(event.cycleStartDateKey) &&
+    isLocalDateKey(event.cycleEndDateKey) &&
+    event.cycleStartDateKey! <= event.cycleEndDateKey! &&
+    Number.isSafeInteger(event.goalMinorSnapshot) &&
+    Number(event.goalMinorSnapshot) >= 0 &&
+    Number(event.goalMinorSnapshot) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(event.openingRetainedMinor) &&
+    Math.abs(Number(event.openingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(event.closingRetainedMinor) &&
+    Math.abs(Number(event.closingRetainedMinor)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(event.netGrowthMinor) &&
+    Math.abs(Number(event.netGrowthMinor)) <= MAX_AMOUNT_MINOR &&
+    Number(event.netGrowthMinor) ===
+      Number(event.closingRetainedMinor) - Number(event.openingRetainedMinor) &&
+    (event.transferToRetainedMinor === undefined || (
+      Number.isSafeInteger(event.transferToRetainedMinor) &&
+      Number(event.transferToRetainedMinor) === event.amountMinor
+    ))
+  );
+  if (
+    !isValidId(event.id) ||
+    event.id !== entityId ||
+    !hasValidAmount ||
+    typeof event.note !== "string" ||
+    event.note.length > 200 ||
+    !isIsoDate(event.occurredAt) ||
+    !isLocalDateKey(event.localDateKey) ||
+    typeof event.localMonthKey !== "string" ||
+    !/^\d{4}-\d{2}$/.test(event.localMonthKey) ||
+    !Number.isInteger(event.timezoneOffsetMinutes) ||
+    Math.abs(event.timezoneOffsetMinutes) > MAX_TIMEZONE_OFFSET_MINUTES ||
+    !hasConsistentLocalDate(event as unknown as LedgerEntryPayload) ||
+    (event.linkedExpenseEntryId !== undefined && !isValidId(event.linkedExpenseEntryId)) ||
+    !hasValidSettlement ||
+    !isIsoDate(event.createdAt) ||
+    !isIsoDate(event.updatedAt) ||
+    (event.deletedAt !== undefined && !isIsoDate(event.deletedAt)) ||
+    new Date(event.updatedAt).getTime() < new Date(event.createdAt).getTime() ||
+    (event.deletedAt !== undefined && event.deletedAt !== event.updatedAt)
+  ) {
+    throw new ApiError(400, "invalid_savings_event", "Savings event payload is invalid");
+  }
+  return event;
+}
+
 function validateSettingsPayload(
   value: unknown,
   entityId: string,
@@ -215,13 +310,21 @@ function validateSettingsPayload(
       ? ["monthEndBalanceGoalMinor"]
       : protocolVersion === 3
         ? ["monthEndBalanceGoalMinor", "payCycle"]
-        : ["monthEndBalanceGoalMinor", "payCycle", "incomeForecast"];
+        : protocolVersion <= 5
+          ? ["monthEndBalanceGoalMinor", "payCycle", "incomeForecast"]
+          : [
+            "monthEndBalanceGoalMinor",
+            "payCycle",
+            "incomeForecast",
+            "savingsTargetOverride",
+          ];
   if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
   const settings = value as unknown as SettingsMutationPayload;
   const hasPayCycle = Object.hasOwn(settings, "payCycle");
   const hasIncomeForecast = Object.hasOwn(settings, "incomeForecast");
+  const hasSavingsTargetOverride = Object.hasOwn(settings, "savingsTargetOverride");
   if (
     entityId !== "primary" ||
     settings.id !== "primary" ||
@@ -239,13 +342,20 @@ function validateSettingsPayload(
     (settings.incomeForecast !== undefined &&
       settings.incomeForecast !== null &&
       !isValidIncomeForecast(settings.incomeForecast)) ||
+    (settings.savingsTargetOverride !== undefined &&
+      settings.savingsTargetOverride !== null &&
+      !isValidSavingsTargetOverride(settings.savingsTargetOverride)) ||
     (hasPayCycle && settings.payCycle === undefined) ||
     (hasIncomeForecast && settings.incomeForecast === undefined) ||
+    (hasSavingsTargetOverride && settings.savingsTargetOverride === undefined) ||
     (protocolVersion >= 4 && settings.incomeForecast !== undefined &&
-      settings.incomeForecast !== null &&
-      (settings.payCycle === undefined || settings.payCycle === null)) ||
+      settings.incomeForecast !== null && settings.payCycle === null) ||
     (protocolVersion >= 4 && settings.payCycle === null &&
       (!hasIncomeForecast || settings.incomeForecast !== null)) ||
+    (protocolVersion >= 6 && settings.savingsTargetOverride !== undefined &&
+      settings.savingsTargetOverride !== null && settings.payCycle === null) ||
+    (protocolVersion >= 6 && settings.payCycle === null &&
+      (!hasSavingsTargetOverride || settings.savingsTargetOverride !== null)) ||
     !isIsoDate(settings.updatedAt)
   ) {
     throw new ApiError(400, "invalid_settings", "Settings payload is invalid");
@@ -260,14 +370,20 @@ function isValidPayCycle(
   if (!isRecord(value)) return false;
   const required = protocolVersion === 3
     ? ["paydayDay", "monthlySalaryMinor", "cycleEndBalanceGoalMinor"] as const
-    : ["paydayDay", "cycleEndBalanceGoalMinor"] as const;
+    : protocolVersion <= 5
+      ? ["paydayDay", "cycleEndBalanceGoalMinor"] as const
+      : ["paydayDay", "defaultSavingsTargetMinor"] as const;
   if (!hasOnlyKeys(value, required)) return false;
   if (
     !Number.isInteger(value.paydayDay) ||
     Number(value.paydayDay) < 1 ||
     Number(value.paydayDay) > 31 ||
-    !Number.isSafeInteger(value.cycleEndBalanceGoalMinor) ||
-    Math.abs(Number(value.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
+    (protocolVersion <= 5
+      ? !Number.isSafeInteger(value.cycleEndBalanceGoalMinor) ||
+        Math.abs(Number(value.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
+      : !Number.isSafeInteger(value.defaultSavingsTargetMinor) ||
+        Number(value.defaultSavingsTargetMinor) < 0 ||
+        Number(value.defaultSavingsTargetMinor) > MAX_AMOUNT_MINOR)
   ) {
     return false;
   }
@@ -275,6 +391,17 @@ function isValidPayCycle(
     Number.isSafeInteger(value.monthlySalaryMinor) &&
     Number(value.monthlySalaryMinor) > 0 &&
     Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function isValidSavingsTargetOverride(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["targetPaydayDateKey", "targetMinor"]) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) >= 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR
   );
 }
 
@@ -317,7 +444,8 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
   }
   if (
     (value.entityType !== "entry" && value.entityType !== "settings" &&
-      (protocolVersion < 5 || value.entityType !== "recoveryAllocation")) ||
+      (protocolVersion < 5 || value.entityType !== "recoveryAllocation") &&
+      (protocolVersion < 6 || value.entityType !== "savingsEvent")) ||
     !Number.isSafeInteger(value.baseVersion) ||
     Number(value.baseVersion) < 0 ||
     Number(value.baseVersion) > MAX_VERSION
@@ -349,6 +477,18 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
       payload: validateRecoveryAllocationPayload(value.payload, entityId),
     };
   }
+  if (value.entityType === "savingsEvent") {
+    if (!isValidId(entityId)) {
+      throw new ApiError(400, "invalid_mutation", "Savings event ID is invalid");
+    }
+    return {
+      id: value.id,
+      entityType: "savingsEvent",
+      entityId,
+      baseVersion: Number(value.baseVersion),
+      payload: validateSavingsEventPayload(value.payload, entityId),
+    };
+  }
   if (entityId !== "primary") {
     throw new ApiError(400, "invalid_mutation", "Settings mutation ID is invalid");
   }
@@ -368,7 +508,7 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     !hasOnlyKeys(value, keys) ||
     (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
       value.schemaVersion !== 3 && value.schemaVersion !== 4 &&
-      value.schemaVersion !== 5)
+      value.schemaVersion !== 5 && value.schemaVersion !== 6)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

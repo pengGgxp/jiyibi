@@ -62,11 +62,124 @@ export interface Attachment {
 
 export interface PayCyclePlan {
   paydayDay: number;
-  cycleEndBalanceGoalMinor: number;
+  /**
+   * Amount to set aside at the end of each pay cycle.  This is a target for
+   * new retained money, not an absolute balance floor.
+   *
+   * It is optional for the moment so v1-v5 settings can be read while the
+   * database migration is in flight.  Domain consumers should resolve the
+   * value with `savingsTargetFromPlan` (new value first, legacy value second).
+   */
+  defaultSavingsTargetMinor?: number;
+  /** @deprecated v1-v5 absolute balance-floor compatibility field. */
+  cycleEndBalanceGoalMinor?: number;
+}
+
+/** One-cycle override for the default retained-money target. */
+export interface CycleSavingsTargetOverride {
+  /** The actual upcoming payday that this override belongs to. */
+  targetPaydayDateKey: string;
+  targetMinor: number;
+}
+
+export type SavingsEventKind =
+  | "opening"
+  | "reserve"
+  | "release"
+  | "cycle_settlement";
+
+interface SavingsEventBase {
+  id: string;
+  /** Positive minor units; cycle settlement may be zero. */
+  amountMinor: number;
+  note: string;
+  occurredAt: string;
+  localDateKey: string;
+  localMonthKey: string;
+  timezoneOffsetMinutes: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface OpeningSavingsEvent extends SavingsEventBase {
+  kind: "opening";
+}
+
+export interface ReserveSavingsEvent extends SavingsEventBase {
+  kind: "reserve";
+}
+
+export interface ReleaseSavingsEvent extends SavingsEventBase {
+  kind: "release";
+  /** Optional expense this release funded directly. */
+  linkedExpenseEntryId?: string;
+}
+
+export interface CycleSettlementSavingsEvent extends SavingsEventBase {
+  kind: "cycle_settlement";
+  /** Stable cycle identity; one active settlement is allowed per cycle. */
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  goalMinorSnapshot: number;
+  openingRetainedMinor: number;
+  closingRetainedMinor: number;
+  netGrowthMinor: number;
+  /** Compatibility spelling used by early v5 migration drafts. */
+  transferToRetainedMinor?: number;
+}
+
+export type SavingsEvent =
+  | OpeningSavingsEvent
+  | ReserveSavingsEvent
+  | ReleaseSavingsEvent
+  | CycleSettlementSavingsEvent;
+
+/** Reusable result of folding active savings events. */
+export interface RetainedSavingsSummary {
+  openingRetainedMinor: bigint;
+  reservedMinor: bigint;
+  releasedMinor: bigint;
+  settledMinor: bigint;
+  totalRetainedMinor: bigint;
+  hasNegativeBalance: boolean;
+  needsCorrection: boolean;
+}
+
+export interface CycleSavingsProgress {
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  nextPaydayDateKey: string;
+  targetMinor: number;
+  openingRetainedMinor: bigint;
+  closingRetainedMinor: bigint;
+  netGrowthMinor: bigint;
+  remainingTargetMinor: bigint;
+  settled: boolean;
+  needsCorrection: boolean;
+}
+
+export interface SavingsHistoryPoint {
+  cycleStartDateKey: string;
+  cycleEndDateKey: string;
+  targetMinor: number;
+  netGrowthMinor: bigint;
+  openingRetainedMinor: bigint;
+  closingRetainedMinor: bigint;
+  settled: boolean;
+  needsCorrection: boolean;
+}
+
+export interface SavingsAnalysisOptions {
+  /** Active savings events from IndexedDB; omitted means no retained-money view. */
+  savingsEvents?: readonly SavingsEvent[];
+  /** One-cycle target override, normally keyed to incomeForecast.targetPaydayDateKey. */
+  targetOverride?: CycleSavingsTargetOverride;
 }
 
 export interface IncomeForecast {
   id: string;
+  /** One-off expected receipt date; may be later than the recurring payday. */
   targetPaydayDateKey: string;
   minimumIncomeMinor: number;
   expectedIncomeMinor: number;
@@ -79,6 +192,12 @@ export interface AppSettings {
   /** Legacy v2 natural-month goal. Kept only for sync and backup compatibility. */
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
+  /** Optional target for the currently upcoming (possibly delayed) cycle. */
+  savingsTargetOverride?: CycleSavingsTargetOverride;
+  /** One-time prompt after a negative legacy floor was migrated to a zero target. */
+  savingsTargetNeedsReview?: true;
+  /** @deprecated Alias accepted while v5 clients migrate field names. */
+  cycleSavingsTargetOverride?: CycleSavingsTargetOverride;
   incomeForecast?: IncomeForecast;
   schemaVersion: 1;
   updatedAt: string;
@@ -166,12 +285,26 @@ export interface CurrentCycleAnalysis {
   projectedEndBalanceMinor?: bigint;
   balanceGoalDifferenceMinor?: bigint;
   affordability?: ForecastOutcome;
+  /** Retained-money view; populated when savings events are supplied. */
+  totalBalanceMinor?: bigint;
+  retainedBalanceMinor?: bigint;
+  cycleOpeningRetainedMinor?: bigint;
+  cycleNetGrowthMinor?: bigint;
+  savingsTargetMinor?: number;
+  remainingSavingsTargetMinor?: bigint;
+  spendableBalanceMinor?: bigint;
+  savingsDifferenceMinor?: bigint;
+  savingsAffordability?: ForecastOutcome;
+  savingsNeedsCorrection?: boolean;
 }
 
 export interface IncomeScenarioAnalysis {
   incomeMinor: number;
   differenceMinor: bigint;
   affordability: ForecastOutcome;
+  /** Savings target deducted from this scenario, when configured. */
+  savingsTargetMinor?: number;
+  spendingDifferenceMinor?: bigint;
 }
 
 export interface NextCycleAnalysis {
@@ -180,8 +313,10 @@ export interface NextCycleAnalysis {
   nextPaydayDateKey: string;
   days: number;
   referenceSpendMinor?: number;
+  defaultSavingsTargetMinor?: number;
   minimumIncomeScenario?: IncomeScenarioAnalysis;
   expectedIncomeScenario?: IncomeScenarioAnalysis;
+  savingsHistory?: SavingsHistoryPoint[];
 }
 
 /**
@@ -198,7 +333,12 @@ export interface SpendingAnalysis {
   excludedExpenseMinor: number;
   /** Entries still waiting on treatment confirmation. */
   pendingConfirmationCount: number;
-  cycleEndBalanceGoalMinor: number;
+  /** @deprecated Legacy absolute-floor output retained for old consumers. */
+  cycleEndBalanceGoalMinor?: number;
+  defaultSavingsTargetMinor?: number;
+  retainedSavings?: RetainedSavingsSummary;
+  currentSavings?: CycleSavingsProgress;
+  savingsHistory?: SavingsHistoryPoint[];
   currentCycle: CurrentCycleAnalysis;
   nextCycle: NextCycleAnalysis;
   dailyExpenses: DailyExpensePoint[];

@@ -1,7 +1,13 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AppSettings, IncomeForecast, PayCyclePlan, SpendingAnalysis } from "../domain";
+import type {
+  AppSettings,
+  IncomeForecast,
+  PayCyclePlan,
+  SavingsEvent,
+  SpendingAnalysis,
+} from "../domain";
 import { AnalysisView } from "./AnalysisView";
 
 vi.mock("recharts", () => {
@@ -30,7 +36,39 @@ vi.mock("recharts", () => {
 
 const plan: PayCyclePlan = {
   paydayDay: 10,
-  cycleEndBalanceGoalMinor: 100_000,
+  defaultSavingsTargetMinor: 100_000,
+};
+
+const savingsEvents: SavingsEvent[] = [{
+  id: "savings-opening",
+  kind: "opening",
+  amountMinor: 100_000,
+  note: "初始留存",
+  occurredAt: "2026-07-01T04:00:00.000Z",
+  localDateKey: "2026-07-01",
+  localMonthKey: "2026-07",
+  timezoneOffsetMinutes: -480,
+  createdAt: "2026-07-01T04:00:00.000Z",
+  updatedAt: "2026-07-01T04:00:00.000Z",
+}];
+
+const settledSavingsEvent: Extract<SavingsEvent, { kind: "cycle_settlement" }> = {
+  id: "savings-settlement-2026-07-10",
+  kind: "cycle_settlement",
+  amountMinor: 50_000,
+  note: "七月结算",
+  occurredAt: "2026-08-10T01:00:00.000Z",
+  localDateKey: "2026-08-10",
+  localMonthKey: "2026-08",
+  timezoneOffsetMinutes: -480,
+  cycleStartDateKey: "2026-07-10",
+  cycleEndDateKey: "2026-08-09",
+  goalMinorSnapshot: 100_000,
+  openingRetainedMinor: 50_000,
+  closingRetainedMinor: 100_000,
+  netGrowthMinor: 50_000,
+  createdAt: "2026-08-10T01:00:00.000Z",
+  updatedAt: "2026-08-10T01:00:00.000Z",
 };
 
 const incomeForecast: IncomeForecast = {
@@ -56,20 +94,25 @@ function analysis(
 ): SpendingAnalysis {
   const prediction = confidence === "insufficient" ? {} : {
     estimatedRemainingExpenseMinor: 120_000,
-    projectedEndBalanceMinor: outcome === "shortfall" ? 50_000n : outcome === "exact" ? 100_000n : 250_000n,
+    projectedEndBalanceMinor: outcome === "shortfall" ? 150_000n : outcome === "exact" ? 200_000n : 350_000n,
     balanceGoalDifferenceMinor: outcome === "shortfall" ? -50_000n : outcome === "exact" ? 0n : 150_000n,
     affordability: outcome,
   };
   const nextPrediction = confidence === "insufficient" ? {} : {
-    referenceSpendMinor: 700_000,
+    referenceSpendMinor: 650_000,
+    defaultSavingsTargetMinor: 100_000,
     minimumIncomeScenario: {
       incomeMinor: incomeForecast.minimumIncomeMinor,
-      differenceMinor: -100_000n,
+      spendingDifferenceMinor: -50_000n,
+      savingsTargetMinor: 100_000,
+      differenceMinor: -150_000n,
       affordability: "shortfall" as const,
     },
     expectedIncomeScenario: {
       incomeMinor: incomeForecast.expectedIncomeMinor,
-      differenceMinor: 100_000n,
+      spendingDifferenceMinor: 150_000n,
+      savingsTargetMinor: 100_000,
+      differenceMinor: 50_000n,
       affordability: "surplus" as const,
     },
   };
@@ -89,16 +132,55 @@ function analysis(
     includedExpenseMinor: 300_000,
     excludedExpenseMinor: 0,
     pendingConfirmationCount: 0,
-    cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor,
+    defaultSavingsTargetMinor: plan.defaultSavingsTargetMinor,
+    retainedSavings: {
+      openingRetainedMinor: 100_000n,
+      reservedMinor: 50_000n,
+      releasedMinor: 0n,
+      settledMinor: 0n,
+      totalRetainedMinor: 150_000n,
+      hasNegativeBalance: false,
+      needsCorrection: false,
+    },
+    currentSavings: {
+      cycleStartDateKey: "2026-08-10",
+      cycleEndDateKey: "2026-09-09",
+      nextPaydayDateKey: "2026-09-10",
+      targetMinor: 100_000,
+      openingRetainedMinor: 100_000n,
+      closingRetainedMinor: 150_000n,
+      netGrowthMinor: 50_000n,
+      remainingTargetMinor: 50_000n,
+      settled: false,
+      needsCorrection: false,
+    },
+    savingsHistory: [{
+      cycleStartDateKey: "2026-07-10",
+      cycleEndDateKey: "2026-08-09",
+      targetMinor: 100_000,
+      netGrowthMinor: 50_000n,
+      openingRetainedMinor: 50_000n,
+      closingRetainedMinor: 100_000n,
+      settled: true,
+      needsCorrection: false,
+    }],
     currentCycle: {
       cycleStartDateKey: "2026-08-10",
       cycleEndDateKey: "2026-09-09",
       nextPaydayDateKey: "2026-09-10",
       daysUntilPayday: 21,
       actualExpenseMinor: 200_000,
-      balanceHeadroomMinor: 500_000n,
-      safeToSpendMinor: 500_000n,
+      balanceHeadroomMinor: 400_000n,
+      safeToSpendMinor: 400_000n,
       dailySafeToSpendMinor: 23_809n,
+      totalBalanceMinor: 600_000n,
+      retainedBalanceMinor: 150_000n,
+      cycleOpeningRetainedMinor: 100_000n,
+      cycleNetGrowthMinor: 50_000n,
+      savingsTargetMinor: 100_000,
+      remainingSavingsTargetMinor: 50_000n,
+      spendableBalanceMinor: 400_000n,
+      savingsNeedsCorrection: false,
       ...prediction,
     },
     nextCycle: {
@@ -106,6 +188,16 @@ function analysis(
       cycleEndDateKey: "2026-10-09",
       nextPaydayDateKey: "2026-10-10",
       days: 30,
+      savingsHistory: [{
+        cycleStartDateKey: "2026-07-10",
+        cycleEndDateKey: "2026-08-09",
+        targetMinor: 100_000,
+        netGrowthMinor: 50_000n,
+        openingRetainedMinor: 50_000n,
+        closingRetainedMinor: 100_000n,
+        settled: true,
+        needsCorrection: false,
+      }],
       ...nextPrediction,
     },
     dailyExpenses: [
@@ -153,11 +245,13 @@ async function renderView({
   appSettings = settings,
   entryCount = result ? 1 : 0,
   error,
+  eventList = savingsEvents,
 }: {
   result?: SpendingAnalysis;
   appSettings?: AppSettings;
   entryCount?: number;
   error?: string;
+  eventList?: readonly SavingsEvent[];
 } = {}) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -165,22 +259,31 @@ async function renderView({
   mountedRoots.push(root);
   const onOpenSettings = vi.fn();
   const onOpenIncomeForecast = vi.fn();
+  const onCorrectSavingsSettlement = vi.fn();
   const onOpenLedger = vi.fn();
   await act(async () => {
     root.render(
       <AnalysisView
         analysis={result}
+        savingsEvents={eventList}
         summary={{ balanceMinor: 600_000, monthIncomeMinor: 800_000, monthExpenseMinor: 240_000 }}
         settings={appSettings}
         entryCount={entryCount}
         error={error}
         onOpenSettings={onOpenSettings}
         onOpenIncomeForecast={onOpenIncomeForecast}
+        onCorrectSavingsSettlement={onCorrectSavingsSettlement}
         onOpenLedger={onOpenLedger}
       />,
     );
   });
-  return { host, onOpenSettings, onOpenIncomeForecast, onOpenLedger };
+  return {
+    host,
+    onOpenSettings,
+    onOpenIncomeForecast,
+    onCorrectSavingsSettlement,
+    onOpenLedger,
+  };
 }
 
 describe("AnalysisView states", () => {
@@ -190,7 +293,7 @@ describe("AnalysisView states", () => {
     });
 
     expect(host.textContent).toContain("先设置发薪周期");
-    expect(host.textContent).toContain("需要发薪日和周期底线。");
+    expect(host.textContent).toContain("需要发薪日和每周期默认留存目标。");
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置发薪周期"));
     await act(async () => button?.click());
     expect(onOpenSettings).toHaveBeenCalledOnce();
@@ -289,11 +392,11 @@ describe("AnalysisView forecasts and charts", () => {
     const { host } = await renderView({ result: analysis("ready") });
 
     expect(host.textContent).toContain("最低收入 ¥6,000.00");
-    expect(host.textContent).toContain("按近期已记录花法还差 ¥1,000.00");
+    expect(host.textContent).toContain("预计支出 ¥6,500.00，留存目标 ¥1,000.00；还差 ¥1,500.00");
     expect(host.textContent).toContain("预计收入 ¥8,000.00");
-    expect(host.textContent).toContain("按近期已记录花法可多 ¥1,000.00");
-    expect(host.textContent).toContain("最低收入差额−¥1,000.00");
-    expect(host.textContent).toContain("预计收入差额+¥1,000.00");
+    expect(host.textContent).toContain("预计支出 ¥6,500.00，留存目标 ¥1,000.00；还可剩 ¥500.00");
+    expect(host.textContent).toContain("最低收入差额−¥1,500.00");
+    expect(host.textContent).toContain("预计收入差额+¥500.00");
     expect(host.textContent).toContain("实际现金流");
     expect(host.textContent).toContain("日常花法");
     expect(host.textContent).not.toContain("月工资");
@@ -313,18 +416,24 @@ describe("AnalysisView forecasts and charts", () => {
     expect(onOpenIncomeForecast).toHaveBeenCalledOnce();
   });
 
-  it("renders three chart explanations and semantic data tables", async () => {
+  it("renders savings progress, four chart explanations, and semantic data tables", async () => {
     const { host } = await renderView({ result: analysis() });
 
-    expect(host.querySelectorAll(".analysis-chart-section")).toHaveLength(3);
-    expect(host.querySelectorAll("table caption")).toHaveLength(3);
+    expect(host.querySelectorAll(".analysis-chart-section")).toHaveLength(4);
+    expect(host.querySelectorAll("table caption")).toHaveLength(5);
     expect(host.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
     expect(host.querySelectorAll('th[scope="row"]').length).toBeGreaterThan(0);
     expect(host.textContent).toContain("当前周期累计支出");
+    expect(host.textContent).toContain("完整周期留存");
     expect(host.textContent).toContain("完整工资周期支出");
     expect(host.textContent).toContain("近 30 个完整日的每日支出");
     expect(host.textContent).toContain("实际现金流");
     expect(host.textContent).toContain("日常花法");
+    expect(host.textContent).toContain("本周期留存");
+    expect(host.textContent).toContain("本周期净增长+¥500.00");
+    expect(host.textContent).toContain("尚需留存¥500.00");
+    expect(host.textContent).toContain("留存明细");
+    expect(host.textContent).toContain("最近周期未达到目标：净增长 +¥500.00，目标 ¥1,000.00");
     expect(host.textContent).toContain("包含 0 支出日");
     expect(host.textContent).toContain("日常花法数据覆盖截至昨天的");
     expect(host.textContent).toContain("不代表记录完整");
@@ -338,9 +447,28 @@ describe("AnalysisView forecasts and charts", () => {
       "可绘制的支出点",
       "一定够用",
       "保证够用",
+      "周期底线",
     ]) {
       expect(host.textContent).not.toContain(oldCopy);
     }
+  });
+
+  it("offers a keyboard-operable correction action only for cycle settlements", async () => {
+    const { host, onCorrectSavingsSettlement } = await renderView({
+      result: analysis(),
+      eventList: [...savingsEvents, settledSavingsEvent],
+    });
+
+    const correctionButtons = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(".analysis-settlement-action"),
+    );
+    expect(correctionButtons).toHaveLength(1);
+    expect(correctionButtons[0]?.type).toBe("button");
+    expect(correctionButtons[0]?.getAttribute("aria-label"))
+      .toBe("更正 2026-07-10 至 2026-08-09 的周期结算");
+
+    await act(async () => correctionButtons[0]?.click());
+    expect(onCorrectSavingsSettlement).toHaveBeenCalledWith(settledSavingsEvent);
   });
 
   it("uses the requested empty chart labels without implementation language", async () => {
@@ -348,15 +476,20 @@ describe("AnalysisView forecasts and charts", () => {
     result.currentCycleSeries = [];
     result.completedCycles = [];
     result.dailyExpenses = [];
+    result.savingsHistory = [];
+    result.nextCycle.savingsHistory = [];
     const { host } = await renderView({ result, entryCount: 1 });
 
     expect(Array.from(host.querySelectorAll(".analysis-chart-empty")).map((item) => item.textContent)).toEqual([
       "当前周期暂无支出。",
+      "暂无完整周期留存记录。",
       "暂无完整周期数据。",
       "暂无完整日数据。",
     ]);
     expect(Array.from(host.querySelectorAll("table caption")).map((item) => item.textContent)).toEqual([
+      "留存明细",
       "当前周期累计支出",
+      "完整周期留存",
       "完整工资周期支出",
       "每日支出",
     ]);

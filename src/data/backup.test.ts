@@ -7,6 +7,7 @@ import type {
   LedgerEntry,
   ProcessedImage,
   RecoveryAllocation,
+  SavingsEvent,
 } from "../domain/types";
 import {
   BACKUP_FORMAT,
@@ -24,10 +25,15 @@ import {
   LedgerDatabase,
   createEntry,
   getSettings,
+  listActiveSavingsEvents,
+  releaseSavings,
+  reserveSavings,
   setInitialBalance,
+  setInitialSavings,
   setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
+  setSavingsTargetOverride,
   upsertRecoveryAllocation,
   updateEntryTreatment,
 } from "./database";
@@ -131,6 +137,7 @@ function preparedWith(
   entries: LedgerEntry[],
   attachments: Attachment[],
   recoveryAllocations: RecoveryAllocation[] = [],
+  savingsEvents: SavingsEvent[] = [],
 ): PreparedBackup {
   return {
     preview: {
@@ -151,6 +158,7 @@ function preparedWith(
       entries,
       attachments,
       recoveryAllocations,
+      savingsEvents,
     },
   };
 }
@@ -238,8 +246,9 @@ describe("encrypted backups", () => {
       attachmentCount: 1,
       initialBalanceMinor: -500,
       monthEndBalanceGoalMinor: undefined,
-      payCycle,
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 123_456 },
       incomeForecast,
+      savingsEventCount: 0,
       currency: "CNY",
     });
 
@@ -252,7 +261,7 @@ describe("encrypted backups", () => {
     expect(await target.attachments.get(replacedAttachmentId)).toBeUndefined();
     expect(await getSettings(target)).toMatchObject({
       initialBalanceMinor: -500,
-      payCycle,
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 123_456 },
       incomeForecast,
     });
   });
@@ -297,6 +306,79 @@ describe("encrypted backups", () => {
     expect(await target.recoveryAllocations.toArray()).toEqual([allocation]);
   });
 
+  it("round trips savings targets and retained-money events in payload v4", async () => {
+    const now = new Date(2026, 7, 9, 10);
+    await setInitialBalance(100_000, source, now);
+    await setPayCyclePlan({
+      paydayDay: 10,
+      defaultSavingsTargetMinor: 20_000,
+    }, source, now);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 50_000,
+      expectedIncomeMinor: 80_000,
+    }, source, now);
+    await setSavingsTargetOverride(25_000, source, now);
+    await setInitialSavings(30_000, source, new Date(2026, 6, 1, 9));
+    await reserveSavings({ amountMinor: 5_000, note: "本周期追加" }, source, now);
+    await releaseSavings({ amountMinor: 2_000, note: "临时取用" }, source, now);
+
+    const backup = await createEncryptedBackup("savings-round-trip", source, now);
+    const envelope = JSON.parse(await blobToText(backup)) as TestEnvelope;
+    expect(envelope.envelopeVersion).toBe(1);
+
+    const prepared = await decryptBackup(backup, "savings-round-trip");
+    expect(prepared.preview).toMatchObject({
+      savingsEventCount: 3,
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 20_000 },
+      savingsTargetOverride: {
+        targetPaydayDateKey: "2026-08-10",
+        targetMinor: 25_000,
+      },
+    });
+    expect(prepared.replacement.savingsEvents).toHaveLength(3);
+
+    await restorePreparedBackup(prepared, target);
+    expect(await getSettings(target)).toMatchObject({
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 20_000 },
+      savingsTargetOverride: {
+        targetPaydayDateKey: "2026-08-10",
+        targetMinor: 25_000,
+      },
+    });
+    expect(await listActiveSavingsEvents(target)).toEqual(
+      expect.arrayContaining(prepared.replacement.savingsEvents as SavingsEvent[]),
+    );
+  });
+
+  it("migrates a payload v3 balance floor without inventing savings history", async () => {
+    const backup = await createEncryptedBackup("legacy-savings", source);
+    const legacy = await rewriteEncryptedPayload(backup, "legacy-savings", (payload) => {
+      payload.schemaVersion = 3;
+      delete payload.savingsEvents;
+      const settings = payload.settings as Record<string, unknown>;
+      settings.payCycle = {
+        paydayDay: 10,
+        cycleEndBalanceGoalMinor: -12_345,
+      };
+      delete settings.savingsTargetOverride;
+    });
+
+    const prepared = await decryptBackup(legacy, "legacy-savings");
+    expect(prepared.replacement.settings).toMatchObject({
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+      savingsTargetNeedsReview: true,
+    });
+    expect(prepared.replacement.savingsEvents).toEqual([]);
+
+    await restorePreparedBackup(prepared, target);
+    expect(await getSettings(target)).toMatchObject({
+      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+      savingsTargetNeedsReview: true,
+    });
+    expect(await target.savingsEvents.count()).toBe(0);
+  });
+
   it("normalizes v2 entries conservatively and restores no allocations", async () => {
     const backup = await createEncryptedBackup("legacy-v2-password", source);
     const legacy = await rewriteEncryptedPayload(backup, "legacy-v2-password", (payload) => {
@@ -334,6 +416,39 @@ describe("encrypted backups", () => {
 
     await expect(restorePreparedBackup(
       preparedWith([refund, expense], [], [invalidAllocation]),
+      target,
+    )).rejects.toMatchObject({ code: "invalid-payload" });
+    expect(await target.entries.get(existing.id)).toBeDefined();
+  });
+
+  it("rejects linked savings releases whose total exceeds the expense", async () => {
+    const expense = {
+      ...validEntry(2),
+      amountMinor: -10_000,
+      treatment: "one_time_expense" as const,
+    };
+    const existing = await createEntry({ ...draft(), note: "现有记录", image: undefined }, target);
+    const release = (id: string, amountMinor: number): SavingsEvent => ({
+      id,
+      kind: "release",
+      amountMinor,
+      note: "关联取用",
+      occurredAt: "2026-07-30T08:30:00.000Z",
+      localDateKey: "2026-07-30",
+      localMonthKey: "2026-07",
+      timezoneOffsetMinutes: 0,
+      linkedExpenseEntryId: expense.id,
+      createdAt: "2026-07-30T08:30:00.000Z",
+      updatedAt: "2026-07-30T08:30:00.000Z",
+    });
+
+    await expect(restorePreparedBackup(
+      preparedWith(
+        [expense],
+        [],
+        [],
+        [release("savings-release-a", 6_000), release("savings-release-b", 5_000)],
+      ),
       target,
     )).rejects.toMatchObject({ code: "invalid-payload" });
     expect(await target.entries.get(existing.id)).toBeDefined();
@@ -383,7 +498,7 @@ describe("encrypted backups", () => {
       restoreNow,
     );
     expect(prepared.preview).toMatchObject({
-      payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+      payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
       incomeForecast: {
         id: "legacy-income-2026-02-28",
         targetPaydayDateKey: "2026-02-28",
@@ -395,7 +510,7 @@ describe("encrypted backups", () => {
 
     await restorePreparedBackup(prepared, target);
     expect(await getSettings(target)).toMatchObject({
-      payCycle: { paydayDay: 31, cycleEndBalanceGoalMinor: 100_000 },
+      payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
       incomeForecast: {
         targetPaydayDateKey: "2026-02-28",
         minimumIncomeMinor: 0,

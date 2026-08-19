@@ -127,6 +127,21 @@ export function resolveNextPaydayDateKey(
   return localDateKey(nextPayday);
 }
 
+/** Returns the first configured payday strictly after the provided local calendar day. */
+export function resolveFollowingPaydayDateKey(
+  paydayDay: number,
+  now = new Date(),
+): string {
+  assertPaydayDay(paydayDay);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("工资周期日期无效");
+
+  const currentPayday = paydayInMonth(now.getFullYear(), now.getMonth(), paydayDay);
+  const followingPayday = calendarDayNumber(now) < calendarDayNumber(currentPayday)
+    ? currentPayday
+    : paydayInMonth(now.getFullYear(), now.getMonth() + 1, paydayDay);
+  return localDateKey(followingPayday);
+}
+
 export function resolvePayCycleRange(
   paydayDay: number,
   now = new Date(),

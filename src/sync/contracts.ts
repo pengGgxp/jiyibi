@@ -1,16 +1,18 @@
 import type {
   AppSettings,
+  CycleSavingsTargetOverride,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
   RecoveryAllocation,
+  SavingsEvent,
 } from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 5 as const;
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | typeof SYNC_SCHEMA_VERSION;
+export const SYNC_SCHEMA_VERSION = 6 as const;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | typeof SYNC_SCHEMA_VERSION;
 
-export type SyncEntityType = "entry" | "settings" | "recoveryAllocation";
+export type SyncEntityType = "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
 
 export interface SessionResponse {
@@ -49,11 +51,17 @@ export interface EntrySyncMutation extends SyncMutationBase {
 
 export interface SettingsSyncPayload extends Omit<
   AppSettings,
-  "monthEndBalanceGoalMinor" | "payCycle" | "incomeForecast"
+  | "monthEndBalanceGoalMinor"
+  | "payCycle"
+  | "incomeForecast"
+  | "savingsTargetOverride"
+  | "cycleSavingsTargetOverride"
+  | "savingsTargetNeedsReview"
 > {
   monthEndBalanceGoalMinor?: number | null;
   payCycle?: PayCyclePlan | null;
   incomeForecast?: IncomeForecast | null;
+  savingsTargetOverride?: CycleSavingsTargetOverride | null;
 }
 
 export interface SettingsSyncMutation extends SyncMutationBase {
@@ -66,10 +74,16 @@ export interface RecoveryAllocationSyncMutation extends SyncMutationBase {
   payload: RecoveryAllocation;
 }
 
+export interface SavingsEventSyncMutation extends SyncMutationBase {
+  entityType: "savingsEvent";
+  payload: SavingsEvent;
+}
+
 export type SyncMutation =
   | EntrySyncMutation
   | SettingsSyncMutation
-  | RecoveryAllocationSyncMutation;
+  | RecoveryAllocationSyncMutation
+  | SavingsEventSyncMutation;
 
 export interface SyncRequest {
   schemaVersion: typeof SYNC_SCHEMA_VERSION;
@@ -93,6 +107,8 @@ export interface SettingsSyncChange extends SyncChangeBase {
   payload: AppSettings;
   /** The response carried a legacy salary that was normalized locally. */
   claimLegacyIncomeForecast?: true;
+  /** The response carried a legacy balance floor that was normalized locally. */
+  claimLegacySavingsTarget?: true;
 }
 
 export interface RecoveryAllocationSyncChange extends SyncChangeBase {
@@ -100,7 +116,16 @@ export interface RecoveryAllocationSyncChange extends SyncChangeBase {
   payload: RecoveryAllocation;
 }
 
-export type SyncChange = EntrySyncChange | SettingsSyncChange | RecoveryAllocationSyncChange;
+export interface SavingsEventSyncChange extends SyncChangeBase {
+  entityType: "savingsEvent";
+  payload: SavingsEvent;
+}
+
+export type SyncChange =
+  | EntrySyncChange
+  | SettingsSyncChange
+  | RecoveryAllocationSyncChange
+  | SavingsEventSyncChange;
 
 export interface SyncAppliedResult {
   id: string;
