@@ -1,7 +1,7 @@
 import Dexie from "dexie";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { calculateRetainedSavingsSummary } from "../domain/stats";
-import type { EntryDraft } from "../domain/types";
+import type { EntryDraft, SavingsEvent } from "../domain/types";
 import {
   INDEXED_DB_VERSION,
   LedgerDatabase,
@@ -11,6 +11,7 @@ import {
   listActiveSavingsEvents,
   purgeDeletedSavingsEvent,
   recordActualIncome,
+  recordActualIncomeWithSavings,
   releaseSavings,
   reserveSavings,
   setIncomeForecast,
@@ -101,20 +102,18 @@ describe("savings data layer", () => {
       await upgraded.open();
       expect(upgraded.verno).toBe(INDEXED_DB_VERSION);
       expect(await upgraded.settings.get("primary")).toMatchObject({
-        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
-        savingsTargetNeedsReview: true,
+        payCycle: { paydayDay: 10 },
       });
       expect(await upgraded.settings.get("primary")).not.toHaveProperty(
         "payCycle.cycleEndBalanceGoalMinor",
       );
       expect(await upgraded.syncOutbox.get("settings:primary")).toMatchObject({
-        payload: { payCycle: { defaultSavingsTargetMinor: 50_000 } },
+        payload: { payCycle: { paydayDay: 10 }, savingsGoalNeedsSetup: true },
       });
       expect(await upgraded.syncConflicts.get("settings:primary")).toMatchObject({
-        localPayload: { payCycle: { defaultSavingsTargetMinor: 50_000 } },
+        localPayload: { payCycle: { paydayDay: 10 }, savingsGoalNeedsSetup: true },
         remotePayload: {
-          payCycle: { defaultSavingsTargetMinor: 0 },
-          savingsTargetNeedsReview: true,
+          payCycle: { paydayDay: 10 },
         },
       });
       await expect(upgraded.savingsEvents.count()).resolves.toBe(0);
@@ -257,47 +256,34 @@ describe("savings data layer", () => {
     expect(updated.amountMinor).toBe(1_200);
   });
 
-  it("records actual income, settlement and settings cleanup in one transaction", async () => {
+  it("records actual income and clears its forecast without a settlement", async () => {
     const setup = new Date(2026, 7, 9, 10);
     await setInitialBalance(1_000, database);
     await setOpeningSavings(100, database, new Date(2026, 6, 1, 9));
-    await setPayCyclePlan({ paydayDay: 10, defaultSavingsTargetMinor: 300 }, database, setup);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 400,
       expectedIncomeMinor: 500,
     }, database, setup);
-    await setSavingsTargetOverride(400, database, setup);
 
     const result = await recordActualIncome(
       500,
       database,
       new Date(2026, 7, 10, 14),
-      { savingsAmountMinor: 400 },
     );
     expect(result.entry?.amountMinor).toBe(500);
-    expect(result.settlement).toMatchObject({
-      id: "savings-settlement-2026-07-10",
-      kind: "cycle_settlement",
-      cycleStartDateKey: "2026-07-10",
-      cycleEndDateKey: "2026-08-09",
-      goalMinorSnapshot: 400,
-      openingRetainedMinor: 100,
-      closingRetainedMinor: 500,
-      netGrowthMinor: 400,
-    });
+    expect(result.settlement).toBeUndefined();
     expect(result.settings.incomeForecast).toBeUndefined();
     expect(result.settings.savingsTargetOverride).toBeUndefined();
     expect((await getLedgerSummary("2026-08", database)).balanceMinor).toBe(1_500);
-    expect(await database.savingsEvents.count()).toBe(2);
+    expect(await database.savingsEvents.count()).toBe(1);
   });
 
-  it("records an explicit zero-value cycle settlement", async () => {
+  it("records zero income without a ledger row or a settlement", async () => {
     const setup = new Date(2026, 7, 9, 10);
-    await setPayCyclePlan({ paydayDay: 10, defaultSavingsTargetMinor: 300 }, database, setup);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 0,
       expectedIncomeMinor: 0,
     }, database, setup);
 
@@ -305,118 +291,94 @@ describe("savings data layer", () => {
       0,
       database,
       new Date(2026, 7, 10, 14),
-      { savingsAmountMinor: 0 },
     );
 
     expect(result.entry).toBeUndefined();
-    expect(result.settlement).toMatchObject({
-      id: "savings-settlement-2026-07-10",
-      amountMinor: 0,
-      closingRetainedMinor: 0,
-      netGrowthMinor: 0,
-    });
+    expect(result.settlement).toBeUndefined();
     expect(result.settings.incomeForecast).toBeUndefined();
-    expect(await database.savingsEvents.count()).toBe(1);
+    expect(await database.savingsEvents.count()).toBe(0);
   });
 
-  it("rolls back income, settlement and forecast cleanup together", async () => {
+  it("rejects the retired income-and-savings operation", async () => {
     const setup = new Date(2026, 7, 9, 10);
-    await setPayCyclePlan({ paydayDay: 10, defaultSavingsTargetMinor: 300 }, database, setup);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 100,
       expectedIncomeMinor: 100,
     }, database, setup);
 
-    await expect(recordActualIncome(
+    await expect(recordActualIncomeWithSavings(
       100,
+      101,
       database,
       new Date(2026, 7, 10, 14),
-      { savingsAmountMinor: 101 },
     )).rejects.toMatchObject({ code: "invalid-settings" });
 
     expect(await database.entries.count()).toBe(0);
     expect(await database.savingsEvents.count()).toBe(0);
-    expect((await database.settings.get("primary"))?.incomeForecast).toMatchObject({
-      targetPaydayDateKey: "2026-08-10",
-    });
+    expect((await database.settings.get("primary"))?.incomeForecast).toBeDefined();
   });
 
-  it("uses a deterministic settlement id and rolls settlement corrections back on failure", async () => {
+  it("does not allow creating new legacy settlements", async () => {
     await setInitialBalance(1_000, database);
-    const first = await settleSavingsCycle({
+    await expect(settleSavingsCycle({
       cycleStartDateKey: "2026-07-10",
       cycleEndDateKey: "2026-08-09",
       goalMinorSnapshot: 300,
       amountMinor: 300,
       occurredAtLocal: "2026-08-10T09:00",
-    }, database, new Date(2026, 7, 10, 9));
-    const corrected = await settleSavingsCycle({
-      cycleStartDateKey: "2026-07-10",
-      cycleEndDateKey: "2026-08-09",
-      goalMinorSnapshot: 300,
-      amountMinor: 250,
-      occurredAtLocal: "2026-08-10T09:05",
-    }, database, new Date(2026, 7, 10, 9, 5));
-    expect(corrected.id).toBe(first.id);
-    expect(corrected.createdAt).toBe(first.createdAt);
-    expect(corrected.kind === "cycle_settlement" && corrected.closingRetainedMinor).toBe(250);
-    await expect(database.savingsEvents.count()).resolves.toBe(1);
-
-    const put = vi.spyOn(database.savingsEvents, "put").mockRejectedValueOnce(new Error("quota"));
-    await expect(settleSavingsCycle({
-      cycleStartDateKey: "2026-07-10",
-      cycleEndDateKey: "2026-08-09",
-      goalMinorSnapshot: 300,
-      amountMinor: 200,
-      occurredAtLocal: "2026-08-10T09:10",
-    }, database, new Date(2026, 7, 10, 9, 10))).rejects.toThrow("quota");
-    put.mockRestore();
-    expect((await database.savingsEvents.get(first.id))?.amountMinor).toBe(250);
+    }, database, new Date(2026, 7, 10, 9))).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
+    await expect(database.savingsEvents.count()).resolves.toBe(0);
   });
 
-  it("keeps new-cycle savings out of a late previous-cycle settlement snapshot", async () => {
+  it("keeps a migrated historical settlement in retained savings", async () => {
     await setInitialBalance(2_000, database);
     await setOpeningSavings(100, database, new Date(2026, 6, 1, 9));
     await reserveSavings({ amountMinor: 200 }, database, new Date(2026, 6, 20, 9));
     await reserveSavings({ amountMinor: 50 }, database, new Date(2026, 7, 10, 8));
 
-    const settled = await settleSavingsCycle({
+    const settled: SavingsEvent = {
+      id: "savings-settlement-2026-07-10",
+      kind: "cycle_settlement",
+      note: "legacy",
       cycleStartDateKey: "2026-07-10",
       cycleEndDateKey: "2026-08-09",
       goalMinorSnapshot: 500,
       amountMinor: 300,
-      occurredAtLocal: "2026-08-10T09:00",
-    }, database, new Date(2026, 7, 10, 9));
-
-    expect(settled).toMatchObject({
       openingRetainedMinor: 100,
       closingRetainedMinor: 600,
       netGrowthMinor: 500,
-    });
+      occurredAt: "2026-08-10T01:00:00.000Z",
+      localDateKey: "2026-08-10",
+      localMonthKey: "2026-08",
+      timezoneOffsetMinutes: -480,
+      createdAt: "2026-08-10T01:00:00.000Z",
+      updatedAt: "2026-08-10T01:00:00.000Z",
+    };
+    await database.savingsEvents.put(settled);
     expect(calculateRetainedSavingsSummary(
       await listActiveSavingsEvents(database),
     ).totalRetainedMinor).toBe(650n);
   });
 
-  it("moves a one-cycle target when the expected receipt date is postponed", async () => {
+  it("rejects a legacy one-cycle target when income is postponed", async () => {
     const now = new Date(2026, 7, 9, 10);
-    await setPayCyclePlan({ paydayDay: 10, defaultSavingsTargetMinor: 300 }, database, now);
+    await setPayCyclePlan({ paydayDay: 10 }, database, now);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 400,
       expectedIncomeMinor: 500,
     }, database, now);
-    await setSavingsTargetOverride(450, database, now);
+    await expect(setSavingsTargetOverride(450, database, now)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
     const postponed = await setIncomeForecast({
       targetPaydayDateKey: "2026-08-15",
-      minimumIncomeMinor: 400,
       expectedIncomeMinor: 500,
     }, database, now);
-    expect(postponed.savingsTargetOverride).toEqual({
-      targetPaydayDateKey: "2026-08-15",
-      targetMinor: 450,
-    });
+    expect(postponed.savingsTargetOverride).toBeUndefined();
+    expect(postponed.incomeForecast?.targetPaydayDateKey).toBe("2026-08-15");
   });
 
   it("queues savings mutations without blocking the local event transaction", async () => {

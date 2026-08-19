@@ -1,32 +1,19 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type {
-  AppSettings,
-  IncomeForecast,
-  PayCyclePlan,
-  SavingsEvent,
-  SpendingAnalysis,
-} from "../domain";
+import type { AppSettings, SavingsEvent, SpendingAnalysis } from "../domain";
 import { AnalysisView } from "./AnalysisView";
 
 vi.mock("recharts", () => {
   const Container = ({ children }: { children?: React.ReactNode }) => <div data-chart-container="true">{children}</div>;
-  const LineSeries = ({ name, strokeDasharray }: { name?: string; strokeDasharray?: string }) => (
-    <i data-chart-series={name} data-line-style={strokeDasharray ? "dashed" : "solid"} />
-  );
-  const Reference = ({ label, ifOverflow }: { label?: { value?: string }; ifOverflow?: string }) => (
-    <i data-reference-line={label?.value ?? "reference"} data-if-overflow={ifOverflow} />
-  );
+  const LineSeries = ({ name, strokeDasharray }: { name?: string; strokeDasharray?: string }) => <i data-chart-series={name} data-line-style={strokeDasharray ? "dashed" : "solid"} />;
   const BarSeries = ({ name }: { name?: string }) => <i data-chart-series={name} />;
   return {
     ResponsiveContainer: Container,
     LineChart: Container,
     BarChart: Container,
     CartesianGrid: () => null,
-    Legend: () => null,
     Line: LineSeries,
-    ReferenceLine: Reference,
     Bar: BarSeries,
     Tooltip: () => null,
     XAxis: () => null,
@@ -34,16 +21,22 @@ vi.mock("recharts", () => {
   };
 });
 
-const plan: PayCyclePlan = {
-  paydayDay: 10,
-  defaultSavingsTargetMinor: 100_000,
+const settings: AppSettings = {
+  id: "primary",
+  currency: "CNY",
+  initialBalanceMinor: 0,
+  payCycle: { paydayDay: 10 },
+  savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 500_000 },
+  incomeForecast: { id: "forecast-1", targetPaydayDateKey: "2026-09-10", expectedIncomeMinor: 800_000 },
+  schemaVersion: 1,
+  updatedAt: "2026-08-10T00:00:00.000Z",
 };
 
 const savingsEvents: SavingsEvent[] = [{
   id: "savings-opening",
   kind: "opening",
   amountMinor: 100_000,
-  note: "初始留存",
+  note: "已有存款",
   occurredAt: "2026-07-01T04:00:00.000Z",
   localDateKey: "2026-07-01",
   localMonthKey: "2026-07",
@@ -52,72 +45,18 @@ const savingsEvents: SavingsEvent[] = [{
   updatedAt: "2026-07-01T04:00:00.000Z",
 }];
 
-const settledSavingsEvent: Extract<SavingsEvent, { kind: "cycle_settlement" }> = {
-  id: "savings-settlement-2026-07-10",
-  kind: "cycle_settlement",
-  amountMinor: 50_000,
-  note: "七月结算",
-  occurredAt: "2026-08-10T01:00:00.000Z",
-  localDateKey: "2026-08-10",
-  localMonthKey: "2026-08",
-  timezoneOffsetMinutes: -480,
-  cycleStartDateKey: "2026-07-10",
-  cycleEndDateKey: "2026-08-09",
-  goalMinorSnapshot: 100_000,
-  openingRetainedMinor: 50_000,
-  closingRetainedMinor: 100_000,
-  netGrowthMinor: 50_000,
-  createdAt: "2026-08-10T01:00:00.000Z",
-  updatedAt: "2026-08-10T01:00:00.000Z",
-};
-
-const incomeForecast: IncomeForecast = {
-  id: "forecast-1",
-  targetPaydayDateKey: "2026-09-10",
-  minimumIncomeMinor: 600_000,
-  expectedIncomeMinor: 800_000,
-};
-
-const settings: AppSettings = {
-  id: "primary",
-  currency: "CNY",
-  initialBalanceMinor: 0,
-  payCycle: plan,
-  incomeForecast,
-  schemaVersion: 1,
-  updatedAt: "2026-08-10T00:00:00.000Z",
-};
-
-function analysis(
-  confidence: SpendingAnalysis["confidence"] = "ready",
-  outcome: "surplus" | "shortfall" | "exact" = "surplus",
-): SpendingAnalysis {
-  const prediction = confidence === "insufficient" ? {} : {
+function analysis(confidence: SpendingAnalysis["confidence"] = "ready"): SpendingAnalysis {
+  const forecast = confidence === "insufficient" ? {} : {
     estimatedRemainingExpenseMinor: 120_000,
-    projectedEndBalanceMinor: outcome === "shortfall" ? 150_000n : outcome === "exact" ? 200_000n : 350_000n,
-    balanceGoalDifferenceMinor: outcome === "shortfall" ? -50_000n : outcome === "exact" ? 0n : 150_000n,
-    affordability: outcome,
+    projectedEndBalanceMinor: 480_000n,
+    balanceGoalDifferenceMinor: 380_000n,
+    affordability: "surplus" as const,
   };
-  const nextPrediction = confidence === "insufficient" ? {} : {
+  const next = confidence === "insufficient" ? {} : {
     referenceSpendMinor: 650_000,
-    defaultSavingsTargetMinor: 100_000,
-    minimumIncomeScenario: {
-      incomeMinor: incomeForecast.minimumIncomeMinor,
-      spendingDifferenceMinor: -50_000n,
-      savingsTargetMinor: 100_000,
-      differenceMinor: -150_000n,
-      affordability: "shortfall" as const,
-    },
-    expectedIncomeScenario: {
-      incomeMinor: incomeForecast.expectedIncomeMinor,
-      spendingDifferenceMinor: 150_000n,
-      savingsTargetMinor: 100_000,
-      differenceMinor: 50_000n,
-      affordability: "surplus" as const,
-    },
+    expectedIncomeScenario: { incomeMinor: 800_000, differenceMinor: 150_000n, affordability: "surplus" as const },
   };
   const observedDays = confidence === "ready" ? 30 : confidence === "preliminary" ? 20 : 5;
-
   return {
     asOfDateKey: "2026-08-20",
     confidence,
@@ -132,73 +71,45 @@ function analysis(
     includedExpenseMinor: 300_000,
     excludedExpenseMinor: 0,
     pendingConfirmationCount: 0,
-    defaultSavingsTargetMinor: plan.defaultSavingsTargetMinor,
     retainedSavings: {
       openingRetainedMinor: 100_000n,
-      reservedMinor: 50_000n,
+      reservedMinor: 0n,
       releasedMinor: 0n,
       settledMinor: 0n,
-      totalRetainedMinor: 150_000n,
+      totalRetainedMinor: 100_000n,
       hasNegativeBalance: false,
       needsCorrection: false,
     },
-    currentSavings: {
-      cycleStartDateKey: "2026-08-10",
-      cycleEndDateKey: "2026-09-09",
-      nextPaydayDateKey: "2026-09-10",
-      targetMinor: 100_000,
-      openingRetainedMinor: 100_000n,
-      closingRetainedMinor: 150_000n,
-      netGrowthMinor: 50_000n,
-      remainingTargetMinor: 50_000n,
-      settled: false,
+    savingsGoal: {
+      targetDateKey: "2026-12-31",
+      targetMinor: 500_000,
+      retainedMinor: 100_000n,
+      remainingMinor: 400_000n,
+      status: "active",
+      remainingPaydayCount: 4,
+      suggestedPerCycleMinor: 100_000n,
       needsCorrection: false,
     },
-    savingsHistory: [{
-      cycleStartDateKey: "2026-07-10",
-      cycleEndDateKey: "2026-08-09",
-      targetMinor: 100_000,
-      netGrowthMinor: 50_000n,
-      openingRetainedMinor: 50_000n,
-      closingRetainedMinor: 100_000n,
-      settled: true,
-      needsCorrection: false,
-    }],
     currentCycle: {
       cycleStartDateKey: "2026-08-10",
       cycleEndDateKey: "2026-09-09",
       nextPaydayDateKey: "2026-09-10",
       daysUntilPayday: 21,
       actualExpenseMinor: 200_000,
-      balanceHeadroomMinor: 400_000n,
-      safeToSpendMinor: 400_000n,
+      balanceHeadroomMinor: 500_000n,
+      safeToSpendMinor: 500_000n,
       dailySafeToSpendMinor: 23_809n,
       totalBalanceMinor: 600_000n,
-      retainedBalanceMinor: 150_000n,
-      cycleOpeningRetainedMinor: 100_000n,
-      cycleNetGrowthMinor: 50_000n,
-      savingsTargetMinor: 100_000,
-      remainingSavingsTargetMinor: 50_000n,
-      spendableBalanceMinor: 400_000n,
-      savingsNeedsCorrection: false,
-      ...prediction,
+      retainedBalanceMinor: 100_000n,
+      spendableBalanceMinor: 500_000n,
+      ...forecast,
     },
     nextCycle: {
       cycleStartDateKey: "2026-09-10",
       cycleEndDateKey: "2026-10-09",
       nextPaydayDateKey: "2026-10-10",
       days: 30,
-      savingsHistory: [{
-        cycleStartDateKey: "2026-07-10",
-        cycleEndDateKey: "2026-08-09",
-        targetMinor: 100_000,
-        netGrowthMinor: 50_000n,
-        openingRetainedMinor: 50_000n,
-        closingRetainedMinor: 100_000n,
-        settled: true,
-        needsCorrection: false,
-      }],
-      ...nextPrediction,
+      ...next,
     },
     dailyExpenses: [
       { dateKey: "2026-08-18", expenseMinor: 0 },
@@ -206,305 +117,108 @@ function analysis(
     ],
     currentCycleSeries: [
       { dateKey: "2026-08-10", actualCumulativeMinor: 50_000, isPaydayBoundary: true },
-      { dateKey: "2026-08-20", actualCumulativeMinor: 200_000, projectedCumulativeMinor: 200_000, isPaydayBoundary: false },
       { dateKey: "2026-09-10", projectedCumulativeMinor: 320_000, isPaydayBoundary: true },
     ],
-    completedCycles: [
-      { cycleStartDateKey: "2026-07-10", cycleEndDateKey: "2026-08-09", dayCount: 31, expenseMinor: 500_000 },
-    ],
+    completedCycles: [{ cycleStartDateKey: "2026-07-10", cycleEndDateKey: "2026-08-09", dayCount: 31, expenseMinor: 500_000 }],
   };
 }
 
-const mountedRoots: Root[] = [];
-const reactTestEnvironment = globalThis as typeof globalThis & {
-  IS_REACT_ACT_ENVIRONMENT?: boolean;
-};
-const previousActEnvironment = reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT;
-
-beforeAll(() => {
-  reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
-});
-
+const roots: Root[] = [];
+const reactEnv = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+const previousAct = reactEnv.IS_REACT_ACT_ENVIRONMENT;
+beforeAll(() => { reactEnv.IS_REACT_ACT_ENVIRONMENT = true; });
 afterAll(() => {
-  if (previousActEnvironment === undefined) {
-    Reflect.deleteProperty(reactTestEnvironment, "IS_REACT_ACT_ENVIRONMENT");
-  } else {
-    reactTestEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
-  }
+  if (previousAct === undefined) Reflect.deleteProperty(reactEnv, "IS_REACT_ACT_ENVIRONMENT");
+  else reactEnv.IS_REACT_ACT_ENVIRONMENT = previousAct;
 });
-
 afterEach(async () => {
-  await act(async () => {
-    for (const root of mountedRoots.splice(0)) root.unmount();
-  });
+  await act(async () => { for (const root of roots.splice(0)) root.unmount(); });
   document.body.replaceChildren();
 });
 
-async function renderView({
-  result,
-  appSettings = settings,
-  entryCount = result ? 1 : 0,
-  error,
-  eventList = savingsEvents,
-}: {
-  result?: SpendingAnalysis;
-  appSettings?: AppSettings;
-  entryCount?: number;
-  error?: string;
-  eventList?: readonly SavingsEvent[];
-} = {}) {
+async function renderView(result?: SpendingAnalysis, appSettings: AppSettings = settings, entryCount = 1) {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  mountedRoots.push(root);
+  roots.push(root);
   const onOpenSettings = vi.fn();
   const onOpenIncomeForecast = vi.fn();
-  const onCorrectSavingsSettlement = vi.fn();
   const onOpenLedger = vi.fn();
-  await act(async () => {
-    root.render(
-      <AnalysisView
-        analysis={result}
-        savingsEvents={eventList}
-        summary={{ balanceMinor: 600_000, monthIncomeMinor: 800_000, monthExpenseMinor: 240_000 }}
-        settings={appSettings}
-        entryCount={entryCount}
-        error={error}
-        onOpenSettings={onOpenSettings}
-        onOpenIncomeForecast={onOpenIncomeForecast}
-        onCorrectSavingsSettlement={onCorrectSavingsSettlement}
-        onOpenLedger={onOpenLedger}
-      />,
-    );
-  });
-  return {
-    host,
-    onOpenSettings,
-    onOpenIncomeForecast,
-    onCorrectSavingsSettlement,
-    onOpenLedger,
-  };
+  await act(async () => root.render(
+    <AnalysisView
+      analysis={result}
+      savingsEvents={savingsEvents}
+      summary={{ balanceMinor: 600_000, monthIncomeMinor: 800_000, monthExpenseMinor: 240_000 }}
+      settings={appSettings}
+      entryCount={entryCount}
+      onOpenSettings={onOpenSettings}
+      onOpenIncomeForecast={onOpenIncomeForecast}
+      onOpenLedger={onOpenLedger}
+    />,
+  ));
+  return { host, onOpenSettings, onOpenIncomeForecast, onOpenLedger };
 }
 
-describe("AnalysisView states", () => {
-  it("asks for a complete pay cycle plan before forecasting", async () => {
-    const { host, onOpenSettings } = await renderView({
-      appSettings: { ...settings, payCycle: undefined },
-    });
+describe("AnalysisView", () => {
+  it("shows a semantic savings goal with a derived per-cycle suggestion", async () => {
+    const { host } = await renderView(analysis());
+    const progress = host.querySelector<HTMLProgressElement>("progress");
+    expect(progress?.value).toBe(100_000);
+    expect(progress?.max).toBe(500_000);
+    expect(progress?.getAttribute("aria-valuetext")).toContain("已存 ¥1,000.00");
+    expect(host.textContent).toContain("每期建议¥1,000.00");
+    expect(host.textContent).toContain("剩余 4 次到账");
+  });
 
-    expect(host.textContent).toContain("先设置发薪周期");
-    expect(host.textContent).toContain("需要发薪日和每周期默认留存目标。");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置发薪周期"));
+  it("uses one next-income scenario and removes cycle savings conclusions", async () => {
+    const { host } = await renderView(analysis());
+    expect(host.textContent).toContain("下次收入");
+    expect(host.textContent).toContain("¥8,000.00");
+    expect(host.textContent).not.toContain("最低收入");
+    expect(host.textContent).not.toContain("本周期留存");
+    expect(host.textContent).not.toContain("尚需留存");
+  });
+
+  it("renders exactly three useful charts with non-color legends and tables", async () => {
+    const { host } = await renderView(analysis());
+    expect(host.querySelectorAll(".analysis-chart-section")).toHaveLength(3);
+    expect(host.querySelectorAll('[data-chart-series="实际支出"]')).toHaveLength(2);
+    expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
+    expect(host.querySelector('[data-chart-series="每日支出"]')).not.toBeNull();
+    expect(Array.from(host.querySelectorAll("caption")).map((item) => item.textContent)).toEqual([
+      "存钱明细",
+      "当前周期累计支出",
+      "完整到账周期支出",
+      "每日支出",
+    ]);
+    expect(host.textContent).not.toContain("完整周期留存");
+  });
+
+  it("withholds financial verdicts when data is insufficient", async () => {
+    const { host } = await renderView(analysis("insufficient"));
+    expect(host.textContent).toContain("还差 9 天");
+    expect(host.textContent).toContain("还差 9 个完整日");
+    expect(host.textContent).not.toContain("截至昨天的 5 个完整日");
+  });
+
+  it("keeps savings goal visible without a pay cycle but hides the suggestion", async () => {
+    const appSettings = { ...settings, payCycle: undefined };
+    const { host, onOpenSettings } = await renderView(undefined, appSettings);
+    expect(host.textContent).toContain("存钱目标");
+    expect(host.textContent).not.toContain("每期建议");
+    expect(host.textContent).toContain("设置发薪日");
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置发薪日"));
     await act(async () => button?.click());
     expect(onOpenSettings).toHaveBeenCalledOnce();
   });
 
-  it("guides an empty ledger back to quick entry", async () => {
-    const empty = analysis("insufficient");
-    empty.window.observedDays = 0;
-    empty.window.totalExpenseMinor = 0;
-    empty.window.averageDailyExpenseMinor = undefined;
-    empty.dailyExpenses = [];
-    empty.currentCycleSeries = [];
-    const { host, onOpenLedger } = await renderView({ result: empty, entryCount: 0 });
-
-    expect(host.textContent).toContain("还没有支出记录");
-    expect(host.textContent).toContain("支出数据覆盖满 14 个完整日后开始估算。");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("去记一笔"));
-    await act(async () => button?.click());
-    expect(onOpenLedger).toHaveBeenCalledOnce();
-  });
-
-  it("keeps today's actual amounts visible before a completed day exists", async () => {
-    const todayOnly = analysis("insufficient");
-    todayOnly.window.observedDays = 0;
-    todayOnly.window.totalExpenseMinor = 0;
-    todayOnly.window.averageDailyExpenseMinor = undefined;
-    todayOnly.dailyExpenses = [];
-    todayOnly.currentCycle.actualExpenseMinor = 2_400;
-    const { host } = await renderView({ result: todayOnly, entryCount: 1 });
-
-    expect(host.textContent).not.toContain("还没有支出记录");
-    expect(host.textContent).toContain("本周期实际支出");
-    expect(host.textContent).toContain("实际现金流");
-    expect(host.textContent).toContain("日常花法");
-    expect(host.textContent).toContain("¥24.00");
-    expect(host.textContent).toContain("数据覆盖还差 14 天");
-    expect(host.textContent).toContain("满 14 天数据覆盖后开始估算");
-    expect(host.textContent).toContain("暂不预测周期末余额");
-    expect(host.textContent).not.toContain("日常花法数据覆盖截至昨天");
-    expect(host.textContent).not.toContain("保守估算");
-    expect(host.textContent).not.toContain("预计够用");
-  });
-
-  it("explains why an insufficient sample does not produce a verdict", async () => {
-    const { host } = await renderView({ result: analysis("insufficient") });
-
-    expect(host.textContent).toContain("数据覆盖还差 9 天");
-    expect(host.textContent).toContain("满 14 天数据覆盖后开始估算");
-    expect(host.textContent).toContain("暂不预测周期末余额");
-    expect(host.textContent).toContain("数据覆盖不足，暂不判断");
-    expect(host.textContent).toContain("实际现金流");
-    expect(host.textContent).toContain("日常花法");
-    expect(host.textContent).not.toContain("日常花法数据覆盖截至昨天");
-    expect(host.textContent).not.toContain("保守估算");
-    expect(host.textContent).not.toContain("预计够用");
-  });
-
-  it("shows a recoverable error state", async () => {
-    const { host, onOpenLedger } = await renderView({ error: "账目合计超出安全范围" });
-
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("账目合计超出安全范围");
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("请检查账目后重新打开分析页");
-    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("返回记账页"));
-    await act(async () => button?.click());
-    expect(onOpenLedger).toHaveBeenCalledOnce();
-  });
-
-  it("gives storage read failures a relevant retry instruction", async () => {
-    const { host } = await renderView({ error: "无法读取本机账目" });
-
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("无法读取本机账目。请刷新页面重试。");
-    expect(host.querySelector('[role="alert"]')?.textContent).not.toContain("请检查账目");
-  });
-});
-
-describe("AnalysisView forecasts and charts", () => {
-  it("uses the concise confidence labels for preliminary data", async () => {
-    const { host } = await renderView({ result: analysis("preliminary") });
-
-    expect(host.textContent).toContain("初步估算");
-    expect(host.textContent).toContain("数据覆盖 20 天 · 不代表记录完整");
-  });
-
-  it.each([
-    ["surplus", "预计够用", "+¥1,500.00"],
-    ["shortfall", "预计有缺口", "−¥500.00"],
-    ["exact", "预计刚好覆盖", "¥0.00"],
-  ] as const)("renders the %s outcome with explicit wording", async (outcome, verdict, difference) => {
-    const { host } = await renderView({ result: analysis("ready", outcome) });
-
-    expect(host.textContent).toContain(verdict);
-    expect(host.textContent).toContain(difference);
-  });
-
-  it("renders minimum and expected income as separate scenarios", async () => {
-    const { host } = await renderView({ result: analysis("ready") });
-
-    expect(host.textContent).toContain("最低收入 ¥6,000.00");
-    expect(host.textContent).toContain("预计支出 ¥6,500.00，留存目标 ¥1,000.00；还差 ¥1,500.00");
-    expect(host.textContent).toContain("预计收入 ¥8,000.00");
-    expect(host.textContent).toContain("预计支出 ¥6,500.00，留存目标 ¥1,000.00；还可剩 ¥500.00");
-    expect(host.textContent).toContain("最低收入差额−¥1,500.00");
-    expect(host.textContent).toContain("预计收入差额+¥500.00");
-    expect(host.textContent).toContain("实际现金流");
-    expect(host.textContent).toContain("日常花法");
-    expect(host.textContent).not.toContain("月工资");
-  });
-
-  it("keeps the analysis visible when the next income forecast is missing", async () => {
-    const { host, onOpenIncomeForecast } = await renderView({
-      result: analysis("ready"),
-      appSettings: { ...settings, incomeForecast: undefined },
-    });
-
-    expect(host.textContent).toContain("预计周期末余额");
-    expect(host.textContent).toContain("当前周期累计支出");
-    const button = Array.from(host.querySelectorAll("button"))
-      .find((item) => item.textContent?.includes("填写下次收入"));
+  it("offers one forecast action when expected income is missing", async () => {
+    const appSettings = { ...settings, incomeForecast: undefined };
+    const result = analysis();
+    result.nextCycle.expectedIncomeScenario = undefined;
+    const { host, onOpenIncomeForecast } = await renderView(result, appSettings);
+    const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("填写预计"));
     await act(async () => button?.click());
     expect(onOpenIncomeForecast).toHaveBeenCalledOnce();
-  });
-
-  it("renders savings progress, four chart explanations, and semantic data tables", async () => {
-    const { host } = await renderView({ result: analysis() });
-
-    expect(host.querySelectorAll(".analysis-chart-section")).toHaveLength(4);
-    expect(host.querySelectorAll("table caption")).toHaveLength(5);
-    expect(host.querySelectorAll('th[scope="col"]').length).toBeGreaterThan(0);
-    expect(host.querySelectorAll('th[scope="row"]').length).toBeGreaterThan(0);
-    expect(host.textContent).toContain("当前周期累计支出");
-    expect(host.textContent).toContain("完整周期留存");
-    expect(host.textContent).toContain("完整工资周期支出");
-    expect(host.textContent).toContain("近 30 个完整日的每日支出");
-    expect(host.textContent).toContain("实际现金流");
-    expect(host.textContent).toContain("日常花法");
-    expect(host.textContent).toContain("本周期留存");
-    expect(host.textContent).toContain("本周期净增长+¥500.00");
-    expect(host.textContent).toContain("尚需留存¥500.00");
-    expect(host.textContent).toContain("留存明细");
-    expect(host.textContent).toContain("最近周期未达到目标：净增长 +¥500.00，目标 ¥1,000.00");
-    expect(host.textContent).toContain("包含 0 支出日");
-    expect(host.textContent).toContain("日常花法数据覆盖截至昨天的");
-    expect(host.textContent).toContain("不代表记录完整");
-    expect((host.textContent?.match(/日常花法数据覆盖截至昨天的/g) ?? []).length).toBe(1);
-    for (const oldCopy of [
-      "资金判断",
-      "两段钱，分别回答",
-      "把依据摆在一起",
-      "花费速度",
-      "工资基线",
-      "可绘制的支出点",
-      "一定够用",
-      "保证够用",
-      "周期底线",
-    ]) {
-      expect(host.textContent).not.toContain(oldCopy);
-    }
-  });
-
-  it("offers a keyboard-operable correction action only for cycle settlements", async () => {
-    const { host, onCorrectSavingsSettlement } = await renderView({
-      result: analysis(),
-      eventList: [...savingsEvents, settledSavingsEvent],
-    });
-
-    const correctionButtons = Array.from(
-      host.querySelectorAll<HTMLButtonElement>(".analysis-settlement-action"),
-    );
-    expect(correctionButtons).toHaveLength(1);
-    expect(correctionButtons[0]?.type).toBe("button");
-    expect(correctionButtons[0]?.getAttribute("aria-label"))
-      .toBe("更正 2026-07-10 至 2026-08-09 的周期结算");
-
-    await act(async () => correctionButtons[0]?.click());
-    expect(onCorrectSavingsSettlement).toHaveBeenCalledWith(settledSavingsEvent);
-  });
-
-  it("uses the requested empty chart labels without implementation language", async () => {
-    const result = analysis("preliminary");
-    result.currentCycleSeries = [];
-    result.completedCycles = [];
-    result.dailyExpenses = [];
-    result.savingsHistory = [];
-    result.nextCycle.savingsHistory = [];
-    const { host } = await renderView({ result, entryCount: 1 });
-
-    expect(Array.from(host.querySelectorAll(".analysis-chart-empty")).map((item) => item.textContent)).toEqual([
-      "当前周期暂无支出。",
-      "暂无完整周期留存记录。",
-      "暂无完整周期数据。",
-      "暂无完整日数据。",
-    ]);
-    expect(Array.from(host.querySelectorAll("table caption")).map((item) => item.textContent)).toEqual([
-      "留存明细",
-      "当前周期累计支出",
-      "完整周期留存",
-      "完整工资周期支出",
-      "每日支出",
-    ]);
-    expect(host.textContent).not.toContain("记录完整工资周期后显示");
-    expect(host.textContent).not.toContain("记录完整日后显示");
-  });
-
-  it("uses solid actuals and dashed predictions without a fixed-income reference", async () => {
-    const { host } = await renderView({ result: analysis() });
-
-    expect(host.querySelector('[data-chart-series="实际支出"]')?.getAttribute("data-line-style")).toBe("solid");
-    expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
-    expect(host.querySelectorAll("[data-reference-line]")).toHaveLength(0);
-    expect(host.textContent).toContain("实际支出");
-    expect(host.textContent).toContain("预测支出");
-    expect(host.textContent).not.toContain("当前月工资");
   });
 });

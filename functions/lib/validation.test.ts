@@ -608,6 +608,125 @@ describe("validateSyncRequest", () => {
     expect(() => validateSyncRequest(zeroReserve)).toThrowError("Savings event payload is invalid");
   });
 
+  it("accepts version-seven single-income and cumulative-goal settings", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 7;
+    request.mutations = [{
+      id: "mutation_settings_v7",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 3,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: { paydayDay: 31 },
+        incomeForecast: {
+          id: "forecast_2026_08_31",
+          targetPaydayDateKey: "2026-08-31",
+          expectedIncomeMinor: 800_000,
+        },
+        savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 1_000_000 },
+        lastExpectedIncomeMinor: 800_000,
+        savingsGoalNeedsSetup: null,
+        schemaVersion: 1,
+        updatedAt: "2026-07-30T04:01:00.000Z",
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      payCycle: { paydayDay: 31 },
+      incomeForecast: { expectedIncomeMinor: 800_000 },
+      savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 1_000_000 },
+      lastExpectedIncomeMinor: 800_000,
+      savingsGoalNeedsSetup: null,
+    });
+
+    const dualScenario = structuredClone(request) as {
+      mutations: Array<{ payload: { incomeForecast: Record<string, unknown> } }>;
+    };
+    dualScenario.mutations[0].payload.incomeForecast.minimumIncomeMinor = 600_000;
+    expect(() => validateSyncRequest(dualScenario)).toThrowError("Settings payload is invalid");
+
+    const cycleTarget = structuredClone(request) as {
+      mutations: Array<{ payload: { payCycle: Record<string, unknown> } }>;
+    };
+    cycleTarget.mutations[0].payload.payCycle.defaultSavingsTargetMinor = 100_000;
+    expect(() => validateSyncRequest(cycleTarget)).toThrowError("Settings payload is invalid");
+
+    const contradictoryGoal = structuredClone(request) as {
+      mutations: Array<{ payload: { savingsGoalNeedsSetup: true | null } }>;
+    };
+    contradictoryGoal.mutations[0].payload.savingsGoalNeedsSetup = true;
+    expect(() => validateSyncRequest(contradictoryGoal)).toThrowError(
+      "Settings payload is invalid",
+    );
+  });
+
+  it("validates an atomic version-seven income confirmation", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 7;
+    request.mutations = [{
+      id: "mutation_confirm_income",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 3,
+      payload: {
+        id: "primary",
+        currency: "CNY",
+        initialBalanceMinor: 500,
+        payCycle: { paydayDay: 31 },
+        incomeForecast: null,
+        lastExpectedIncomeMinor: 800_000,
+        incomeConfirmation: {
+          confirmationId: "confirmation_1",
+          forecastId: "forecast_2026_08_31",
+          targetPaydayDateKey: "2026-08-31",
+          expectedIncomeMinor: 800_000,
+          actualIncomeMinor: 750_000,
+          confirmedAt: "2026-08-31T01:00:00.000Z",
+          entryMutationId: "mutation_actual_income_1",
+          entry: {
+            id: "forecast_2026_08_31",
+            amountMinor: 750_000,
+            note: "本次实际收入",
+            occurredAt: "2026-08-31T01:00:00.000Z",
+            localDateKey: "2026-08-31",
+            localMonthKey: "2026-08",
+            timezoneOffsetMinutes: -480,
+            treatment: "ordinary_income",
+            confirmationStatus: "not_needed",
+            createdAt: "2026-08-31T01:00:00.000Z",
+            updatedAt: "2026-08-31T01:00:00.000Z",
+          },
+        },
+        schemaVersion: 1,
+        updatedAt: "2026-08-31T01:00:00.000Z",
+      },
+    }];
+
+    expect(validateSyncRequest(request).mutations[0]).toMatchObject({
+      payload: {
+        incomeForecast: null,
+        incomeConfirmation: { actualIncomeMinor: 750_000 },
+      },
+    });
+
+    const mismatched = structuredClone(request) as {
+      mutations: Array<{ payload: { incomeConfirmation: { actualIncomeMinor: number } } }>;
+    };
+    mismatched.mutations[0].payload.incomeConfirmation.actualIncomeMinor = 1;
+    expect(() => validateSyncRequest(mismatched)).toThrowError("Settings payload is invalid");
+
+    const zero = structuredClone(request) as {
+      mutations: Array<{ payload: { incomeConfirmation: Record<string, unknown> } }>;
+    };
+    zero.mutations[0].payload.incomeConfirmation.actualIncomeMinor = 0;
+    delete zero.mutations[0].payload.incomeConfirmation.entry;
+    delete zero.mutations[0].payload.incomeConfirmation.entryMutationId;
+    expect(() => validateSyncRequest(zero)).not.toThrow();
+  });
+
   it("accepts a create-then-delete tombstone without requiring its local attachment", () => {
     const request = validRequest() as {
       mutations: Array<{ payload: Record<string, unknown> }>;

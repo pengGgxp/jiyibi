@@ -21,7 +21,6 @@ import {
 import {
   entryToLocalDateTimeInput,
   formatCny,
-  savingsTargetFromPlan,
   type AppSettings,
   type Attachment,
   type LedgerEntry,
@@ -142,14 +141,17 @@ function formatEntryConflict(entry: LedgerEntry): string {
 
 function formatSettingsConflict(settings: AppSettings): string {
   const plan = settings.payCycle
-    ? `每月 ${settings.payCycle.paydayDay} 日发薪，每周期留存 ${formatCny(savingsTargetFromPlan(settings.payCycle))}`
+    ? `每月 ${settings.payCycle.paydayDay} 日到账`
     : settings.monthEndBalanceGoalMinor === undefined
-      ? "发薪周期未设置"
+      ? "到账日未设置"
       : `旧版自然月底线 ${formatCny(settings.monthEndBalanceGoalMinor)}`;
   const income = settings.incomeForecast
-    ? `；${settings.incomeForecast.targetPaydayDateKey} 收入预期：最低 ${formatCny(settings.incomeForecast.minimumIncomeMinor)}，预计 ${formatCny(settings.incomeForecast.expectedIncomeMinor)}`
+    ? `；${settings.incomeForecast.targetPaydayDateKey} 预计收入 ${formatCny(settings.incomeForecast.expectedIncomeMinor)}`
     : "；下次收入未填写";
-  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${plan}${income}`;
+  const goal = settings.savingsGoal
+    ? `；${settings.savingsGoal.targetDateKey} 前存到 ${formatCny(settings.savingsGoal.targetMinor)}`
+    : "；存钱目标未设置";
+  return `初始余额 ${formatCny(settings.initialBalanceMinor)}；${plan}${income}${goal}`;
 }
 
 function conflictView(conflict: SyncConflict): CloudConflictView {

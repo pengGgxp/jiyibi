@@ -96,6 +96,43 @@ function paydayInMonth(year: number, monthIndex: number, paydayDay: number): Dat
   return new Date(year, monthIndex, Math.min(paydayDay, lastDay));
 }
 
+/**
+ * Enumerate regular paydays in an inclusive local-date range.  The helper is
+ * intentionally date-key based so DST and device timezone changes cannot
+ * move a target across a calendar day.  A configured day beyond a month's
+ * length resolves to that month's last day (the same rule used by pay-cycle
+ * ranges).
+ */
+export function listPaydayDateKeys(
+  paydayDay: number,
+  startDateKey: string,
+  endDateKey: string,
+): string[] {
+  assertPaydayDay(paydayDay);
+  const start = localDateFromKey(startDateKey);
+  if (startDateKey > endDateKey) return [];
+
+  const result: string[] = [];
+  const end = localDateFromKey(endDateKey);
+  let year = start.getFullYear();
+  let month = start.getMonth();
+  const monthCount = (end.getFullYear() - year) * 12 + end.getMonth() - month;
+  // A local-month walk avoids millisecond arithmetic around DST.
+  for (let offset = 0; offset <= monthCount; offset += 1) {
+    const payday = paydayInMonth(year, month, paydayDay);
+    const paydayKey = localDateKey(payday);
+    if (paydayKey >= startDateKey && paydayKey <= endDateKey) {
+      result.push(paydayKey);
+    }
+    month += 1;
+    if (month > 11) {
+      month = 0;
+      year += 1;
+    }
+  }
+  return result;
+}
+
 function calendarDayNumber(date: Date): number {
   return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000;
 }

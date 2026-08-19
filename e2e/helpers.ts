@@ -185,16 +185,17 @@ export async function seedAnalysisLedger(
           id: "primary",
           currency: "CNY",
           initialBalanceMinor: balanceMinor,
-          payCycle: {
-            paydayDay: nextPayday.getDate(),
-            defaultSavingsTargetMinor: 100_000,
+          payCycle: { paydayDay: nextPayday.getDate() },
+          savingsGoal: {
+            targetDateKey: dateKey(new Date(today.getFullYear(), today.getMonth() + 4, 0, 12)),
+            targetMinor: 100_000,
           },
           incomeForecast: {
             id: "analysis-income-forecast",
             targetPaydayDateKey,
-            minimumIncomeMinor: 10_000,
             expectedIncomeMinor: 20_000,
           },
+          lastExpectedIncomeMinor: 20_000,
           schemaVersion: 1,
           updatedAt,
         });

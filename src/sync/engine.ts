@@ -10,6 +10,7 @@ import {
   commitSyncBatch,
   getSyncOverview,
   ledgerDb,
+  syncEntityKey,
   type LedgerDatabase,
   type SyncOutboxRecord,
   type SyncOverview,
@@ -132,8 +133,33 @@ async function listPushableMutations(
       if (!link?.uploadApproved) return [];
       const conflicts = new Set((await database.syncConflicts.toArray()).map(({ id }) => id));
       const outbox = await database.syncOutbox.toArray();
-      return outbox
-        .filter((mutation) => !conflicts.has(mutation.entityKey))
+      const pendingConfirmationEntries = new Set(
+        outbox
+          .filter((mutation) => mutation.incomeConfirmation)
+          .map((mutation) => mutation.incomeConfirmation!.forecastId),
+      );
+      const dependsOnPendingConfirmation = (mutation: SyncOutboxRecord): boolean => {
+        if (mutation.entityType === "entry") {
+          return pendingConfirmationEntries.has(mutation.entityId);
+        }
+        if (mutation.entityType === "recoveryAllocation") {
+          const allocation = mutation.payload as RecoveryAllocation;
+          return pendingConfirmationEntries.has(allocation.refundEntryId) ||
+            pendingConfirmationEntries.has(allocation.expenseEntryId);
+        }
+        if (mutation.entityType === "savingsEvent") {
+          const event = mutation.payload as SavingsEvent;
+          return "linkedExpenseEntryId" in event &&
+            event.linkedExpenseEntryId !== undefined &&
+            pendingConfirmationEntries.has(event.linkedExpenseEntryId);
+        }
+        return false;
+      };
+      const pushable = outbox
+        .filter((mutation) =>
+          !conflicts.has(mutation.entityKey) &&
+          !conflicts.has(syncEntityKey(mutation.entityType, mutation.entityId)) &&
+          !dependsOnPendingConfirmation(mutation))
         .sort((left, right) => {
           const priority = (mutation: SyncOutboxRecord): number => {
             const deleted = "deletedAt" in mutation.payload && Boolean(mutation.payload.deletedAt);
@@ -148,8 +174,13 @@ async function listPushableMutations(
           return priority(left) - priority(right)
             || left.createdAt.localeCompare(right.createdAt)
             || left.entityKey.localeCompare(right.entityKey);
-        })
-        .slice(0, MAX_MUTATIONS_PER_ROUND);
+        });
+      const confirmations = pushable.filter((mutation) => mutation.incomeConfirmation);
+      // A confirmation changes settings and may create an entry. Send one by
+      // itself so its result can rebase later settings and entry edits first.
+      return confirmations.length > 0
+        ? confirmations.slice(0, 1)
+        : pushable.slice(0, MAX_MUTATIONS_PER_ROUND);
     },
   );
 }
@@ -184,12 +215,29 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
   }
   const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload &
     Record<string, unknown>;
+  delete payload.monthEndBalanceGoalMinor;
   delete payload.savingsTargetNeedsReview;
+  delete payload.savingsTargetOverride;
   delete payload.cycleSavingsTargetOverride;
-  if (record.clearMonthEndBalanceGoal) payload.monthEndBalanceGoalMinor = null;
+  if (payload.payCycle) payload.payCycle = { paydayDay: payload.payCycle.paydayDay };
+  if (payload.incomeForecast) {
+    payload.incomeForecast = {
+      id: payload.incomeForecast.id,
+      targetPaydayDateKey: payload.incomeForecast.targetPaydayDateKey,
+      expectedIncomeMinor: payload.incomeForecast.expectedIncomeMinor,
+    };
+  }
   if (record.clearPayCycle) payload.payCycle = null;
   if (record.clearIncomeForecast) payload.incomeForecast = null;
-  if (record.clearSavingsTargetOverride) payload.savingsTargetOverride = null;
+  if (record.clearSavingsGoal) payload.savingsGoal = null;
+  if (record.clearLastExpectedIncomeMinor) payload.lastExpectedIncomeMinor = null;
+  if (record.clearSavingsGoalNeedsSetup ||
+      (payload.savingsGoal && payload.savingsGoalNeedsSetup === undefined)) {
+    payload.savingsGoalNeedsSetup = null;
+  }
+  if (record.incomeConfirmation) {
+    payload.incomeConfirmation = structuredClone(record.incomeConfirmation);
+  }
   return {
     id: record.id,
     entityType: "settings",
@@ -313,6 +361,18 @@ async function runSync(database: LedgerDatabase, api: SyncApiClient): Promise<Sy
       ...response.changes,
       ...response.results.flatMap((result) =>
         result.status === "conflict" ? [result.remote] : []),
+      ...response.results.flatMap((result): SyncChange[] =>
+        result.status !== "conflict" &&
+        result.incomeConfirmation?.entry &&
+        result.incomeConfirmation.entryVersion !== undefined
+          ? [{
+              seq: "0",
+              entityType: "entry",
+              entityId: result.incomeConfirmation.entry.id,
+              version: result.incomeConfirmation.entryVersion,
+              payload: result.incomeConfirmation.entry,
+            }]
+          : []),
     ];
     const downloads = await downloadRemoteAttachments(
       attachmentChanges,

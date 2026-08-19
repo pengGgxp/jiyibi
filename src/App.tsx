@@ -22,16 +22,11 @@ import {
   updateEntryTreatment,
 } from "./data";
 import {
-  addLocalDays,
   affectsBookBalance,
-  calculateCycleSavingsProgress,
   calculateRetainedSavingsSummary,
   currentLocalDateKey,
   evaluateExceptionPrompt,
-  localDateFromKey,
   payCyclePlanFromSettings,
-  resolvePayCycleRange,
-  type CycleSettlementSavingsEvent,
   type EntryDraft,
   type EntryTreatment,
   type LedgerEntry,
@@ -41,7 +36,6 @@ import { EntryComposer } from "./components/EntryComposer";
 import {
   IncomeForecastDialog,
   type IncomeDialogMode,
-  type IncomeSettlementContext,
 } from "./components/IncomeForecastDialog";
 import { PrimaryNavigation } from "./components/PrimaryNavigation";
 import { RecordList } from "./components/RecordList";
@@ -49,8 +43,8 @@ import { SettingsDialog } from "./components/SettingsDialog";
 import {
   SavingsDialog,
   type SavingsDialogMode,
-  type SavingsSettlementContext,
 } from "./components/SavingsDialog";
+import { SavingsGoalDialog } from "./components/SavingsGoalDialog";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { TreatmentConfirmationDialog } from "./components/TreatmentConfirmationDialog";
 import { UndoToasts, type PendingDeletion } from "./components/UndoToasts";
@@ -108,18 +102,6 @@ function CloudStatusIcon({ phase }: { phase: CloudSyncPhase }) {
   return <Cloud aria-hidden="true" />;
 }
 
-function savingsEventLocalDateTime(event: CycleSettlementSavingsEvent): string {
-  const occurredAt = Date.parse(event.occurredAt);
-  const offsetMinutes = Number.isFinite(event.timezoneOffsetMinutes)
-    ? event.timezoneOffsetMinutes
-    : 0;
-  const shifted = new Date(occurredAt - offsetMinutes * 60_000);
-  const time = Number.isNaN(shifted.getTime())
-    ? "00:00"
-    : shifted.toISOString().slice(11, 16);
-  return `${event.localDateKey}T${time}`;
-}
-
 export default function App() {
   const ledger = useLedger();
   const pwa = usePwa();
@@ -130,7 +112,7 @@ export default function App() {
   const [incomeDialogMode, setIncomeDialogMode] = useState<IncomeDialogMode>();
   const [incomeReminderDismissed, setIncomeReminderDismissed] = useState(false);
   const [savingsDialogMode, setSavingsDialogMode] = useState<SavingsDialogMode>();
-  const [correctingSettlement, setCorrectingSettlement] = useState<CycleSettlementSavingsEvent>();
+  const [savingsGoalOpen, setSavingsGoalOpen] = useState(false);
   const [savingsPrompt, setSavingsPrompt] = useState<{
     entry: LedgerEntry;
     suggestedAmountMinor: number;
@@ -165,95 +147,6 @@ export default function App() {
   const openingSavingsMinor = ledger.savingsEvents.find(
     (event) => event.kind === "opening",
   )?.amountMinor ?? 0;
-  const incomeSettlement = (() => {
-    if (!activePayCycle || !incomeForecast) return undefined;
-    try {
-      const targetRange = resolvePayCycleRange(
-        activePayCycle.paydayDay,
-        localDateFromKey(incomeForecast.targetPaydayDateKey),
-      );
-      const priorRange = resolvePayCycleRange(
-        activePayCycle.paydayDay,
-        localDateFromKey(addLocalDays(targetRange.cycleStartDateKey, -1)),
-      );
-      const cycleEndDateKey = addLocalDays(incomeForecast.targetPaydayDateKey, -1);
-      const progress = calculateCycleSavingsProgress(
-        ledger.savingsEvents,
-        activePayCycle,
-        priorRange.cycleStartDateKey,
-        cycleEndDateKey,
-        incomeForecast.targetPaydayDateKey,
-        cycleEndDateKey,
-        ledger.settings?.savingsTargetOverride,
-      );
-      const availableAfterExpected = unretainedMinor + BigInt(incomeForecast.expectedIncomeMinor);
-      const available = availableAfterExpected > 0n ? availableAfterExpected : 0n;
-      const suggested = progress.remainingTargetMinor < available
-        ? progress.remainingTargetMinor
-        : available;
-      if (suggested > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
-      return {
-        targetMinor: progress.targetMinor,
-        netGrowthMinor: progress.netGrowthMinor,
-        remainingTargetMinor: progress.remainingTargetMinor,
-        availableBeforeIncomeMinor: unretainedMinor,
-        suggestedAmountMinor: Number(suggested),
-      } satisfies IncomeSettlementContext;
-    } catch {
-      return undefined;
-    }
-  })();
-  const manualSettlement = (() => {
-    if (!activePayCycle || incomeForecast) return undefined;
-    try {
-      const currentRange = resolvePayCycleRange(
-        activePayCycle.paydayDay,
-        localDateFromKey(todayDateKey),
-      );
-      if (currentRange.cycleStartDateKey !== todayDateKey) return undefined;
-      const previousRange = resolvePayCycleRange(
-        activePayCycle.paydayDay,
-        localDateFromKey(addLocalDays(currentRange.cycleStartDateKey, -1)),
-      );
-      const progress = calculateCycleSavingsProgress(
-        ledger.savingsEvents,
-        activePayCycle,
-        previousRange.cycleStartDateKey,
-        previousRange.cycleEndDateKey,
-        previousRange.nextPaydayDateKey,
-        previousRange.cycleEndDateKey,
-        ledger.settings?.savingsTargetOverride,
-      );
-      if (progress.settled) return undefined;
-      const available = unretainedMinor > 0n ? unretainedMinor : 0n;
-      const suggested = progress.remainingTargetMinor < available
-        ? progress.remainingTargetMinor
-        : available;
-      return {
-        cycleStartDateKey: progress.cycleStartDateKey,
-        cycleEndDateKey: progress.cycleEndDateKey,
-        goalMinorSnapshot: progress.targetMinor,
-        suggestedAmountMinor: Number(suggested),
-      } satisfies SavingsSettlementContext;
-    } catch {
-      return undefined;
-    }
-  })();
-  const settlementCorrection = correctingSettlement ? {
-    cycleStartDateKey: correctingSettlement.cycleStartDateKey,
-    cycleEndDateKey: correctingSettlement.cycleEndDateKey,
-    goalMinorSnapshot: correctingSettlement.goalMinorSnapshot,
-    suggestedAmountMinor: correctingSettlement.amountMinor,
-    correction: {
-      currentAmountMinor: correctingSettlement.amountMinor,
-      openingRetainedMinor: correctingSettlement.openingRetainedMinor,
-      closingRetainedMinor: correctingSettlement.closingRetainedMinor,
-      netGrowthMinor: correctingSettlement.netGrowthMinor,
-      note: correctingSettlement.note,
-      occurredAtLocal: savingsEventLocalDateTime(correctingSettlement),
-    },
-  } satisfies SavingsSettlementContext : undefined;
-
   const showNotice = (next: Notice) => {
     window.clearTimeout(noticeTimer.current);
     setNotice(next);
@@ -586,22 +479,15 @@ export default function App() {
                 loading={ledger.loading}
                 onOpenSettings={() => setSettingsOpen(true)}
                 onOpenIncomeForecast={() => openIncomeDialog("forecast")}
+                onOpenSavingsGoal={() => setSavingsGoalOpen(true)}
                 onOpenAnalysis={() => navigate("analysis")}
                 onReserveSavings={() => {
                   setSavingsPrompt(undefined);
-                  setCorrectingSettlement(undefined);
                   setSavingsDialogMode("reserve");
                 }}
                 onReleaseSavings={() => {
                   setSavingsPrompt(undefined);
-                  setCorrectingSettlement(undefined);
                   setSavingsDialogMode("release");
-                }}
-                canSettleSavings={manualSettlement !== undefined}
-                onSettleSavings={() => {
-                  setSavingsPrompt(undefined);
-                  setCorrectingSettlement(undefined);
-                  setSavingsDialogMode("settle");
                 }}
               />
               <EntryComposer
@@ -639,11 +525,6 @@ export default function App() {
               error={ledger.analysisError?.message ?? ledger.error?.message}
               onOpenSettings={() => setSettingsOpen(true)}
               onOpenIncomeForecast={() => openIncomeDialog("forecast")}
-              onCorrectSavingsSettlement={(event) => {
-                setSavingsPrompt(undefined);
-                setCorrectingSettlement(event);
-                setSavingsDialogMode("settle");
-              }}
               onOpenLedger={() => navigate("ledger")}
             />
           </Suspense>
@@ -695,12 +576,19 @@ export default function App() {
         availableMinor={unretainedMinor > 0n ? unretainedMinor : 0n}
         linkedExpense={savingsPrompt?.entry}
         suggestedAmountMinor={savingsPrompt?.suggestedAmountMinor}
-        settlement={settlementCorrection ?? manualSettlement}
         onClose={() => {
           setSavingsDialogMode(undefined);
           setSavingsPrompt(undefined);
-          setCorrectingSettlement(undefined);
         }}
+        onSaved={(message) => {
+          cloud.requestSync();
+          showNotice({ kind: "success", message });
+        }}
+      />
+      <SavingsGoalDialog
+        open={savingsGoalOpen}
+        settings={ledger.settings}
+        onClose={() => setSavingsGoalOpen(false)}
         onSaved={(message) => {
           cloud.requestSync();
           showNotice({ kind: "success", message });
@@ -710,8 +598,6 @@ export default function App() {
         open={incomeDialogMode !== undefined}
         mode={incomeDialogMode ?? "forecast"}
         settings={ledger.settings}
-        analysis={ledger.analysis}
-        settlement={incomeSettlement}
         onClose={() => setIncomeDialogMode(undefined)}
         onSaved={(message) => {
           cloud.requestSync();

@@ -136,7 +136,7 @@ export function useLedger(): LedgerState {
           snapshot.allocations,
           {
             savingsEvents: snapshot.savingsEvents,
-            targetOverride: snapshot.settings.savingsTargetOverride,
+            savingsGoal: snapshot.settings.savingsGoal,
           },
         ),
       };

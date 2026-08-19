@@ -10,12 +10,15 @@ import {
   LedgerDatabase,
   createEntry,
   linkSyncAccount,
+  recordActualIncome,
   resolveSyncConflict,
   reserveSavings,
   setIncomeForecast,
+  setInitialBalance,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
   softDeleteEntry,
+  updateEntry,
   updateEntryTreatment,
   upsertRecoveryAllocation,
 } from "../data/database";
@@ -195,7 +198,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
+      schemaVersion: 7,
       mutations: [expect.objectContaining({
         entityType: "recoveryAllocation",
         entityId: allocation.id,
@@ -230,7 +233,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
+      schemaVersion: 7,
       mutations: [expect.objectContaining({
         entityType: "savingsEvent",
         entityId: event.id,
@@ -431,7 +434,232 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get(`entry:${entry.id}`)).toBeUndefined();
   });
 
-  it("sends an explicit null only when the user clears the monthly goal", async () => {
+  it("does not upload an edited provisional income while its confirmation is blocked", async () => {
+    const setup = new Date(2026, 7, 9, 10);
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      expectedIncomeMinor: 80_000,
+    }, database, setup);
+    const confirmed = await recordActualIncome(75_000, database, new Date(2026, 7, 10, 9));
+    await updateEntry(confirmed.entry!.id, {
+      kind: "income",
+      amount: "700.00",
+      note: "corrected income",
+      occurredAtLocal: "2026-08-10T09:00",
+    }, database, new Date(2026, 7, 10, 9, 1));
+    const localSettings = (await database.settings.get("primary"))!;
+    await database.syncConflicts.put({
+      id: "settings:primary",
+      entityType: "settings",
+      entityId: "primary",
+      localPayload: localSettings,
+      remotePayload: { ...localSettings, initialBalanceMinor: 1 },
+      remoteVersion: 1,
+      createdAt: setup.toISOString(),
+      updatedAt: setup.toISOString(),
+    });
+    const api = apiClient(emptyResponse());
+
+    await syncNow(database, api);
+
+    expect(vi.mocked(api.sync).mock.calls[0][0].mutations).not.toContainEqual(
+      expect.objectContaining({
+        entityType: "entry",
+        entityId: confirmed.entry!.id,
+      }),
+    );
+    await expect(database.syncOutbox.get(`entry:${confirmed.entry!.id}`))
+      .resolves.toBeDefined();
+  });
+
+  it("keeps a confirmation while upload is paused and sends it first after approval", async () => {
+    const setup = new Date(2026, 7, 9, 10);
+    await linkSyncAccount(session(), false, database);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      expectedIncomeMinor: 80_000,
+    }, database, setup);
+    const confirmed = await recordActualIncome(0, database, new Date(2026, 7, 10, 9));
+    const pendingConfirmation = (await database.syncOutbox.toArray())
+      .find((record) => record.incomeConfirmation);
+    expect(pendingConfirmation).toBeDefined();
+    expect(confirmed.entry).toBeUndefined();
+
+    await linkSyncAccount(session(), true, database);
+    const api = apiClient(emptyResponse());
+    vi.mocked(api.sync).mockImplementation(async (request) => {
+      const confirmationMutation = request.mutations.find((mutation) =>
+        mutation.entityType === "settings" && mutation.payload.incomeConfirmation);
+      if (confirmationMutation?.entityType === "settings") {
+        const receipt = confirmationMutation.payload.incomeConfirmation!;
+        return emptyResponse({
+          results: [{
+            id: confirmationMutation.id,
+            status: "applied",
+            version: 1,
+            incomeConfirmation: {
+              confirmationId: receipt.confirmationId,
+              forecastId: receipt.forecastId,
+              actualIncomeMinor: receipt.actualIncomeMinor,
+              ...(receipt.entry
+                ? { entryVersion: 1, entry: receipt.entry }
+                : {}),
+            },
+          }],
+          nextCursor: "1",
+        });
+      }
+      return emptyResponse({
+        results: request.mutations.map((mutation) => ({
+          id: mutation.id,
+          status: "applied" as const,
+          version: 2,
+        })),
+        nextCursor: "2",
+      });
+    });
+
+    const overview = await syncNow(database, api);
+
+    const requests = vi.mocked(api.sync).mock.calls.map(([request]) => request);
+    const mutationRequests = requests.filter((request) => request.mutations.length > 0);
+    expect(mutationRequests[0].mutations).toHaveLength(1);
+    expect(mutationRequests[0].mutations[0]).toMatchObject({
+      entityType: "settings",
+      payload: { incomeConfirmation: { actualIncomeMinor: 0 } },
+    });
+    expect(mutationRequests[1].mutations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: "settings", baseVersion: 1 }),
+    ]));
+    expect(overview.pendingCount).toBe(0);
+  });
+
+  it("downloads an attachment referenced only by a confirmation result", async () => {
+    const setup = new Date(2026, 7, 9, 10);
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
+    const planned = await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      expectedIncomeMinor: 80_000,
+    }, database, setup);
+    await recordActualIncome(0, database, new Date(2026, 7, 10, 9));
+    const pendingConfirmation = (await database.syncOutbox.toArray())
+      .find((record) => record.incomeConfirmation)!;
+    const forecastId = planned.incomeForecast!.id;
+    const remoteEntry: LedgerEntry = {
+      id: forecastId,
+      amountMinor: 75_000,
+      note: "remote income",
+      occurredAt: "2026-08-10T01:00:00.000Z",
+      localDateKey: "2026-08-10",
+      localMonthKey: "2026-08",
+      timezoneOffsetMinutes: -480,
+      attachmentId: "attachment-confirmed-income",
+      treatment: "ordinary_income",
+      confirmationStatus: "not_needed",
+      createdAt: "2026-08-10T01:00:00.000Z",
+      updatedAt: "2026-08-10T01:00:00.000Z",
+    };
+    const remoteSettings = { ...(await database.settings.get("primary"))! };
+    delete remoteSettings.incomeForecast;
+    const api = apiClient(emptyResponse({
+      results: [{
+        id: pendingConfirmation.id,
+        status: "duplicate",
+        version: 2,
+        incomeConfirmation: {
+          confirmationId: "remote-confirmation",
+          forecastId,
+          actualIncomeMinor: 75_000,
+          entryVersion: 1,
+          entry: remoteEntry,
+        },
+      }],
+      changes: [{
+        seq: "1",
+        entityType: "settings",
+        entityId: "primary",
+        version: 2,
+        payload: remoteSettings,
+      }],
+      nextCursor: "1",
+    }));
+    const blob = new Blob(["remote receipt"], { type: "image/jpeg" });
+    vi.mocked(api.getAttachment).mockResolvedValue({
+      blob,
+      entryId: forecastId,
+      mimeType: blob.type,
+      size: blob.size,
+      width: 20,
+      height: 10,
+    });
+
+    await syncNow(database, api);
+
+    expect(api.getAttachment).toHaveBeenCalledWith(remoteEntry.attachmentId, 1);
+    await expect(database.entries.get(forecastId)).resolves.toEqual(remoteEntry);
+    await expect(database.attachments.get(remoteEntry.attachmentId!)).resolves.toMatchObject({
+      entryId: forecastId,
+      blob,
+    });
+  });
+
+  it("sends multiple offline confirmations in order without leaving a settings mutation", async () => {
+    const setup = new Date(2026, 7, 9, 10);
+    await linkSyncAccount(session(), true, database);
+    await setPayCyclePlan({ paydayDay: 10 }, database, setup);
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-08-10",
+      expectedIncomeMinor: 80_000,
+    }, database, setup);
+    await recordActualIncome(75_000, database, new Date(2026, 7, 10, 9));
+    await setIncomeForecast({
+      targetPaydayDateKey: "2026-09-10",
+      expectedIncomeMinor: 82_000,
+    }, database, new Date(2026, 7, 11, 9));
+    await recordActualIncome(81_000, database, new Date(2026, 8, 10, 9));
+    const api = apiClient(emptyResponse());
+    let version = 0;
+    vi.mocked(api.sync).mockImplementation(async (request) => {
+      const mutation = request.mutations[0];
+      if (!mutation) return emptyResponse({ nextCursor: String(version) });
+      if (mutation.entityType !== "settings" || !mutation.payload.incomeConfirmation) {
+        throw new Error("Expected one income confirmation per round");
+      }
+      version += 1;
+      const receipt = mutation.payload.incomeConfirmation;
+      return emptyResponse({
+        results: [{
+          id: mutation.id,
+          status: "applied",
+          version,
+          incomeConfirmation: {
+            confirmationId: receipt.confirmationId,
+            forecastId: receipt.forecastId,
+            actualIncomeMinor: receipt.actualIncomeMinor,
+            ...(receipt.entry ? { entryVersion: 1, entry: receipt.entry } : {}),
+          },
+        }],
+        nextCursor: String(version),
+      });
+    });
+
+    const overview = await syncNow(database, api);
+
+    const confirmations = vi.mocked(api.sync).mock.calls
+      .flatMap(([request]) => request.mutations)
+      .filter((mutation) => mutation.entityType === "settings")
+      .map((mutation) => mutation.payload.incomeConfirmation!);
+    expect(confirmations.map((confirmation) => confirmation.targetPaydayDateKey))
+      .toEqual(["2026-08-10", "2026-09-10"]);
+    expect(overview.pendingCount).toBe(0);
+    await expect(database.syncOutbox.count()).resolves.toBe(0);
+  });
+
+  it("does not upload the retired monthly goal", async () => {
     await linkSyncAccount(session(), true, database);
     await setMonthEndBalanceGoal(50_000, database);
     await setMonthEndBalanceGoal(undefined, database);
@@ -442,13 +670,10 @@ describe("sync engine", () => {
 
     await syncNow(database, api);
 
-    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
-      mutations: [expect.objectContaining({
-        entityType: "settings",
-        payload: expect.objectContaining({ monthEndBalanceGoalMinor: null }),
-      })],
-    }), 1);
+    const request = vi.mocked(api.sync).mock.calls[0][0];
+    expect(request.schemaVersion).toBe(7);
+    expect(request.mutations[0]).toMatchObject({ entityType: "settings" });
+    expect(request.mutations[0].payload).not.toHaveProperty("monthEndBalanceGoalMinor");
   });
 
   it("sends an explicit null only when the user clears the pay cycle", async () => {
@@ -466,11 +691,10 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
+      schemaVersion: 7,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
-          monthEndBalanceGoalMinor: null,
           payCycle: null,
           incomeForecast: null,
         }),
@@ -498,14 +722,11 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
+      schemaVersion: 7,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
-          payCycle: {
-            paydayDay: 10,
-            defaultSavingsTargetMinor: 100_000,
-          },
+          payCycle: { paydayDay: 10 },
           incomeForecast: null,
         }),
       })],
@@ -554,7 +775,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 6,
+      schemaVersion: 7,
       cursor: "0",
       mutations: [],
     }), 1);
@@ -569,7 +790,7 @@ describe("sync engine", () => {
     });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 6,
+      syncProtocolVersion: 7,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",
@@ -635,10 +856,9 @@ describe("sync engine", () => {
       entityType: "settings",
       baseVersion: 2,
       payload: {
-        payCycle: { paydayDay: 10, cycleEndBalanceGoalMinor: 25_000 },
+        payCycle: { paydayDay: 10 },
         incomeForecast: {
           targetPaydayDateKey: "2026-08-10",
-          minimumIncomeMinor: 0,
           expectedIncomeMinor: 700_000,
         },
       },
@@ -646,7 +866,7 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 6,
+      syncProtocolVersion: 7,
     });
   });
 
@@ -704,7 +924,7 @@ describe("sync engine", () => {
       entityType: "settings",
       baseVersion: 2,
       payload: {
-        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
+        payCycle: { paydayDay: 10 },
       },
     });
     expect(requests[1].mutations[0].payload).not.toHaveProperty("savingsTargetNeedsReview");
@@ -713,6 +933,33 @@ describe("sync engine", () => {
       payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
       savingsTargetNeedsReview: true,
     });
+  });
+
+  it("sends explicit nulls for v7 settings cleared during conflict resolution", async () => {
+    await linkSyncAccount(session(), true, database);
+    await setInitialBalance(1, database);
+    const queued = (await database.syncOutbox.get("settings:primary"))!;
+    queued.clearSavingsGoal = true;
+    queued.clearLastExpectedIncomeMinor = true;
+    queued.clearSavingsGoalNeedsSetup = true;
+    await database.syncOutbox.put(queued);
+    const api = apiClient(emptyResponse({
+      results: [{ id: queued.id, status: "applied", version: 1 }],
+      nextCursor: "1",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      mutations: [expect.objectContaining({
+        entityType: "settings",
+        payload: expect.objectContaining({
+          savingsGoal: null,
+          lastExpectedIncomeMinor: null,
+          savingsGoalNeedsSetup: null,
+        }),
+      })],
+    }), 1);
   });
 
   it("caches a conflicting cloud screenshot so using the cloud version is complete", async () => {

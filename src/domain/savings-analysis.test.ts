@@ -227,7 +227,7 @@ describe("cycle savings progress", () => {
 });
 
 describe("savings-aware spending analysis", () => {
-  it("separates total balance, retained money, remaining target, and spendable money", () => {
+  it("subtracts only money that was actually retained from spendable money", () => {
     const analysis = calculateSpendingAnalysis(
       [expense("2026-07-26", -1_400)],
       10_000,
@@ -241,34 +241,28 @@ describe("savings-aware spending analysis", () => {
       ],
     );
 
-    expect(analysis.currentSavings).toMatchObject({
-      netGrowthMinor: 400n,
-      remainingTargetMinor: 600n,
-    });
     expect(analysis.currentCycle).toMatchObject({
       totalBalanceMinor: 10_000n,
       retainedBalanceMinor: 5_400n,
-      spendableBalanceMinor: 4_000n,
-      safeToSpendMinor: 4_000n,
+      spendableBalanceMinor: 4_600n,
+      safeToSpendMinor: 4_600n,
       projectedEndBalanceMinor: 9_900n,
-      savingsDifferenceMinor: 3_900n,
+      savingsDifferenceMinor: 4_500n,
       savingsAffordability: "surplus",
     });
     expect(analysis.nextCycle.referenceSpendMinor).toBe(3_100);
     expect(analysis.nextCycle.minimumIncomeScenario).toMatchObject({
       incomeMinor: 4_100,
-      spendingDifferenceMinor: 1_000n,
-      savingsTargetMinor: 1_000,
-      differenceMinor: 0n,
-      affordability: "exact",
+      differenceMinor: 1_000n,
+      affordability: "surplus",
     });
     expect(analysis.nextCycle.expectedIncomeScenario).toMatchObject({
-      differenceMinor: 900n,
+      differenceMinor: 1_900n,
       affordability: "surplus",
     });
   });
 
-  it("never exposes a negative daily allowance when retained money is overdrawn", () => {
+  it("marks a negative retained balance for correction without truncating it", () => {
     const analysis = calculateSpendingAnalysis(
       [expense("2026-07-26", -1_400)],
       1_000,
@@ -283,14 +277,12 @@ describe("savings-aware spending analysis", () => {
     );
 
     expect(analysis.retainedSavings?.totalRetainedMinor).toBe(-1_000n);
-    expect(analysis.currentSavings?.remainingTargetMinor).toBe(4_500n);
-    expect(analysis.currentCycle.spendableBalanceMinor).toBe(-2_500n);
-    expect(analysis.currentCycle.safeToSpendMinor).toBe(0n);
-    expect(analysis.currentCycle.dailySafeToSpendMinor).toBe(0n);
+    expect(analysis.currentCycle.spendableBalanceMinor).toBe(2_000n);
+    expect(analysis.currentCycle.safeToSpendMinor).toBe(2_000n);
     expect(analysis.currentCycle.savingsNeedsCorrection).toBe(true);
   });
 
-  it("keeps the delayed current target override separate from the next default target", () => {
+  it("does not let legacy cycle targets change either affordability result", () => {
     const analysis = calculateSpendingAnalysis(
       [expense("2026-07-26", -1_400)],
       20_000,
@@ -304,9 +296,9 @@ describe("savings-aware spending analysis", () => {
       },
     );
 
-    expect(analysis.currentSavings?.targetMinor).toBe(8_000);
-    expect(analysis.nextCycle.defaultSavingsTargetMinor).toBe(3_000);
-    expect(analysis.nextCycle.minimumIncomeScenario?.savingsTargetMinor).toBe(3_000);
+    expect(analysis.currentCycle.spendableBalanceMinor).toBe(20_000n);
+    expect(analysis.nextCycle.defaultSavingsTargetMinor).toBeUndefined();
+    expect(analysis.nextCycle.minimumIncomeScenario?.savingsTargetMinor).toBeUndefined();
   });
 
   it("starts the new cycle at the delayed settlement boundary after the forecast is cleared", () => {
@@ -335,7 +327,6 @@ describe("savings-aware spending analysis", () => {
       cycleEndDateKey: "2026-09-09",
       nextPaydayDateKey: "2026-09-10",
       actualExpenseMinor: 400,
-      cycleNetGrowthMinor: 0n,
     });
     expect(analysis.savingsHistory?.at(-1)).toMatchObject({
       cycleStartDateKey: "2026-07-10",

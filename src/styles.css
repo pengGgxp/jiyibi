@@ -953,6 +953,98 @@ input::placeholder {
   overflow-wrap: anywhere;
 }
 
+.summary-goal {
+  margin-top: 0.75rem;
+  padding-block: 0.75rem;
+  border-bottom: 1px solid rgb(232 243 237 / 0.17);
+}
+
+.summary-goal-heading,
+.summary-goal-heading > span,
+.summary-goal-meta,
+.summary-goal-empty {
+  display: flex;
+  align-items: center;
+}
+
+.summary-goal-heading,
+.summary-goal-meta {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.summary-goal-heading > span {
+  gap: 0.4rem;
+  color: #c9d8d1;
+  font-size: 0.7rem;
+  font-weight: 740;
+}
+
+.summary-goal-heading svg,
+.summary-goal-empty svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.summary-goal-heading strong {
+  color: #f4f9f6;
+  font-size: 0.7rem;
+}
+
+.summary-goal progress {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  margin-top: 0.6rem;
+  overflow: hidden;
+  accent-color: #79cfa3;
+  background: rgb(238 247 242 / 0.13);
+  border: 0;
+  border-radius: 2px;
+}
+
+.summary-goal progress::-webkit-progress-bar {
+  background: rgb(238 247 242 / 0.13);
+}
+
+.summary-goal progress::-webkit-progress-value {
+  background: #79cfa3;
+}
+
+.summary-goal-meta {
+  margin-top: 0.45rem;
+  color: #aebfb6;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-goal-meta strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #f4f9f6;
+  font-size: 0.72rem;
+}
+
+.summary-goal > p {
+  margin-top: 0.3rem !important;
+  color: #aebfb6;
+  font-size: 0.66rem;
+}
+
+.summary-goal-empty {
+  width: 100%;
+  min-height: 2.75rem;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+  padding: 0.5rem 0;
+  color: #dce8e2;
+  background: transparent;
+  border-bottom: 1px solid rgb(232 243 237 / 0.17);
+  font-size: 0.72rem;
+  font-weight: 740;
+}
+
 .summary-savings-grid dt {
   color: #aebfb6;
   font-size: 0.65rem;
@@ -974,6 +1066,13 @@ input::placeholder {
   color: #f5d59b;
   font-size: 0.68rem;
   line-height: 1.5;
+}
+
+button.summary-savings-warning {
+  width: 100%;
+  padding: 0.45rem 0;
+  background: transparent;
+  text-align: left;
 }
 
 .summary-savings-warning svg {
@@ -1877,6 +1976,44 @@ input::placeholder {
 .savings-dialog-form {
   display: grid;
   gap: 1rem;
+}
+
+.date-input {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.date-input > svg {
+  position: absolute;
+  left: 0.75rem;
+  z-index: 1;
+  width: 1rem;
+  height: 1rem;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.date-input > input {
+  width: 100%;
+  padding-left: 2.25rem;
+}
+
+.goal-clear-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.goal-clear-confirm > p {
+  flex: 1 1 10rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .income-dialog-fields {

@@ -33,7 +33,7 @@ import {
   setIncomeForecast,
   setMonthEndBalanceGoal,
   setPayCyclePlan,
-  setSavingsTargetOverride,
+  setSavingsGoal,
   upsertRecoveryAllocation,
   updateEntryTreatment,
 } from "./database";
@@ -217,13 +217,11 @@ describe("encrypted backups", () => {
     await setInitialBalance(-500, source);
     const payCycle = {
       paydayDay: 10,
-      cycleEndBalanceGoalMinor: 123_456,
     };
     const planNow = new Date(2026, 6, 30, 10);
     await setPayCyclePlan(payCycle, source, planNow);
     const forecastSettings = await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     }, source, planNow);
     const incomeForecast = forecastSettings.incomeForecast;
@@ -246,7 +244,7 @@ describe("encrypted backups", () => {
       attachmentCount: 1,
       initialBalanceMinor: -500,
       monthEndBalanceGoalMinor: undefined,
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 123_456 },
+      payCycle: { paydayDay: 10 },
       incomeForecast,
       savingsEventCount: 0,
       currency: "CNY",
@@ -261,7 +259,7 @@ describe("encrypted backups", () => {
     expect(await target.attachments.get(replacedAttachmentId)).toBeUndefined();
     expect(await getSettings(target)).toMatchObject({
       initialBalanceMinor: -500,
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 123_456 },
+      payCycle: { paydayDay: 10 },
       incomeForecast,
     });
   });
@@ -306,19 +304,17 @@ describe("encrypted backups", () => {
     expect(await target.recoveryAllocations.toArray()).toEqual([allocation]);
   });
 
-  it("round trips savings targets and retained-money events in payload v4", async () => {
+  it("round trips a savings goal and retained-money events in payload v5", async () => {
     const now = new Date(2026, 7, 9, 10);
     await setInitialBalance(100_000, source, now);
     await setPayCyclePlan({
       paydayDay: 10,
-      defaultSavingsTargetMinor: 20_000,
     }, source, now);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 50_000,
       expectedIncomeMinor: 80_000,
     }, source, now);
-    await setSavingsTargetOverride(25_000, source, now);
+    await setSavingsGoal({ targetDateKey: "2026-12-31", targetMinor: 250_000 }, source, now);
     await setInitialSavings(30_000, source, new Date(2026, 6, 1, 9));
     await reserveSavings({ amountMinor: 5_000, note: "本周期追加" }, source, now);
     await releaseSavings({ amountMinor: 2_000, note: "临时取用" }, source, now);
@@ -330,21 +326,15 @@ describe("encrypted backups", () => {
     const prepared = await decryptBackup(backup, "savings-round-trip");
     expect(prepared.preview).toMatchObject({
       savingsEventCount: 3,
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 20_000 },
-      savingsTargetOverride: {
-        targetPaydayDateKey: "2026-08-10",
-        targetMinor: 25_000,
-      },
+      payCycle: { paydayDay: 10 },
+      savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 250_000 },
     });
     expect(prepared.replacement.savingsEvents).toHaveLength(3);
 
     await restorePreparedBackup(prepared, target);
     expect(await getSettings(target)).toMatchObject({
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 20_000 },
-      savingsTargetOverride: {
-        targetPaydayDateKey: "2026-08-10",
-        targetMinor: 25_000,
-      },
+      payCycle: { paydayDay: 10 },
+      savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 250_000 },
     });
     expect(await listActiveSavingsEvents(target)).toEqual(
       expect.arrayContaining(prepared.replacement.savingsEvents as SavingsEvent[]),
@@ -366,15 +356,15 @@ describe("encrypted backups", () => {
 
     const prepared = await decryptBackup(legacy, "legacy-savings");
     expect(prepared.replacement.settings).toMatchObject({
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
-      savingsTargetNeedsReview: true,
+      payCycle: { paydayDay: 10 },
+      savingsGoalNeedsSetup: true,
     });
     expect(prepared.replacement.savingsEvents).toEqual([]);
 
     await restorePreparedBackup(prepared, target);
     expect(await getSettings(target)).toMatchObject({
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 0 },
-      savingsTargetNeedsReview: true,
+      payCycle: { paydayDay: 10 },
+      savingsGoalNeedsSetup: true,
     });
     expect(await target.savingsEvents.count()).toBe(0);
   });
@@ -498,11 +488,10 @@ describe("encrypted backups", () => {
       restoreNow,
     );
     expect(prepared.preview).toMatchObject({
-      payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
+      payCycle: { paydayDay: 31 },
       incomeForecast: {
         id: "legacy-income-2026-02-28",
         targetPaydayDateKey: "2026-02-28",
-        minimumIncomeMinor: 0,
         expectedIncomeMinor: 800_000,
       },
     });
@@ -510,26 +499,29 @@ describe("encrypted backups", () => {
 
     await restorePreparedBackup(prepared, target);
     expect(await getSettings(target)).toMatchObject({
-      payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
+      payCycle: { paydayDay: 31 },
+      savingsGoalNeedsSetup: true,
+      lastExpectedIncomeMinor: 800_000,
       incomeForecast: {
         targetPaydayDateKey: "2026-02-28",
-        minimumIncomeMinor: 0,
         expectedIncomeMinor: 800_000,
       },
     });
   });
 
-  it("rejects a backup with a partial pay-cycle plan", async () => {
+  it("rejects a v5 backup that mixes a pay-cycle with a legacy target", async () => {
     await setPayCyclePlan({
       paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
     }, source);
     const backup = await createEncryptedBackup("partial-plan-password", source);
     const partial = await rewriteEncryptedPayload(
       backup,
       "partial-plan-password",
       (payload) => {
-        (payload.settings as Record<string, unknown>).payCycle = { paydayDay: 10 };
+        (payload.settings as Record<string, unknown>).payCycle = {
+          paydayDay: 10,
+          defaultSavingsTargetMinor: 100_000,
+        };
       },
     );
 
@@ -538,15 +530,32 @@ describe("encrypted backups", () => {
     });
   });
 
+  it("rejects a v5 backup that marks an existing goal as needing setup", async () => {
+    await setSavingsGoal(
+      { targetDateKey: "2026-12-31", targetMinor: 100_000 },
+      source,
+    );
+    const backup = await createEncryptedBackup("contradictory-goal", source);
+    const contradictory = await rewriteEncryptedPayload(
+      backup,
+      "contradictory-goal",
+      (payload) => {
+        (payload.settings as Record<string, unknown>).savingsGoalNeedsSetup = true;
+      },
+    );
+
+    await expect(decryptBackup(contradictory, "contradictory-goal")).rejects.toMatchObject({
+      code: "invalid-payload",
+    });
+  });
+
   it("rejects an income forecast id that cloud sync cannot store", async () => {
     const planNow = new Date(2026, 6, 30, 10);
     await setPayCyclePlan({
       paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
     }, source, planNow);
     await setIncomeForecast({
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     }, source, planNow);
     const backup = await createEncryptedBackup("invalid-forecast-id", source);

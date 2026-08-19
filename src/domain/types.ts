@@ -75,6 +75,16 @@ export interface PayCyclePlan {
   cycleEndBalanceGoalMinor?: number;
 }
 
+/**
+ * A single cumulative savings goal.  Unlike the former per-cycle target this
+ * goal keeps the same target date and amount until the user changes or clears
+ * it.  Actual retained money is represented by SavingsEvent records.
+ */
+export interface SavingsGoal {
+  targetDateKey: string;
+  targetMinor: number;
+}
+
 /** One-cycle override for the default retained-money target. */
 export interface CycleSavingsTargetOverride {
   /** The actual upcoming payday that this override belongs to. */
@@ -175,13 +185,20 @@ export interface SavingsAnalysisOptions {
   savingsEvents?: readonly SavingsEvent[];
   /** One-cycle target override, normally keyed to incomeForecast.targetPaydayDateKey. */
   targetOverride?: CycleSavingsTargetOverride;
+  /** Cumulative goal (v6+). Derived progress is never persisted. */
+  savingsGoal?: SavingsGoal;
 }
 
 export interface IncomeForecast {
   id: string;
   /** One-off expected receipt date; may be later than the recurring payday. */
   targetPaydayDateKey: string;
-  minimumIncomeMinor: number;
+  /**
+   * The one amount the user expects for this receipt.  The old minimum
+   * scenario is optional only so v4/v5 records can be read during migration;
+   * new code must not create it.
+   */
+  minimumIncomeMinor?: number;
   expectedIncomeMinor: number;
 }
 
@@ -198,6 +215,12 @@ export interface AppSettings {
   savingsTargetNeedsReview?: true;
   /** @deprecated Alias accepted while v5 clients migrate field names. */
   cycleSavingsTargetOverride?: CycleSavingsTargetOverride;
+  /** Current cumulative savings goal (v6+). */
+  savingsGoal?: SavingsGoal;
+  /** Last confirmed expected amount used only as a form default. */
+  lastExpectedIncomeMinor?: number;
+  /** Set by the v6 migration when a cycle target cannot be converted safely. */
+  savingsGoalNeedsSetup?: true;
   incomeForecast?: IncomeForecast;
   schemaVersion: 1;
   updatedAt: string;
@@ -319,6 +342,22 @@ export interface NextCycleAnalysis {
   savingsHistory?: SavingsHistoryPoint[];
 }
 
+export type SavingsGoalStatus = "active" | "completed" | "overdue";
+
+/** Derived progress for the one cumulative savings goal. */
+export interface SavingsGoalProgress {
+  targetDateKey: string;
+  targetMinor: number;
+  retainedMinor: bigint;
+  remainingMinor: bigint;
+  status: SavingsGoalStatus;
+  /** Number of configured paydays from today through the target date. */
+  remainingPaydayCount?: number;
+  /** Ceiling of remainingMinor / remainingPaydayCount. */
+  suggestedPerCycleMinor?: bigint;
+  needsCorrection: boolean;
+}
+
 /**
  * A local, derived view of spending. It is never persisted or synchronized.
  * Forecast fields are absent while confidence is `insufficient`.
@@ -339,6 +378,7 @@ export interface SpendingAnalysis {
   retainedSavings?: RetainedSavingsSummary;
   currentSavings?: CycleSavingsProgress;
   savingsHistory?: SavingsHistoryPoint[];
+  savingsGoal?: SavingsGoalProgress;
   currentCycle: CurrentCycleAnalysis;
   nextCycle: NextCycleAnalysis;
   dailyExpenses: DailyExpensePoint[];

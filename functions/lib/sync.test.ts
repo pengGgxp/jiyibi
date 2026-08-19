@@ -502,6 +502,152 @@ describe("sync mutation receipts", () => {
     ]);
   });
 
+  it("writes version-seven savings goals and single income without legacy scenarios", async () => {
+    let insertQuery = "";
+    let insertBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("INSERT INTO ledger_settings")) {
+              insertQuery = query;
+              insertBindings = values;
+            }
+            return this;
+          },
+          async first() {
+            if (query.includes("FROM sync_changes")) return null;
+            return query.includes("INSERT INTO ledger_settings") ? { version: 1 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const mutation = settingsMutation({
+      payload: {
+        ...settingsMutation().payload,
+        payCycle: { paydayDay: 10 },
+        incomeForecast: {
+          id: "forecast_2026_08_10",
+          targetPaydayDateKey: "2026-08-10",
+          expectedIncomeMinor: 800_000,
+        },
+        savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 1_000_000 },
+        lastExpectedIncomeMinor: 800_000,
+      },
+    });
+
+    await expect(applyMutation(db, "user_1", 3, mutation, 7)).resolves.toMatchObject({
+      status: "applied",
+      version: 1,
+    });
+    expect((insertQuery.match(/\?/g) ?? []).length).toBe(insertBindings.length);
+    expect(insertQuery).toContain("savings_goal_target_date_key");
+    expect(insertBindings).toEqual(expect.arrayContaining([
+      "2026-08-10",
+      "2026-12-31",
+      1_000_000,
+      800_000,
+    ]));
+  });
+
+  it("applies version-seven partial clears without dropping unrelated settings", async () => {
+    let updateQuery = "";
+    let updateBindings: unknown[] = [];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind(...values: unknown[]) {
+            if (query.includes("UPDATE ledger_settings SET")) {
+              updateQuery = query;
+              updateBindings = values;
+            }
+            return this;
+          },
+          async first() {
+            if (query.includes("FROM sync_changes")) return null;
+            return query.includes("UPDATE ledger_settings SET") ? { version: 4 } : null;
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const mutation = settingsMutation({
+      id: "mutation_settings_clear_v7",
+      baseVersion: 3,
+      payload: {
+        ...settingsMutation().payload,
+        payCycle: null,
+        incomeForecast: null,
+        savingsGoal: null,
+        savingsGoalNeedsSetup: null,
+      },
+    });
+
+    await expect(applyMutation(db, "user_1", 3, mutation, 7)).resolves.toMatchObject({
+      status: "applied",
+      version: 4,
+    });
+    expect((updateQuery.match(/\?/g) ?? []).length).toBe(updateBindings.length);
+    expect(updateQuery).toContain("last_expected_income_minor = CASE");
+    expect(updateQuery).toContain("savings_goal_needs_setup = CASE");
+  });
+
+  it("projects authoritative settings to the version-seven shape", async () => {
+    const row = {
+      cursor: "13",
+      mutation_id: "mutation_settings_v7",
+      entity_type: "settings" as const,
+      entity_id: "primary",
+      entity_version: 6,
+      mutation_hash: "hash",
+      payload_json: "{}",
+      settings_id: "primary",
+      settings_currency: "CNY",
+      settings_initial_balance_minor: 500,
+      settings_month_end_balance_goal_minor: 25_000,
+      settings_payday_day: 10,
+      settings_monthly_salary_minor: 800_000,
+      settings_cycle_end_balance_goal_minor: 0,
+      settings_income_forecast_id: "forecast_2026_08_10",
+      settings_income_forecast_target_payday_date_key: "2026-08-10",
+      settings_minimum_income_minor: 800_000,
+      settings_expected_income_minor: 800_000,
+      settings_default_savings_target_minor: 0,
+      settings_savings_override_target_payday_date_key: null,
+      settings_savings_override_target_minor: null,
+      settings_savings_goal_target_date_key: "2026-12-31",
+      settings_savings_goal_target_minor: 1_000_000,
+      settings_last_expected_income_minor: 800_000,
+      settings_savings_goal_needs_setup: 0,
+      settings_schema_version: 1,
+      settings_updated_at: "2026-07-30T12:00:00.000Z",
+    };
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() { return { results: [row] }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    const result = await pullChanges(db, "user_1", 3, "0", 7);
+    expect(result.changes[0].payload).toEqual({
+      id: "primary",
+      currency: "CNY",
+      initialBalanceMinor: 500,
+      payCycle: { paydayDay: 10 },
+      incomeForecast: {
+        id: "forecast_2026_08_10",
+        targetPaydayDateKey: "2026-08-10",
+        expectedIncomeMinor: 800_000,
+      },
+      savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 1_000_000 },
+      lastExpectedIncomeMinor: 800_000,
+      schemaVersion: 1,
+      updatedAt: "2026-07-30T12:00:00.000Z",
+    });
+  });
+
   it("blocks version-five clients when retained-money semantics exist", async () => {
     const db = {
       prepare() {

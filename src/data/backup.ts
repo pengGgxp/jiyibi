@@ -6,6 +6,7 @@ import type {
   LedgerEntry,
   PayCyclePlan,
   RecoveryAllocation,
+  SavingsGoal,
   SavingsEvent,
 } from "../domain/types";
 import { MAX_AMOUNT_MINOR } from "../domain/amount";
@@ -29,7 +30,7 @@ import {
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
-export const BACKUP_PAYLOAD_SCHEMA_VERSION = 4 as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 5 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
@@ -104,7 +105,7 @@ interface BackupPayloadV2 {
   attachments: SerializedAttachment[];
 }
 
-interface BackupPayloadV4 {
+interface BackupPayloadV5 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
@@ -124,7 +125,7 @@ export interface BackupPreview {
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
   incomeForecast?: IncomeForecast;
-  savingsTargetOverride?: CycleSavingsTargetOverride;
+  savingsGoal?: SavingsGoal;
   currency: "CNY";
 }
 
@@ -345,7 +346,7 @@ function validatePreSavingsPayCycle(value: unknown): value is PayCyclePlan {
   );
 }
 
-function validatePayCycle(value: unknown): value is PayCyclePlan {
+function validatePayCycleV4(value: unknown): value is PayCyclePlan {
   return (
     isRecord(value) &&
     Number.isInteger(value.paydayDay) &&
@@ -379,7 +380,7 @@ function validateSavingsTargetOverride(value: unknown): value is CycleSavingsTar
   );
 }
 
-function validateIncomeForecast(value: unknown): value is IncomeForecast {
+function validateIncomeForecastV4(value: unknown): value is IncomeForecast {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -395,7 +396,7 @@ function validateIncomeForecast(value: unknown): value is IncomeForecast {
   );
 }
 
-function validateSettings(value: unknown): value is AppSettings {
+function validateSettingsV4(value: unknown): value is AppSettings {
   return (
     isRecord(value) &&
     value.id === "primary" &&
@@ -406,9 +407,9 @@ function validateSettings(value: unknown): value is AppSettings {
     (value.monthEndBalanceGoalMinor === undefined ||
       (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
-    (value.payCycle === undefined || validatePayCycle(value.payCycle)) &&
+    (value.payCycle === undefined || validatePayCycleV4(value.payCycle)) &&
     (value.incomeForecast === undefined ||
-      (value.payCycle !== undefined && validateIncomeForecast(value.incomeForecast))) &&
+      (value.payCycle !== undefined && validateIncomeForecastV4(value.incomeForecast))) &&
     (value.savingsTargetOverride === undefined ||
       (value.payCycle !== undefined &&
         validateSavingsTargetOverride(value.savingsTargetOverride))) &&
@@ -416,6 +417,103 @@ function validateSettings(value: unknown): value is AppSettings {
     value.cycleSavingsTargetOverride === undefined &&
     isIsoDate(value.updatedAt)
   );
+}
+
+function validateCanonicalPayCycle(value: unknown): value is PayCyclePlan {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    Number.isInteger(value.paydayDay) &&
+    Number(value.paydayDay) >= 1 &&
+    Number(value.paydayDay) <= 31
+  );
+}
+
+function validateCanonicalIncomeForecast(value: unknown): value is IncomeForecast {
+  return (
+    isRecord(value) &&
+    Object.keys(value).every((key) =>
+      ["id", "targetPaydayDateKey", "expectedIncomeMinor"].includes(key)) &&
+    typeof value.id === "string" &&
+    SYNC_ID_PATTERN.test(value.id) &&
+    isLocalDateKey(value.targetPaydayDateKey) &&
+    Number.isSafeInteger(value.expectedIncomeMinor) &&
+    Number(value.expectedIncomeMinor) >= 0 &&
+    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function validateSavingsGoal(value: unknown): value is SavingsGoal {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    isLocalDateKey(value.targetDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) > 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function validateSettingsV5(value: unknown): value is AppSettings {
+  return (
+    isRecord(value) &&
+    value.id === "primary" &&
+    value.currency === "CNY" &&
+    value.schemaVersion === DATABASE_SCHEMA_VERSION &&
+    Number.isSafeInteger(value.initialBalanceMinor) &&
+    Math.abs(Number(value.initialBalanceMinor)) <= MAX_AMOUNT_MINOR &&
+    (value.monthEndBalanceGoalMinor === undefined ||
+      (Number.isSafeInteger(value.monthEndBalanceGoalMinor) &&
+        Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
+    (value.payCycle === undefined || validateCanonicalPayCycle(value.payCycle)) &&
+    (value.incomeForecast === undefined ||
+      (value.payCycle !== undefined && validateCanonicalIncomeForecast(value.incomeForecast))) &&
+    (value.savingsGoal === undefined || validateSavingsGoal(value.savingsGoal)) &&
+    (value.lastExpectedIncomeMinor === undefined ||
+      (Number.isSafeInteger(value.lastExpectedIncomeMinor) &&
+        Number(value.lastExpectedIncomeMinor) >= 0 &&
+        Number(value.lastExpectedIncomeMinor) <= MAX_AMOUNT_MINOR)) &&
+    (value.savingsGoalNeedsSetup === undefined || value.savingsGoalNeedsSetup === true) &&
+    !(value.savingsGoal !== undefined && value.savingsGoalNeedsSetup === true) &&
+    value.savingsTargetOverride === undefined &&
+    value.savingsTargetNeedsReview === undefined &&
+    value.cycleSavingsTargetOverride === undefined &&
+    isIsoDate(value.updatedAt)
+  );
+}
+
+function migrateBackupSettingsToV5(
+  settings: AppSettings | LegacyAppSettings,
+  now: Date,
+): AppSettings {
+  const migrated = migrateLegacySavingsSettings(settings, now);
+  const legacyPlan = migrated.payCycle;
+  const legacyTarget = legacyPlan?.defaultSavingsTargetMinor
+    ?? legacyPlan?.cycleEndBalanceGoalMinor;
+  const legacyOverride = migrated.savingsTargetOverride
+    ?? migrated.cycleSavingsTargetOverride;
+  const needsSetup = migrated.savingsGoalNeedsSetup === true
+    || migrated.savingsTargetNeedsReview === true
+    || (legacyTarget !== undefined && legacyTarget !== 0)
+    || (legacyOverride !== undefined && legacyOverride.targetMinor !== 0);
+
+  const next = structuredClone(migrated);
+  if (legacyPlan) next.payCycle = { paydayDay: legacyPlan.paydayDay };
+  if (next.incomeForecast) {
+    next.incomeForecast = {
+      id: next.incomeForecast.id,
+      targetPaydayDateKey: next.incomeForecast.targetPaydayDateKey,
+      expectedIncomeMinor: next.incomeForecast.expectedIncomeMinor,
+    };
+    if (next.lastExpectedIncomeMinor === undefined) {
+      next.lastExpectedIncomeMinor = next.incomeForecast.expectedIncomeMinor;
+    }
+  }
+  if (needsSetup && !next.savingsGoal) next.savingsGoalNeedsSetup = true;
+  delete next.savingsTargetOverride;
+  delete next.cycleSavingsTargetOverride;
+  delete next.savingsTargetNeedsReview;
+  return next;
 }
 
 function validatePreSavingsSettings(value: unknown): value is AppSettings {
@@ -431,7 +529,7 @@ function validatePreSavingsSettings(value: unknown): value is AppSettings {
         Math.abs(Number(value.monthEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)) &&
     (value.payCycle === undefined || validatePreSavingsPayCycle(value.payCycle)) &&
     (value.incomeForecast === undefined ||
-      (value.payCycle !== undefined && validateIncomeForecast(value.incomeForecast))) &&
+      (value.payCycle !== undefined && validateIncomeForecastV4(value.incomeForecast))) &&
     value.savingsTargetOverride === undefined &&
     value.cycleSavingsTargetOverride === undefined &&
     isIsoDate(value.updatedAt)
@@ -666,7 +764,7 @@ function validateSavingsEvents(
   return events;
 }
 
-function parsePayload(value: unknown, now = new Date()): BackupPayloadV4 {
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
@@ -674,22 +772,25 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV4 {
   const supportedSchema = schemaVersion === DATABASE_SCHEMA_VERSION
     || schemaVersion === 2
     || schemaVersion === 3
+    || schemaVersion === 4
     || schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
   if (!supportedSchema) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
   }
   const settingsAreValid = schemaVersion === DATABASE_SCHEMA_VERSION
     ? validateLegacySettings(value.settings)
-    : schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
+    : schemaVersion < 4
       ? validatePreSavingsSettings(value.settings)
-      : validateSettings(value.settings);
+      : schemaVersion === 4
+        ? validateSettingsV4(value.settings)
+        : validateSettingsV5(value.settings);
   if (
     !isIsoDate(value.exportedAt) ||
     !settingsAreValid ||
     !Array.isArray(value.entries) ||
     !Array.isArray(value.attachments) ||
     (schemaVersion >= 3 && !Array.isArray(value.recoveryAllocations)) ||
-    (schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION &&
+    (schemaVersion >= 4 &&
       !Array.isArray(value.savingsEvents))
   ) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
@@ -785,16 +886,19 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV4 {
     entriesById,
   );
   const savingsEvents = validateSavingsEvents(
-    schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION
+    schemaVersion >= 4
       ? value.savingsEvents as unknown[]
       : [],
     entriesById,
   );
-  const settings = schemaVersion === DATABASE_SCHEMA_VERSION
-    ? migrateLegacySavingsSettings((value as unknown as BackupPayloadV1).settings, now)
-    : schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
-      ? migrateLegacySavingsSettings(value.settings as AppSettings, now)
-      : structuredClone(value.settings as AppSettings);
+  const settings = schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
+    ? migrateBackupSettingsToV5(
+      schemaVersion === DATABASE_SCHEMA_VERSION
+        ? (value as unknown as BackupPayloadV1).settings
+        : value.settings as AppSettings,
+      now,
+    )
+    : structuredClone(value.settings as AppSettings);
   return {
     format: BACKUP_PAYLOAD_FORMAT,
     schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
@@ -807,7 +911,7 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV4 {
   };
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV4> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV5> {
   const snapshot = await database.transaction(
     "r",
     database.settings,
@@ -832,7 +936,7 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
       return { settings, entries, attachments, recoveryAllocations, savingsEvents };
     },
   );
-  if (!snapshot.settings || !validateSettings(snapshot.settings)) {
+  if (!snapshot.settings || !validateSettingsV5(snapshot.settings)) {
     throw new BackupError("本地设置无效，无法导出", "invalid-payload");
   }
   if (snapshot.entries.length > MAX_BACKUP_ENTRIES) {
@@ -1015,8 +1119,8 @@ export async function decryptBackup(
       ...(payload.settings.incomeForecast
         ? { incomeForecast: structuredClone(payload.settings.incomeForecast) }
         : {}),
-      ...(payload.settings.savingsTargetOverride
-        ? { savingsTargetOverride: structuredClone(payload.settings.savingsTargetOverride) }
+      ...(payload.settings.savingsGoal
+        ? { savingsGoal: structuredClone(payload.settings.savingsGoal) }
         : {}),
       currency: payload.settings.currency,
     },

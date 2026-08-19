@@ -23,13 +23,11 @@ import {
   setInitialBalance,
   setInitialSavings,
   setPayCyclePlan,
-  setSavingsTargetOverride,
   type PreparedBackup,
 } from "../data";
 import {
   formatCny,
   parseSignedAmountToMinor,
-  savingsTargetFromPlan,
   type AppSettings,
 } from "../domain";
 import type { PwaState } from "../hooks/usePwa";
@@ -101,9 +99,7 @@ export function SettingsDialog({
   const [savingBalance, setSavingBalance] = useState(false);
   const [payCycleEnabled, setPayCycleEnabled] = useState(false);
   const [paydayInput, setPaydayInput] = useState("1");
-  const [cycleGoalInput, setCycleGoalInput] = useState("0.00");
   const [paydayError, setPaydayError] = useState<string>();
-  const [cycleGoalError, setCycleGoalError] = useState<string>();
   const [payCycleError, setPayCycleError] = useState<string>();
   const [payCycleStatus, setPayCycleStatus] = useState<string>();
   const [savingPayCycle, setSavingPayCycle] = useState(false);
@@ -111,10 +107,6 @@ export function SettingsDialog({
   const [initialSavingsError, setInitialSavingsError] = useState<string>();
   const [initialSavingsStatus, setInitialSavingsStatus] = useState<string>();
   const [savingInitialSavings, setSavingInitialSavings] = useState(false);
-  const [cycleOverrideInput, setCycleOverrideInput] = useState("");
-  const [cycleOverrideError, setCycleOverrideError] = useState<string>();
-  const [cycleOverrideStatus, setCycleOverrideStatus] = useState<string>();
-  const [savingCycleOverride, setSavingCycleOverride] = useState(false);
   const [exportPassword, setExportPassword] = useState("");
   const [exportConfirm, setExportConfirm] = useState("");
   const [exportStatus, setExportStatus] = useState<string>();
@@ -137,17 +129,7 @@ export function SettingsDialog({
     setInitialBalanceInput(signedInput(settings.initialBalanceMinor));
     setPayCycleEnabled(settings.payCycle !== undefined);
     setPaydayInput(String(settings.payCycle?.paydayDay ?? 1));
-    setCycleGoalInput(signedInput(
-      settings.payCycle
-        ? savingsTargetFromPlan(settings.payCycle)
-        : Math.max(settings.monthEndBalanceGoalMinor ?? 0, 0),
-    ));
     setInitialSavingsInput(signedInput(openingSavingsMinor));
-    setCycleOverrideInput(
-      settings.savingsTargetOverride
-        ? signedInput(settings.savingsTargetOverride.targetMinor)
-        : "",
-    );
   }, [open, openingSavingsMinor, settings]);
 
   useEffect(() => {
@@ -155,13 +137,10 @@ export function SettingsDialog({
       setBalanceError(undefined);
       setBalanceStatus(undefined);
       setPaydayError(undefined);
-      setCycleGoalError(undefined);
       setPayCycleError(undefined);
       setPayCycleStatus(undefined);
       setInitialSavingsError(undefined);
       setInitialSavingsStatus(undefined);
-      setCycleOverrideError(undefined);
-      setCycleOverrideStatus(undefined);
       setExportPassword("");
       setExportConfirm("");
       setExportStatus(undefined);
@@ -198,38 +177,22 @@ export function SettingsDialog({
   const savePayCycle = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     let paydayDay = 1;
-    let goalMinor = 0;
     if (payCycleEnabled) {
       if (!/^\d{1,2}$/.test(paydayInput) || (paydayDay = Number(paydayInput)) < 1 || paydayDay > 31) {
-        setPaydayError("发薪日请输入 1 到 31 的整数");
-        return;
-      }
-      try {
-        goalMinor = parseSignedAmountToMinor(cycleGoalInput);
-        if (goalMinor < 0) {
-          setCycleGoalError("默认留存目标不能小于 0");
-          return;
-        }
-        setCycleGoalError(undefined);
-      } catch {
-        setCycleGoalError("默认留存目标请输入有效金额，最多保留两位小数");
+        setPaydayError("请输入 1 到 31");
         return;
       }
     }
     setPaydayError(undefined);
-    setCycleGoalError(undefined);
     setPayCycleError(undefined);
     setSavingPayCycle(true);
     setPayCycleStatus(undefined);
     try {
-      await setPayCyclePlan(payCycleEnabled ? {
-        paydayDay,
-        defaultSavingsTargetMinor: goalMinor,
-      } : undefined);
-      setPayCycleStatus(payCycleEnabled ? "发薪周期已更新" : "发薪周期已关闭");
+      await setPayCyclePlan(payCycleEnabled ? { paydayDay } : undefined);
+      setPayCycleStatus(payCycleEnabled ? "发薪日已更新" : "发薪日已关闭");
       onDataChanged();
     } catch {
-      setPayCycleError("发薪周期没有保存，请重试");
+      setPayCycleError("保存失败，请重试");
     } finally {
       setSavingPayCycle(false);
     }
@@ -262,41 +225,6 @@ export function SettingsDialog({
       );
     } finally {
       setSavingInitialSavings(false);
-    }
-  };
-
-  const saveCycleOverride = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const normalized = cycleOverrideInput.trim();
-    let targetMinor: number | undefined;
-    if (normalized) {
-      try {
-        targetMinor = parseSignedAmountToMinor(normalized);
-        if (targetMinor < 0) {
-          setCycleOverrideError("本周期目标不能小于 0");
-          return;
-        }
-      } catch {
-        setCycleOverrideError("本周期目标请输入有效金额，最多保留两位小数");
-        return;
-      }
-    }
-
-    setSavingCycleOverride(true);
-    setCycleOverrideError(undefined);
-    setCycleOverrideStatus(undefined);
-    try {
-      await setSavingsTargetOverride(targetMinor);
-      setCycleOverrideStatus(
-        targetMinor === undefined ? "本周期改用默认目标" : "本周期目标已更新",
-      );
-      onDataChanged();
-    } catch (reason) {
-      setCycleOverrideError(
-        reason instanceof Error ? reason.message : "本周期目标没有保存，请重试",
-      );
-    } finally {
-      setSavingCycleOverride(false);
     }
   };
 
@@ -411,7 +339,7 @@ export function SettingsDialog({
           {balanceStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {balanceStatus}</p> : null}
           <form className="inline-setting-form settings-subform" onSubmit={(event) => void saveInitialSavings(event)} noValidate>
             <div className="field-group compact-field">
-              <label htmlFor="initial-savings">初始留存</label>
+              <label htmlFor="initial-savings">已有存款</label>
               <div className="signed-input">
                 <span aria-hidden="true">¥</span>
                 <input
@@ -427,12 +355,12 @@ export function SettingsDialog({
                   }}
                 />
               </div>
-              <p id="initial-savings-help" className="field-help">已在总余额中、但不打算日常花掉的钱。</p>
+              <p id="initial-savings-help" className="field-help">已在总余额中、不作日常花费。</p>
               {initialSavingsError ? <p id="initial-savings-error" className="field-error" role="alert">{initialSavingsError}</p> : null}
             </div>
             <button type="submit" className="secondary-button" disabled={savingInitialSavings}>
               {savingInitialSavings ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
-              保存初始留存
+              保存存款
             </button>
           </form>
           {initialSavingsStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {initialSavingsStatus}</p> : null}
@@ -442,8 +370,8 @@ export function SettingsDialog({
           <div className="settings-section-heading">
             <div className="settings-icon"><CalendarDays aria-hidden="true" /></div>
             <div>
-              <h3 id="pay-cycle-setting-title">发薪周期</h3>
-              <p>发薪日用于划分周期；收入到账后仍需确认记账。</p>
+              <h3 id="pay-cycle-setting-title">发薪日</h3>
+              <p>用于估算两次到账之间是否够花。</p>
             </div>
           </div>
           <form className="goal-setting-form" onSubmit={(event) => void savePayCycle(event)} noValidate>
@@ -455,20 +383,19 @@ export function SettingsDialog({
                 onChange={(event) => {
                   setPayCycleEnabled(event.target.checked);
                   setPaydayError(undefined);
-                  setCycleGoalError(undefined);
                   setPayCycleError(undefined);
                   setPayCycleStatus(undefined);
                 }}
               />
               <span className="toggle-control" aria-hidden="true"><span /></span>
               <span>
-                <strong>打开发薪周期</strong>
-                <small>查看到发薪日的余额判断和每日可花金额</small>
+                <strong>启用发薪日</strong>
+                <small>开启够不够花估算</small>
               </span>
             </label>
             <div className="pay-cycle-fields">
               <div className="field-group compact-field">
-                <label htmlFor="payday-day">每月发薪日</label>
+                <label htmlFor="payday-day">每月日期</label>
                 <div className="unit-input">
                   <input
                     id="payday-day"
@@ -488,87 +415,28 @@ export function SettingsDialog({
                 </div>
                 {paydayError ? <p id="payday-day-error" className="field-error" role="alert">{paydayError}</p> : null}
               </div>
-              <div className="field-group compact-field">
-                <label htmlFor="default-savings-target">每周期默认留存目标</label>
-                <div className="signed-input">
-                  <span aria-hidden="true">¥</span>
-                  <input
-                    id="default-savings-target"
-                    value={cycleGoalInput}
-                    inputMode="decimal"
-                    disabled={!payCycleEnabled}
-                    aria-invalid={Boolean(cycleGoalError)}
-                    aria-describedby={cycleGoalError ? "default-savings-target-error default-savings-target-help" : "default-savings-target-help"}
-                    onChange={(event) => {
-                      setCycleGoalInput(event.target.value);
-                      setCycleGoalError(undefined);
-                      setPayCycleError(undefined);
-                      setPayCycleStatus(undefined);
-                    }}
-                  />
-                </div>
-                <p id="default-savings-target-help" className="field-help">每个周期希望新增留存的钱。</p>
-                {cycleGoalError ? <p id="default-savings-target-error" className="field-error" role="alert">{cycleGoalError}</p> : null}
-              </div>
               <div className="pay-cycle-actions">
                 <button type="submit" className="secondary-button" disabled={savingPayCycle}>
                   {savingPayCycle ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
-                  保存发薪周期
+                  保存发薪日
                 </button>
                 {payCycleError ? <p id="pay-cycle-error" className="field-error" role="alert">{payCycleError}</p> : null}
               </div>
             </div>
           </form>
           {payCycleStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {payCycleStatus}</p> : null}
-          {settings?.savingsTargetNeedsReview ? (
-            <p className="field-warning" role="status">
-              旧版周期底线已转换为留存目标，请确认默认金额是否符合现在的计划。
-            </p>
-          ) : null}
-          {settings?.payCycle ? (
-            <form className="inline-setting-form settings-subform" onSubmit={(event) => void saveCycleOverride(event)} noValidate>
-              <div className="field-group compact-field">
-                <label htmlFor="cycle-savings-target">本周期留存目标（可选）</label>
-                <div className="signed-input">
-                  <span aria-hidden="true">¥</span>
-                  <input
-                    id="cycle-savings-target"
-                    value={cycleOverrideInput}
-                    inputMode="decimal"
-                    placeholder={signedInput(savingsTargetFromPlan(settings.payCycle))}
-                    aria-invalid={Boolean(cycleOverrideError)}
-                    aria-describedby={cycleOverrideError ? "cycle-savings-target-error cycle-savings-target-help" : "cycle-savings-target-help"}
-                    onChange={(event) => {
-                      setCycleOverrideInput(event.target.value);
-                      setCycleOverrideError(undefined);
-                      setCycleOverrideStatus(undefined);
-                    }}
-                  />
-                </div>
-                <p id="cycle-savings-target-help" className="field-help">
-                  留空使用默认目标{settings.incomeForecast ? `；本次绑定 ${readableDateKey(settings.incomeForecast.targetPaydayDateKey)}` : ""}。
-                </p>
-                {cycleOverrideError ? <p id="cycle-savings-target-error" className="field-error" role="alert">{cycleOverrideError}</p> : null}
-              </div>
-              <button type="submit" className="secondary-button" disabled={savingCycleOverride}>
-                {savingCycleOverride ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
-                保存本周期目标
-              </button>
-            </form>
-          ) : null}
-          {cycleOverrideStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {cycleOverrideStatus}</p> : null}
           {settings?.payCycle ? (
             <div className="income-setting-row">
               <div>
                 <span><TrendingUp aria-hidden="true" /> 下次收入</span>
                 {settings?.incomeForecast ? (
                   <strong>
-                    {readableDateKey(settings.incomeForecast.targetPaydayDateKey)} · 最低 {formatCny(settings.incomeForecast.minimumIncomeMinor)} · 预计 {formatCny(settings.incomeForecast.expectedIncomeMinor)}
+                    {readableDateKey(settings.incomeForecast.targetPaydayDateKey)} · {formatCny(settings.incomeForecast.expectedIncomeMinor)}
                   </strong>
                 ) : <strong>尚未填写</strong>}
               </div>
               <button type="button" className="secondary-button" onClick={onOpenIncomeForecast}>
-                {settings?.incomeForecast ? "修改收入预期" : "填写下次收入"}
+                {settings?.incomeForecast ? "修改预计" : "填写预计"}
               </button>
             </div>
           ) : null}
@@ -684,11 +552,10 @@ export function SettingsDialog({
                     <div><dt>截图</dt><dd>{prepared.preview.attachmentCount} 张</dd></div>
                     <div><dt>初始余额</dt><dd>{formatCny(prepared.preview.initialBalanceMinor)}</dd></div>
                     <div><dt>发薪日</dt><dd>{prepared.preview.payCycle ? `每月 ${prepared.preview.payCycle.paydayDay} 日` : "未设置"}</dd></div>
-                    <div><dt>默认留存目标</dt><dd>{prepared.preview.payCycle ? formatCny(savingsTargetFromPlan(prepared.preview.payCycle)) : prepared.preview.monthEndBalanceGoalMinor === undefined ? "未设置" : `${formatCny(Math.max(prepared.preview.monthEndBalanceGoalMinor, 0))}（旧版转换）`}</dd></div>
-                    <div><dt>本周期目标</dt><dd>{prepared.preview.savingsTargetOverride ? formatCny(prepared.preview.savingsTargetOverride.targetMinor) : "使用默认目标"}</dd></div>
-                    <div><dt>留存记录</dt><dd>{prepared.preview.savingsEventCount ?? 0} 条</dd></div>
-                    <div><dt>预计到账日</dt><dd>{prepared.preview.incomeForecast?.targetPaydayDateKey ?? "未设置"}</dd></div>
-                    <div><dt>最低收入</dt><dd>{prepared.preview.incomeForecast ? formatCny(prepared.preview.incomeForecast.minimumIncomeMinor) : "未设置"}</dd></div>
+                    <div><dt>存钱目标</dt><dd>{prepared.preview.savingsGoal ? formatCny(prepared.preview.savingsGoal.targetMinor) : "未设置"}</dd></div>
+                    <div><dt>目标日期</dt><dd>{prepared.preview.savingsGoal?.targetDateKey ?? "未设置"}</dd></div>
+                    <div><dt>存钱记录</dt><dd>{prepared.preview.savingsEventCount ?? 0} 条</dd></div>
+                    <div><dt>预计到账</dt><dd>{prepared.preview.incomeForecast?.targetPaydayDateKey ?? "未设置"}</dd></div>
                     <div><dt>预计收入</dt><dd>{prepared.preview.incomeForecast ? formatCny(prepared.preview.incomeForecast.expectedIncomeMinor) : "未设置"}</dd></div>
                   </dl>
                   <p className="restore-warning">恢复会整体替换当前设备上的账目，且不能撤销。</p>

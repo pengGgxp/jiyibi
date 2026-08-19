@@ -8,11 +8,11 @@ import {
 import type {
   AppSettings,
   Attachment,
-  CycleSavingsTargetOverride,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
   RecoveryAllocation,
+  SavingsGoal,
   SavingsEvent,
 } from "../domain/types";
 import { MAX_IMAGE_DIMENSION, MAX_PROCESSED_IMAGE_BYTES } from "../lib/image";
@@ -216,6 +216,9 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
         "monthEndBalanceGoalMinor",
         "payCycle",
         "incomeForecast",
+        "savingsGoal",
+        "lastExpectedIncomeMinor",
+        "savingsGoalNeedsSetup",
         "savingsTargetOverride",
         "_legacyMonthlySalaryMinor",
       ],
@@ -230,8 +233,16 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
     (value.payCycle === undefined || isPayCyclePlan(value.payCycle)) &&
     (value.incomeForecast === undefined ||
       (value.payCycle !== undefined && isIncomeForecast(value.incomeForecast))) &&
-    (value.savingsTargetOverride === undefined ||
-      (value.payCycle !== undefined && isSavingsTargetOverride(value.savingsTargetOverride))) &&
+    (value.savingsGoal === undefined || isSavingsGoal(value.savingsGoal)) &&
+    (value.savingsTargetOverride === undefined || isLegacySavingsTargetOverride(
+      value.savingsTargetOverride,
+    )) &&
+    (value.lastExpectedIncomeMinor === undefined || (
+      Number.isSafeInteger(value.lastExpectedIncomeMinor) &&
+      Number(value.lastExpectedIncomeMinor) >= 0 &&
+      Number(value.lastExpectedIncomeMinor) <= MAX_AMOUNT_MINOR
+    )) &&
+    (value.savingsGoalNeedsSetup === undefined || value.savingsGoalNeedsSetup === true) &&
     (value._legacyMonthlySalaryMinor === undefined || (
       Number.isSafeInteger(value._legacyMonthlySalaryMinor) &&
       Number(value._legacyMonthlySalaryMinor) > 0 &&
@@ -250,23 +261,35 @@ function isPayCyclePlan(value: unknown): value is PayCyclePlan {
     Number.isInteger(value.paydayDay) &&
     Number(value.paydayDay) >= 1 &&
     Number(value.paydayDay) <= 31 &&
-    ((hasExactKeys(value, ["paydayDay", "defaultSavingsTargetMinor"]) &&
-      Number.isSafeInteger(value.defaultSavingsTargetMinor) &&
-      Number(value.defaultSavingsTargetMinor) >= 0 &&
-      Number(value.defaultSavingsTargetMinor) <= MAX_AMOUNT_MINOR) ||
+    (
+      hasExactKeys(value, ["paydayDay"]) ||
+      (hasExactKeys(value, ["paydayDay", "defaultSavingsTargetMinor"]) &&
+        Number.isSafeInteger(value.defaultSavingsTargetMinor) &&
+        Number(value.defaultSavingsTargetMinor) >= 0 &&
+        Number(value.defaultSavingsTargetMinor) <= MAX_AMOUNT_MINOR) ||
       (hasExactKeys(value, ["paydayDay", "cycleEndBalanceGoalMinor"]) &&
         Number.isSafeInteger(value.cycleEndBalanceGoalMinor) &&
-        Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR))
+        Math.abs(Number(value.cycleEndBalanceGoalMinor)) <= MAX_AMOUNT_MINOR)
+    )
   );
 }
 
-function isSavingsTargetOverride(value: unknown): value is CycleSavingsTargetOverride {
-  return (
-    isRecord(value) &&
+function isLegacySavingsTargetOverride(value: unknown): boolean {
+  return isRecord(value) &&
     hasExactKeys(value, ["targetPaydayDateKey", "targetMinor"]) &&
     isLocalDateKey(value.targetPaydayDateKey) &&
     Number.isSafeInteger(value.targetMinor) &&
     Number(value.targetMinor) >= 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR;
+}
+
+function isSavingsGoal(value: unknown): value is SavingsGoal {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["targetDateKey", "targetMinor"]) &&
+    isLocalDateKey(value.targetDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) > 0 &&
     Number(value.targetMinor) <= MAX_AMOUNT_MINOR
   );
 }
@@ -274,22 +297,23 @@ function isSavingsTargetOverride(value: unknown): value is CycleSavingsTargetOve
 function isIncomeForecast(value: unknown): value is IncomeForecast {
   return (
     isRecord(value) &&
-    hasExactKeys(value, [
-      "id",
-      "targetPaydayDateKey",
-      "minimumIncomeMinor",
-      "expectedIncomeMinor",
-    ]) &&
+    (hasExactKeys(value, ["id", "targetPaydayDateKey", "expectedIncomeMinor"]) ||
+      (hasExactKeys(value, [
+        "id",
+        "targetPaydayDateKey",
+        "minimumIncomeMinor",
+        "expectedIncomeMinor",
+      ]) &&
+        Number.isSafeInteger(value.minimumIncomeMinor) &&
+        Number(value.minimumIncomeMinor) >= 0 &&
+        Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
+        Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor))) &&
     typeof value.id === "string" &&
     SYNC_ID_PATTERN.test(value.id) &&
     isLocalDateKey(value.targetPaydayDateKey) &&
-    Number.isSafeInteger(value.minimumIncomeMinor) &&
-    Number(value.minimumIncomeMinor) >= 0 &&
-    Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
     Number.isSafeInteger(value.expectedIncomeMinor) &&
     Number(value.expectedIncomeMinor) >= 0 &&
-    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR &&
-    Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor)
+    Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR
   );
 }
 
@@ -400,10 +424,40 @@ function isSyncMutationResult(value: unknown): value is SyncMutationResult {
   if (!isRecord(value) || !isNonEmptyString(value.id)) return false;
 
   if (value.status === "applied" || value.status === "duplicate") {
+    const hasConfirmation = Object.hasOwn(value, "incomeConfirmation");
+    const confirmation = value.incomeConfirmation;
+    const validConfirmation = !hasConfirmation || (
+      isRecord(confirmation) &&
+      hasExactKeys(
+        confirmation,
+        confirmation.entry === undefined
+          ? ["confirmationId", "forecastId", "actualIncomeMinor"]
+          : ["confirmationId", "forecastId", "actualIncomeMinor", "entryVersion", "entry"],
+      ) &&
+      isNonEmptyString(confirmation.confirmationId) &&
+      isNonEmptyString(confirmation.forecastId) &&
+      Number.isSafeInteger(confirmation.actualIncomeMinor) &&
+      Number(confirmation.actualIncomeMinor) >= 0 &&
+      (
+        confirmation.entry === undefined
+          ? confirmation.actualIncomeMinor === 0
+          : Number(confirmation.actualIncomeMinor) > 0 &&
+             Number.isSafeInteger(confirmation.entryVersion) &&
+             Number(confirmation.entryVersion) >= 1 &&
+             isLedgerEntry(confirmation.entry) &&
+            confirmation.entry.id === confirmation.forecastId
+       )
+     );
     return (
-      hasExactKeys(value, ["id", "status", "version"]) &&
+      hasExactKeys(
+        value,
+        hasConfirmation
+          ? ["id", "status", "version", "incomeConfirmation"]
+          : ["id", "status", "version"],
+      ) &&
       Number.isSafeInteger(value.version) &&
-      Number(value.version) >= 1
+      Number(value.version) >= 1 &&
+      validConfirmation
     );
   }
   if (value.status === "conflict") {
@@ -505,32 +559,43 @@ function normalizeLegacySettingsChange(change: SyncChange, now: Date): SyncChang
   if (change.entityType !== "settings") return change;
   const raw = change.payload as SyncSettingsResponsePayload;
   const legacySalary = raw._legacyMonthlySalaryMinor;
-  const legacySavingsTarget = raw.payCycle?.cycleEndBalanceGoalMinor;
-  if (legacySalary === undefined && legacySavingsTarget === undefined) return change;
-
   const settings = { ...raw };
   delete settings._legacyMonthlySalaryMinor;
-  if (legacySavingsTarget !== undefined && settings.payCycle) {
-    settings.payCycle = {
-      paydayDay: settings.payCycle.paydayDay,
-      defaultSavingsTargetMinor: Math.max(legacySavingsTarget, 0),
+  delete settings.monthEndBalanceGoalMinor;
+  delete settings.savingsTargetOverride;
+  delete settings.cycleSavingsTargetOverride;
+  const oldCycleTarget = settings.payCycle?.defaultSavingsTargetMinor ??
+    settings.payCycle?.cycleEndBalanceGoalMinor;
+  if (settings.payCycle) settings.payCycle = { paydayDay: settings.payCycle.paydayDay };
+  if (settings.incomeForecast) {
+    settings.incomeForecast = {
+      id: settings.incomeForecast.id,
+      targetPaydayDateKey: settings.incomeForecast.targetPaydayDateKey,
+      expectedIncomeMinor: settings.incomeForecast.expectedIncomeMinor,
     };
-    if (legacySavingsTarget < 0) settings.savingsTargetNeedsReview = true;
   }
-  if (legacySalary !== undefined) {
+  if (legacySalary !== undefined && !settings.incomeForecast) {
     const targetPaydayDateKey = resolveNextPaydayDateKey(settings.payCycle!.paydayDay, now);
     settings.incomeForecast = {
       id: `legacy-income-${targetPaydayDateKey}`,
       targetPaydayDateKey,
-      minimumIncomeMinor: 0,
       expectedIncomeMinor: legacySalary,
     };
   }
+  if (settings.incomeForecast && settings.lastExpectedIncomeMinor === undefined) {
+    settings.lastExpectedIncomeMinor = settings.incomeForecast.expectedIncomeMinor;
+  }
+  if (oldCycleTarget !== undefined && oldCycleTarget !== 0 && !settings.savingsGoal) {
+    settings.savingsGoalNeedsSetup = true;
+  }
+  if (settings.savingsGoal) delete settings.savingsGoalNeedsSetup;
   return {
     ...change,
     payload: settings,
     ...(legacySalary !== undefined ? { claimLegacyIncomeForecast: true as const } : {}),
-    ...(legacySavingsTarget !== undefined ? { claimLegacySavingsTarget: true as const } : {}),
+    ...(oldCycleTarget !== undefined && oldCycleTarget !== 0
+      ? { claimLegacySavingsTarget: true as const }
+      : {}),
   };
 }
 
@@ -564,6 +629,19 @@ function validateSyncResponseForRequest(
       )
     ) {
       throw responseError("The sync service returned a conflict for another entity.");
+    }
+    if (
+      result.status !== "conflict" &&
+      mutation.entityType === "settings" &&
+      (
+        (mutation.payload.incomeConfirmation !== undefined) !==
+          (result.incomeConfirmation !== undefined) ||
+        (result.incomeConfirmation !== undefined &&
+          mutation.payload.incomeConfirmation?.forecastId !==
+            result.incomeConfirmation.forecastId)
+      )
+    ) {
+      throw responseError("The sync service returned an unrelated income confirmation.");
     }
   }
   if (resultIds.size !== request.mutations.length) {

@@ -76,6 +76,11 @@ function session(overrides: Partial<SessionResponse["cloud"]> = {}): SessionResp
   };
 }
 
+async function pendingIncomeConfirmation(database: LedgerDatabase) {
+  return (await database.syncOutbox.toArray())
+    .find((record) => record.incomeConfirmation !== undefined);
+}
+
 function remoteChange(entry: LedgerEntry, version: number, seq = String(version)): SyncChange {
   return {
     seq,
@@ -126,34 +131,30 @@ describe("LedgerDatabase", () => {
     expect(settings).not.toHaveProperty("payCycle");
   });
 
-  it("saves and clears an atomic pay-cycle plan while migrating the legacy goal", async () => {
+  it("saves and clears a payday without changing independent settings", async () => {
     await setInitialBalance(1_234, database);
     await setMonthEndBalanceGoal(50_000, database);
-    const plan = {
-      paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
-    };
+    const plan = { paydayDay: 10 };
 
     const saved = await setPayCyclePlan(plan, database, new Date("2026-08-10T02:00:00.000Z"));
     expect(saved).toMatchObject({
       initialBalanceMinor: 1_234,
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
+      payCycle: { paydayDay: 10 },
     });
     expect(saved).not.toHaveProperty("monthEndBalanceGoalMinor");
 
     const forecast = await setIncomeForecast({
       targetPaydayDateKey: "2026-09-10",
-      minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     }, database, new Date(2026, 7, 10, 10));
     await setInitialBalance(-2_500, database);
     expect(await getSettings(database)).toMatchObject({
       initialBalanceMinor: -2_500,
-      payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
+      payCycle: { paydayDay: 10 },
       incomeForecast: forecast.incomeForecast,
     });
 
-    await setPayCyclePlan({ ...plan, cycleEndBalanceGoalMinor: 120_000 }, database);
+    await setPayCyclePlan(plan, database);
     expect((await getSettings(database)).incomeForecast).toEqual(forecast.incomeForecast);
 
     const cleared = await setPayCyclePlan(undefined, database);
@@ -163,11 +164,9 @@ describe("LedgerDatabase", () => {
   });
 
   it.each([
-    { paydayDay: 0, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 32, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10.5, cycleEndBalanceGoalMinor: 0 },
-    { paydayDay: 10, cycleEndBalanceGoalMinor: 1.5 },
-    { paydayDay: 10, cycleEndBalanceGoalMinor: Number.NaN },
+    { paydayDay: 0 },
+    { paydayDay: 32 },
+    { paydayDay: 10.5 },
   ])("rejects an incomplete or invalid pay-cycle plan: %o", async (invalidPlan) => {
     const before = await getSettings(database);
     await expect(setPayCyclePlan(invalidPlan, database)).rejects.toMatchObject({
@@ -180,28 +179,25 @@ describe("LedgerDatabase", () => {
     const now = new Date(2026, 7, 9, 10, 30);
     await setPayCyclePlan({
       paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
     }, database, now);
 
     const saved = await setIncomeForecast({
       targetPaydayDateKey: "2026-08-15",
-      minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     }, database, now);
     expect(saved.incomeForecast).toMatchObject({
       id: expect.any(String),
       targetPaydayDateKey: "2026-08-15",
-      minimumIncomeMinor: 500_000,
       expectedIncomeMinor: 800_000,
     });
 
     const edited = await setIncomeForecast({
       targetPaydayDateKey: "2026-08-20",
-      minimumIncomeMinor: 550_000,
       expectedIncomeMinor: 850_000,
     }, database, now);
     expect(edited.incomeForecast?.id).toBe(saved.incomeForecast?.id);
-    expect(edited.incomeForecast?.minimumIncomeMinor).toBe(550_000);
+    expect(edited.incomeForecast?.expectedIncomeMinor).toBe(850_000);
+    expect(edited.lastExpectedIncomeMinor).toBe(850_000);
 
     const cleared = await clearIncomeForecast(database, now);
     expect(cleared).not.toHaveProperty("incomeForecast");
@@ -210,41 +206,30 @@ describe("LedgerDatabase", () => {
   it.each([
     {
       targetPaydayDateKey: "2026-02-30",
-      minimumIncomeMinor: 1,
       expectedIncomeMinor: 2,
     },
     {
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: -1,
-      expectedIncomeMinor: 2,
+      expectedIncomeMinor: -1,
     },
     {
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 3,
-      expectedIncomeMinor: 2,
-    },
-    {
-      targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 1.5,
-      expectedIncomeMinor: 2,
+      expectedIncomeMinor: 1.5,
     },
     {
       id: "forecast with spaces",
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 1,
       expectedIncomeMinor: 2,
     },
     {
       id: "f".repeat(129),
       targetPaydayDateKey: "2026-08-10",
-      minimumIncomeMinor: 1,
       expectedIncomeMinor: 2,
     },
   ])("rejects an invalid income forecast: %o", async (invalidForecast) => {
     const now = new Date(2026, 7, 9, 10, 30);
     await setPayCyclePlan({
       paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
     }, database, now);
     const before = await getSettings(database);
 
@@ -411,9 +396,19 @@ describe("LedgerDatabase", () => {
     });
     expect(result.settings).not.toHaveProperty("incomeForecast");
     expect(await database.entries.toArray()).toEqual([result.entry]);
-    expect(await database.syncOutbox.get(`entry:${result.entry?.id}`)).toBeDefined();
+    expect(await database.syncOutbox.get(`entry:${result.entry?.id}`)).toBeUndefined();
     expect(await database.syncOutbox.get("settings:primary")).toMatchObject({
       clearIncomeForecast: true,
+    });
+    expect(await pendingIncomeConfirmation(database)).toMatchObject({
+      entityKey: `incomeConfirmation:${result.entry?.id}`,
+      incomeConfirmation: {
+        forecastId: result.entry?.id,
+        targetPaydayDateKey: "2026-08-10",
+        expectedIncomeMinor: 800_000,
+        actualIncomeMinor: 765_432,
+        entry: { id: result.entry?.id, amountMinor: 765_432 },
+      },
     });
 
     await expect(
@@ -430,11 +425,25 @@ describe("LedgerDatabase", () => {
       minimumIncomeMinor: 0,
       expectedIncomeMinor: 0,
     }, database, forecastNow);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
 
     const result = await recordActualIncome(0, database, new Date(2026, 7, 10, 9));
     expect(result.entry).toBeUndefined();
     expect(result.settings).not.toHaveProperty("incomeForecast");
     expect(await database.entries.count()).toBe(0);
+    expect(await database.syncOutbox.get("settings:primary")).toMatchObject({
+      clearIncomeForecast: true,
+    });
+    expect(await pendingIncomeConfirmation(database)).toMatchObject({
+      incomeConfirmation: {
+        forecastId: expect.any(String),
+        expectedIncomeMinor: 0,
+        actualIncomeMinor: 0,
+      },
+    });
+    expect((await pendingIncomeConfirmation(database))?.incomeConfirmation)
+      .not.toHaveProperty("entry");
   });
 
   it("rolls back the actual income entry when its sync mutation cannot be queued", async () => {
@@ -751,11 +760,12 @@ describe("LedgerDatabase", () => {
     try {
       await upgraded.open();
       expect(await upgraded.settings.get("primary")).toMatchObject({
-        payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
+        payCycle: { paydayDay: 31 },
+        savingsGoalNeedsSetup: true,
+        lastExpectedIncomeMinor: 800_000,
         incomeForecast: {
           id: "legacy-income-2026-08-31",
           targetPaydayDateKey: "2026-08-31",
-          minimumIncomeMinor: 0,
           expectedIncomeMinor: 800_000,
         },
       });
@@ -763,7 +773,8 @@ describe("LedgerDatabase", () => {
       expect(outbox).toMatchObject({
         clearIncomeForecast: true,
         payload: {
-          payCycle: { paydayDay: 31, defaultSavingsTargetMinor: 100_000 },
+          payCycle: { paydayDay: 31 },
+          savingsGoalNeedsSetup: true,
           incomeForecast: { expectedIncomeMinor: 800_000 },
         },
       });
@@ -825,10 +836,7 @@ describe("LedgerDatabase", () => {
 
   it("keeps an explicit pay-cycle clear while coalescing later settings edits", async () => {
     await linkSyncAccount(session(), true, database);
-    const plan = {
-      paydayDay: 10,
-      cycleEndBalanceGoalMinor: 100_000,
-    };
+    const plan = { paydayDay: 10 };
 
     await setPayCyclePlan(plan, database);
     expect(await database.syncOutbox.get("settings:primary")).not.toHaveProperty(
@@ -846,7 +854,6 @@ describe("LedgerDatabase", () => {
     expect(reset).not.toHaveProperty("clearPayCycle");
     expect(reset?.payload).toHaveProperty("payCycle", {
       paydayDay: 10,
-      defaultSavingsTargetMinor: 100_000,
     });
   });
 

@@ -1,5 +1,6 @@
 import { ApiError } from "./errors";
 import type {
+  IncomeConfirmationPayload,
   LedgerEntryPayload,
   RecoveryAllocationPayload,
   SavingsEventPayload,
@@ -312,12 +313,21 @@ function validateSettingsPayload(
         ? ["monthEndBalanceGoalMinor", "payCycle"]
         : protocolVersion <= 5
           ? ["monthEndBalanceGoalMinor", "payCycle", "incomeForecast"]
-          : [
+          : protocolVersion === 6
+            ? [
             "monthEndBalanceGoalMinor",
             "payCycle",
             "incomeForecast",
             "savingsTargetOverride",
-          ];
+            ]
+            : [
+              "payCycle",
+              "incomeForecast",
+              "savingsGoal",
+              "lastExpectedIncomeMinor",
+              "savingsGoalNeedsSetup",
+              "incomeConfirmation",
+            ];
   if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
@@ -325,6 +335,10 @@ function validateSettingsPayload(
   const hasPayCycle = Object.hasOwn(settings, "payCycle");
   const hasIncomeForecast = Object.hasOwn(settings, "incomeForecast");
   const hasSavingsTargetOverride = Object.hasOwn(settings, "savingsTargetOverride");
+  const hasSavingsGoal = Object.hasOwn(settings, "savingsGoal");
+  const hasLastExpectedIncome = Object.hasOwn(settings, "lastExpectedIncomeMinor");
+  const hasSavingsGoalNeedsSetup = Object.hasOwn(settings, "savingsGoalNeedsSetup");
+  const hasIncomeConfirmation = Object.hasOwn(settings, "incomeConfirmation");
   if (
     entityId !== "primary" ||
     settings.id !== "primary" ||
@@ -341,13 +355,33 @@ function validateSettingsPayload(
       !isValidPayCycle(settings.payCycle, protocolVersion)) ||
     (settings.incomeForecast !== undefined &&
       settings.incomeForecast !== null &&
-      !isValidIncomeForecast(settings.incomeForecast)) ||
+      !isValidIncomeForecast(settings.incomeForecast, protocolVersion)) ||
     (settings.savingsTargetOverride !== undefined &&
       settings.savingsTargetOverride !== null &&
       !isValidSavingsTargetOverride(settings.savingsTargetOverride)) ||
+    (settings.savingsGoal !== undefined &&
+      settings.savingsGoal !== null &&
+      !isValidSavingsGoal(settings.savingsGoal)) ||
+    (settings.lastExpectedIncomeMinor !== undefined &&
+      settings.lastExpectedIncomeMinor !== null &&
+      (!Number.isSafeInteger(settings.lastExpectedIncomeMinor) ||
+        settings.lastExpectedIncomeMinor < 0 ||
+        settings.lastExpectedIncomeMinor > MAX_AMOUNT_MINOR)) ||
+    (settings.savingsGoalNeedsSetup !== undefined &&
+      settings.savingsGoalNeedsSetup !== null &&
+      settings.savingsGoalNeedsSetup !== true) ||
     (hasPayCycle && settings.payCycle === undefined) ||
     (hasIncomeForecast && settings.incomeForecast === undefined) ||
     (hasSavingsTargetOverride && settings.savingsTargetOverride === undefined) ||
+    (hasSavingsGoal && settings.savingsGoal === undefined) ||
+    (hasLastExpectedIncome && settings.lastExpectedIncomeMinor === undefined) ||
+    (hasSavingsGoalNeedsSetup && settings.savingsGoalNeedsSetup === undefined) ||
+    (hasIncomeConfirmation && !isValidIncomeConfirmation(settings.incomeConfirmation)) ||
+    (hasIncomeConfirmation && settings.incomeForecast !== null) ||
+    (hasIncomeConfirmation &&
+      settings.lastExpectedIncomeMinor !== settings.incomeConfirmation?.expectedIncomeMinor) ||
+    (protocolVersion >= 7 && settings.savingsGoal !== undefined &&
+      settings.savingsGoal !== null && settings.savingsGoalNeedsSetup === true) ||
     (protocolVersion >= 4 && settings.incomeForecast !== undefined &&
       settings.incomeForecast !== null && settings.payCycle === null) ||
     (protocolVersion >= 4 && settings.payCycle === null &&
@@ -372,7 +406,9 @@ function isValidPayCycle(
     ? ["paydayDay", "monthlySalaryMinor", "cycleEndBalanceGoalMinor"] as const
     : protocolVersion <= 5
       ? ["paydayDay", "cycleEndBalanceGoalMinor"] as const
-      : ["paydayDay", "defaultSavingsTargetMinor"] as const;
+      : protocolVersion === 6
+        ? ["paydayDay", "defaultSavingsTargetMinor"] as const
+        : ["paydayDay"] as const;
   if (!hasOnlyKeys(value, required)) return false;
   if (
     !Number.isInteger(value.paydayDay) ||
@@ -381,9 +417,10 @@ function isValidPayCycle(
     (protocolVersion <= 5
       ? !Number.isSafeInteger(value.cycleEndBalanceGoalMinor) ||
         Math.abs(Number(value.cycleEndBalanceGoalMinor)) > MAX_AMOUNT_MINOR
-      : !Number.isSafeInteger(value.defaultSavingsTargetMinor) ||
+      : protocolVersion === 6 && (
+        !Number.isSafeInteger(value.defaultSavingsTargetMinor) ||
         Number(value.defaultSavingsTargetMinor) < 0 ||
-        Number(value.defaultSavingsTargetMinor) > MAX_AMOUNT_MINOR)
+        Number(value.defaultSavingsTargetMinor) > MAX_AMOUNT_MINOR))
   ) {
     return false;
   }
@@ -391,6 +428,17 @@ function isValidPayCycle(
     Number.isSafeInteger(value.monthlySalaryMinor) &&
     Number(value.monthlySalaryMinor) > 0 &&
     Number(value.monthlySalaryMinor) <= MAX_AMOUNT_MINOR
+  );
+}
+
+function isValidSavingsGoal(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["targetDateKey", "targetMinor"]) &&
+    isLocalDateKey(value.targetDateKey) &&
+    Number.isSafeInteger(value.targetMinor) &&
+    Number(value.targetMinor) > 0 &&
+    Number(value.targetMinor) <= MAX_AMOUNT_MINOR
   );
 }
 
@@ -405,25 +453,75 @@ function isValidSavingsTargetOverride(value: unknown): boolean {
   );
 }
 
-function isValidIncomeForecast(value: unknown): boolean {
+function isValidIncomeForecast(
+  value: unknown,
+  protocolVersion: SyncProtocolVersion,
+): boolean {
   return (
     isRecord(value) &&
-    hasOnlyKeys(value, [
-      "id",
-      "targetPaydayDateKey",
-      "minimumIncomeMinor",
-      "expectedIncomeMinor",
-    ]) &&
+    hasOnlyKeys(value, protocolVersion >= 7
+      ? ["id", "targetPaydayDateKey", "expectedIncomeMinor"]
+      : ["id", "targetPaydayDateKey", "minimumIncomeMinor", "expectedIncomeMinor"]) &&
     isValidId(value.id) &&
     isLocalDateKey(value.targetPaydayDateKey) &&
-    Number.isSafeInteger(value.minimumIncomeMinor) &&
-    Number(value.minimumIncomeMinor) >= 0 &&
-    Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR &&
+    (protocolVersion >= 7 || (
+      Number.isSafeInteger(value.minimumIncomeMinor) &&
+      Number(value.minimumIncomeMinor) >= 0 &&
+      Number(value.minimumIncomeMinor) <= MAX_AMOUNT_MINOR
+    )) &&
     Number.isSafeInteger(value.expectedIncomeMinor) &&
     Number(value.expectedIncomeMinor) >= 0 &&
     Number(value.expectedIncomeMinor) <= MAX_AMOUNT_MINOR &&
-    Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor)
+    (protocolVersion >= 7 ||
+      Number(value.minimumIncomeMinor) <= Number(value.expectedIncomeMinor))
   );
+}
+
+function isValidIncomeConfirmation(value: unknown): value is IncomeConfirmationPayload {
+  if (!isRecord(value)) return false;
+  const hasEntry = Object.hasOwn(value, "entry");
+  const hasEntryMutationId = Object.hasOwn(value, "entryMutationId");
+  if (!hasOnlyKeys(
+    value,
+    [
+      "confirmationId",
+      "forecastId",
+      "targetPaydayDateKey",
+      "expectedIncomeMinor",
+      "actualIncomeMinor",
+      "confirmedAt",
+    ],
+    ["entryMutationId", "entry"],
+  )) return false;
+  if (
+    !isValidId(value.confirmationId) ||
+    !isValidId(value.forecastId) ||
+    !isLocalDateKey(value.targetPaydayDateKey) ||
+    !Number.isSafeInteger(value.expectedIncomeMinor) ||
+    Number(value.expectedIncomeMinor) < 0 ||
+    Number(value.expectedIncomeMinor) > MAX_AMOUNT_MINOR ||
+    !Number.isSafeInteger(value.actualIncomeMinor) ||
+    Number(value.actualIncomeMinor) < 0 ||
+    Number(value.actualIncomeMinor) > MAX_AMOUNT_MINOR ||
+    !isIsoDate(value.confirmedAt) ||
+    (Number(value.actualIncomeMinor) === 0 && (hasEntry || hasEntryMutationId)) ||
+    (Number(value.actualIncomeMinor) > 0 && (!hasEntry || !hasEntryMutationId)) ||
+    (hasEntryMutationId && !isValidId(value.entryMutationId))
+  ) return false;
+  if (!hasEntry) return true;
+  try {
+    const entry = validateEntryPayload(value.entry, value.forecastId, 7);
+    return entry.id === value.forecastId &&
+      entry.amountMinor === value.actualIncomeMinor &&
+      entry.note === "本次实际收入" &&
+      entry.localDateKey === value.targetPaydayDateKey &&
+      entry.attachmentId === undefined &&
+      entry.treatment === "ordinary_income" &&
+      entry.confirmationStatus === "not_needed" &&
+      entry.deletedAt === undefined;
+  } catch {
+    return false;
+  }
 }
 
 function validateCursor(value: unknown): string {
@@ -508,7 +606,8 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     !hasOnlyKeys(value, keys) ||
     (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
       value.schemaVersion !== 3 && value.schemaVersion !== 4 &&
-      value.schemaVersion !== 5 && value.schemaVersion !== 6)
+      value.schemaVersion !== 5 && value.schemaVersion !== 6 &&
+      value.schemaVersion !== 7)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

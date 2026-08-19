@@ -4,7 +4,6 @@ import {
   CircleAlert,
   CircleCheckBig,
   Equal,
-  Gauge,
   Minus,
   PencilLine,
   PiggyBank,
@@ -13,6 +12,8 @@ import {
   WalletCards,
 } from "lucide-react";
 import {
+  calculateSavingsGoalProgress,
+  calculateSpendableBalanceMinor,
   formatCny,
   type AppSettings,
   type ForecastOutcome,
@@ -20,6 +21,7 @@ import {
   type LedgerSummary,
   type PayCyclePlan,
   type RetainedSavingsSummary,
+  type SavingsGoalProgress,
   type SpendingAnalysis,
 } from "../domain";
 
@@ -33,11 +35,10 @@ interface SummaryPanelProps {
   loading: boolean;
   onOpenSettings(): void;
   onOpenIncomeForecast(): void;
+  onOpenSavingsGoal(): void;
   onOpenAnalysis(): void;
   onReserveSavings(): void;
   onReleaseSavings(): void;
-  canSettleSavings: boolean;
-  onSettleSavings(): void;
 }
 
 function OutcomeIcon({ outcome }: { outcome?: ForecastOutcome }) {
@@ -51,57 +52,55 @@ function amountMagnitude(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
 
-function nonNegative(value: bigint): bigint {
-  return value > 0n ? value : 0n;
-}
-
-function currentCycleCopy(analysis: SpendingAnalysis): { title: string; detail: string } {
-  const { currentCycle, confidence, window } = analysis;
-  if (confidence === "insufficient" || currentCycle.affordability === undefined) {
-    const remainingDays = Math.max(0, window.daysNeeded - window.observedDays);
-    return {
-      title: "暂不判断",
-      detail: remainingDays > 0
-        ? `还需数据覆盖 ${remainingDays} 个完整日`
-        : "历史记录还不足",
-    };
-  }
-  if (currentCycle.affordability === "exact") {
-    return { title: "预计刚好达到", detail: "按近期已记录花法估算，刚好完成留存目标" };
-  }
-  const difference = currentCycle.balanceGoalDifferenceMinor ?? 0n;
-  return currentCycle.affordability === "surplus"
-    ? { title: "预计够用", detail: `完成留存目标后还可剩 ${formatCny(difference)}` }
-    : { title: "预计有缺口", detail: `完成留存目标还差 ${formatCny(amountMagnitude(difference))}` };
-}
-
-function scenarioCopy(scenario: IncomeScenarioAnalysis | undefined, analysis: SpendingAnalysis) {
-  if (!scenario) {
-    const remainingDays = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
-    return {
-      title: "暂不判断",
-      detail: remainingDays > 0 ? `还需数据覆盖 ${remainingDays} 个完整日` : "历史记录还不足",
-    };
-  }
-  if (scenario.affordability === "exact") {
-    return { title: "刚好覆盖", detail: "与近期已记录花法相当" };
-  }
-  return scenario.affordability === "surplus"
-    ? { title: "预计够用", detail: `按近期已记录花法可多 ${formatCny(scenario.differenceMinor)}` }
-    : { title: "预计有缺口", detail: `按近期已记录花法还差 ${formatCny(amountMagnitude(scenario.differenceMinor))}` };
-}
-
-function confidenceLabel(analysis: SpendingAnalysis): string {
-  if (analysis.confidence === "ready") return "按近 30 天已记录花法估算";
-  if (analysis.confidence === "preliminary") {
-    return `初步估算 · 数据覆盖 ${analysis.window.observedDays} 天`;
-  }
-  return "数据覆盖不足";
+function signedAmount(value: bigint): string {
+  if (value === 0n) return formatCny(value);
+  return `${value > 0n ? "+" : "−"}${formatCny(amountMagnitude(value))}`;
 }
 
 function readableDate(dateKey: string): string {
   const [, month, day] = dateKey.split("-");
-  return month && day ? `${Number(month)} 月 ${Number(day)} 日` : dateKey;
+  return month && day ? `${Number(month)}月${Number(day)}日` : dateKey;
+}
+
+function outcomeCopy(
+  outcome: ForecastOutcome | undefined,
+  difference: bigint | undefined,
+  analysis: SpendingAnalysis,
+): { label: string; amount: string } {
+  if (!outcome || difference === undefined || analysis.confidence === "insufficient") {
+    const remaining = Math.max(0, analysis.window.daysNeeded - analysis.window.observedDays);
+    return { label: "待估算", amount: remaining > 0 ? `差 ${remaining} 天` : "数据不足" };
+  }
+  if (outcome === "exact") return { label: "刚好够", amount: formatCny(0) };
+  if (outcome === "surplus") return { label: "够花", amount: signedAmount(difference) };
+  return { label: "还差", amount: signedAmount(difference) };
+}
+
+function scenarioCopy(
+  scenario: IncomeScenarioAnalysis | undefined,
+  analysis: SpendingAnalysis,
+): { label: string; amount: string } {
+  return outcomeCopy(scenario?.affordability, scenario?.differenceMinor, analysis);
+}
+
+function goalProgress(
+  settings: AppSettings | undefined,
+  retained: RetainedSavingsSummary | undefined,
+  paydayDay: number | undefined,
+): SavingsGoalProgress | undefined {
+  if (!settings?.savingsGoal || !retained) return undefined;
+  try {
+    return calculateSavingsGoalProgress(settings.savingsGoal, retained, paydayDay);
+  } catch {
+    return undefined;
+  }
+}
+
+function goalStatusLabel(progress: SavingsGoalProgress): string {
+  if (progress.needsCorrection) return "待校正";
+  if (progress.status === "completed") return "已完成";
+  if (progress.status === "overdue") return "已到期";
+  return "进行中";
 }
 
 export function SummaryPanel({
@@ -114,37 +113,33 @@ export function SummaryPanel({
   loading,
   onOpenSettings,
   onOpenIncomeForecast,
+  onOpenSavingsGoal,
   onOpenAnalysis,
   onReserveSavings,
   onReleaseSavings,
-  canSettleSavings,
-  onSettleSavings,
 }: SummaryPanelProps) {
-  const currentCopy = analysis ? currentCycleCopy(analysis) : undefined;
+  const retainedMinor = retainedSavings?.totalRetainedMinor ?? 0n;
+  const rawSpendableMinor = summary
+    ? calculateSpendableBalanceMinor(summary.balanceMinor, retainedMinor)
+    : undefined;
+  const displayBalance = rawSpendableMinor !== undefined && rawSpendableMinor > 0n
+    ? rawSpendableMinor
+    : 0n;
+  const progress = analysis?.savingsGoal
+    ?? goalProgress(settings, retainedSavings, payCycle?.paydayDay);
+  const currentCopy = analysis
+    ? outcomeCopy(
+      analysis.currentCycle.affordability,
+      analysis.currentCycle.balanceGoalDifferenceMinor,
+      analysis,
+    )
+    : undefined;
   const activeForecast = analysis && settings?.incomeForecast?.targetPaydayDateKey === analysis.nextCycle.cycleStartDateKey
     ? settings.incomeForecast
     : undefined;
-  const minimumCopy = analysis ? scenarioCopy(analysis.nextCycle.minimumIncomeScenario, analysis) : undefined;
-  const expectedCopy = analysis ? scenarioCopy(analysis.nextCycle.expectedIncomeScenario, analysis) : undefined;
-  const rawSpendableMinor = analysis?.currentCycle.spendableBalanceMinor
-    ?? (summary && retainedSavings
-      ? BigInt(summary.balanceMinor) - retainedSavings.totalRetainedMinor
-      : undefined);
-  const retainedMinor = analysis?.currentCycle.retainedBalanceMinor
-    ?? retainedSavings?.totalRetainedMinor;
-  const remainingTargetMinor = analysis?.currentCycle.remainingSavingsTargetMinor;
-  const cycleNetGrowthMinor = analysis?.currentCycle.cycleNetGrowthMinor;
-  const savingsTargetMinor = analysis?.currentCycle.savingsTargetMinor;
-  const displayBalance = rawSpendableMinor === undefined
-    ? BigInt(summary?.balanceMinor ?? 0)
-    : nonNegative(rawSpendableMinor);
-  const savingsWarning = analysis?.currentCycle.savingsNeedsCorrection || retainedSavings?.needsCorrection
-    ? "留存记录待校正"
-    : rawSpendableMinor !== undefined && rawSpendableMinor < 0n
-      ? BigInt(summary?.balanceMinor ?? 0) < (retainedMinor ?? 0n)
-        ? "当前总余额已低于已留存金额，实际动用了留存。"
-        : "当前资金不足以同时覆盖留存和本周期目标。"
-      : undefined;
+  const expectedCopy = analysis
+    ? scenarioCopy(analysis.nextCycle.expectedIncomeScenario, analysis)
+    : undefined;
 
   return (
     <section className="summary-panel" aria-labelledby="summary-title" aria-busy={loading}>
@@ -163,32 +158,61 @@ export function SummaryPanel({
 
       {summary ? (
         <>
-          <dl className="summary-savings-grid">
+          <dl className="summary-savings-grid summary-balance-grid">
             <div><dt>总余额</dt><dd>{formatCny(summary.balanceMinor)}</dd></div>
-            <div><dt>已留存</dt><dd>{formatCny(retainedMinor ?? 0n)}</dd></div>
-            {analysis ? (
-              <>
-                <div><dt>本周期目标</dt><dd>{formatCny(savingsTargetMinor ?? 0)}</dd></div>
-                <div><dt>净增长</dt><dd>{formatCny(cycleNetGrowthMinor ?? 0n)}</dd></div>
-                <div><dt>尚需留存</dt><dd>{formatCny(remainingTargetMinor ?? 0n)}</dd></div>
-              </>
-            ) : null}
+            <div><dt>已存</dt><dd>{formatCny(retainedMinor)}</dd></div>
           </dl>
-          {savingsWarning ? (
+
+          {settings?.savingsGoalNeedsSetup && !settings.savingsGoal ? (
+            <button type="button" className="summary-savings-warning" onClick={onOpenSavingsGoal}>
+              <CircleAlert aria-hidden="true" /> 请重设目标
+            </button>
+          ) : null}
+
+          {progress ? (
+            <section className="summary-goal" aria-labelledby="summary-goal-title">
+              <div className="summary-goal-heading">
+                <span id="summary-goal-title"><Target aria-hidden="true" /> 存钱目标</span>
+                <strong>{goalStatusLabel(progress)}</strong>
+              </div>
+              <progress
+                value={Number(progress.retainedMinor > BigInt(progress.targetMinor)
+                  ? BigInt(progress.targetMinor)
+                  : progress.retainedMinor > 0n ? progress.retainedMinor : 0n)}
+                max={Math.max(progress.targetMinor, 1)}
+                aria-label="存钱目标进度"
+                aria-valuetext={`已存 ${formatCny(progress.retainedMinor)}，目标 ${formatCny(progress.targetMinor)}`}
+              />
+              <div className="summary-goal-meta">
+                <strong>{formatCny(progress.retainedMinor)} / {formatCny(progress.targetMinor)}</strong>
+                <span>{readableDate(progress.targetDateKey)}</span>
+              </div>
+              {progress.status !== "completed" ? (
+                <p>{progress.status === "overdue" ? "还差" : "剩余"} {formatCny(progress.remainingMinor)}</p>
+              ) : null}
+            </section>
+          ) : (
+            <button type="button" className="summary-goal-empty" onClick={onOpenSavingsGoal}>
+              <Target aria-hidden="true" /> 设置目标 <ArrowRight aria-hidden="true" />
+            </button>
+          )}
+
+          {retainedSavings?.needsCorrection || rawSpendableMinor !== undefined && rawSpendableMinor < 0n ? (
             <p className="summary-savings-warning" role="status">
-              <CircleAlert aria-hidden="true" /> {savingsWarning}
+              <CircleAlert aria-hidden="true" /> {retainedSavings?.needsCorrection ? "存钱待校正" : "已动用存款"}
             </p>
           ) : null}
-          <div className="summary-savings-actions" aria-label="留存操作">
+
+          <div className="summary-savings-actions" aria-label="存钱操作">
             <button type="button" className="secondary-button" onClick={onReserveSavings}>
-              <Plus aria-hidden="true" /> 留存一笔
+              <Plus aria-hidden="true" /> 存一笔
             </button>
             <button type="button" className="text-button" onClick={onReleaseSavings}>
-              <Minus aria-hidden="true" /> 取用留存
+              <Minus aria-hidden="true" /> 取用
             </button>
-            {canSettleSavings && !settings?.incomeForecast ? (
-              <button type="button" className="text-button" onClick={onSettleSavings}>
-                <CircleCheckBig aria-hidden="true" /> 结算上个周期
+            {progress ? (
+              <button type="button" className="text-button" onClick={onOpenSavingsGoal}>
+                <PencilLine aria-hidden="true" /> 修改
               </button>
             ) : null}
           </div>
@@ -198,68 +222,38 @@ export function SummaryPanel({
       {!settings ? null : !payCycle ? (
         <div className="summary-plan-empty">
           <Target aria-hidden="true" />
-          <div>
-            <strong>先设置发薪周期</strong>
-            <p>需要发薪日和每周期默认留存目标，收入每个周期单独填写。</p>
-          </div>
+          <div><strong>设置发薪日</strong><p>用于估算到账前后是否够花。</p></div>
           <button type="button" className="summary-plan-action" onClick={onOpenSettings}>
-            设置发薪周期 <ArrowRight aria-hidden="true" />
+            去设置 <ArrowRight aria-hidden="true" />
           </button>
         </div>
       ) : analysisError ? (
         <div className="summary-analysis-error" role="alert">
           <CircleAlert aria-hidden="true" />
-          <span><strong>分析暂时不可用</strong><small>{analysisError.message}</small></span>
+          <span><strong>分析不可用</strong><small>{analysisError.message}</small></span>
         </div>
-      ) : analysis && currentCopy && minimumCopy && expectedCopy ? (
+      ) : analysis && currentCopy && expectedCopy ? (
         <>
-          <div className="summary-confidence">{confidenceLabel(analysis)}</div>
           <div className="summary-forecast-list" aria-live="polite" aria-atomic="true">
             <div className={`summary-forecast summary-forecast--${analysis.currentCycle.affordability ?? "pending"}`}>
               <OutcomeIcon outcome={analysis.currentCycle.affordability} />
-              <span><small>到发薪日</small><strong>{currentCopy.title}</strong></span>
-              <p>{currentCopy.detail}</p>
+              <span><small>到下次</small><strong>{currentCopy.label}</strong></span>
+              <p>{currentCopy.amount}</p>
             </div>
-            <div className="summary-forecast summary-forecast--income">
+            <div className={`summary-forecast summary-forecast--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
               <PiggyBank aria-hidden="true" />
-              <span><small>下个工资周期</small><strong>{analysis.nextCycle.days} 天</strong></span>
+              <span><small>下次收入</small><strong>{activeForecast ? formatCny(activeForecast.expectedIncomeMinor) : "未填写"}</strong></span>
               {activeForecast ? (
-                <div className="summary-income-scenarios">
-                  <div className={`summary-income-scenario summary-forecast--${analysis.nextCycle.minimumIncomeScenario?.affordability ?? "pending"}`}>
-                    <OutcomeIcon outcome={analysis.nextCycle.minimumIncomeScenario?.affordability} />
-                    <span><small>最低收入 {formatCny(activeForecast.minimumIncomeMinor)}</small><strong>{minimumCopy.title}</strong></span>
-                    <p>{minimumCopy.detail}</p>
-                  </div>
-                  <div className={`summary-income-scenario summary-forecast--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
-                    <OutcomeIcon outcome={analysis.nextCycle.expectedIncomeScenario?.affordability} />
-                    <span><small>预计收入 {formatCny(activeForecast.expectedIncomeMinor)}</small><strong>{expectedCopy.title}</strong></span>
-                    <p>{expectedCopy.detail}</p>
-                  </div>
-                </div>
+                <p><span>{expectedCopy.label}</span> {expectedCopy.amount}</p>
               ) : (
-                <div className="summary-income-empty">
-                  <p>{readableDate(analysis.nextCycle.cycleStartDateKey)}收入预期</p>
-                  <button type="button" className="summary-income-action" onClick={onOpenIncomeForecast}>
-                    填写下次收入 <ArrowRight aria-hidden="true" />
-                  </button>
-                </div>
+                <button type="button" className="summary-income-action" onClick={onOpenIncomeForecast}>
+                  填写 <ArrowRight aria-hidden="true" />
+                </button>
               )}
             </div>
           </div>
-          <dl className="summary-allowance">
-            <div>
-              <dt><CalendarClock aria-hidden="true" /> 剩余天数</dt>
-              <dd>{analysis.currentCycle.daysUntilPayday === 0
-                ? "今天"
-                : `${analysis.currentCycle.daysUntilPayday} 天`}</dd>
-            </div>
-            <div>
-              <dt><Gauge aria-hidden="true" /> 每日可花</dt>
-              <dd>{formatCny(analysis.currentCycle.dailySafeToSpendMinor)}</dd>
-            </div>
-          </dl>
           <a className="summary-analysis-link" href="#analysis" onClick={onOpenAnalysis}>
-            查看详细分析 <ArrowRight aria-hidden="true" />
+            详细分析 <ArrowRight aria-hidden="true" />
           </a>
         </>
       ) : loading ? (

@@ -6,6 +6,7 @@ import {
   resolveFollowingPaydayDateKey,
   resolveNextPaydayDateKey,
   resolvePayCycleRange,
+  listPaydayDateKeys,
 } from "./date";
 import {
   affectsBookBalance,
@@ -35,6 +36,8 @@ import type {
   SavingsAnalysisOptions,
   SavingsEvent,
   SavingsHistoryPoint,
+  SavingsGoal,
+  SavingsGoalProgress,
 } from "./types";
 
 const MINIMUM_FORECAST_DAYS = 14;
@@ -58,6 +61,9 @@ export function savingsTargetFromPlan(plan: PayCyclePlan): number {
     }
     return plan.defaultSavingsTargetMinor;
   }
+  // v6 plans no longer carry a per-cycle target.  Treat an absent legacy
+  // field as zero while old rows are being migrated.
+  if (plan.cycleEndBalanceGoalMinor === undefined) return 0;
   if (
     plan.cycleEndBalanceGoalMinor === undefined
     || !Number.isSafeInteger(plan.cycleEndBalanceGoalMinor)
@@ -124,6 +130,16 @@ function assertAnalysisInputs(balanceMinor: number, plan: PayCyclePlan): void {
 
 function assertIncomeForecast(forecast: IncomeForecast): void {
   localDateFromKey(forecast.targetPaydayDateKey);
+  if (forecast.minimumIncomeMinor === undefined) {
+    if (
+      forecast.id.trim().length === 0 ||
+      !Number.isSafeInteger(forecast.expectedIncomeMinor) ||
+      forecast.expectedIncomeMinor < 0
+    ) {
+      throw new RangeError("invalid income forecast");
+    }
+    return;
+  }
   if (
     forecast.id.trim().length === 0 ||
     !Number.isSafeInteger(forecast.minimumIncomeMinor) ||
@@ -335,6 +351,62 @@ export function calculateRetainedSavingsSummary(
     totalRetainedMinor,
     hasNegativeBalance,
     needsCorrection: needsCorrection || hasNegativeBalance,
+  };
+}
+
+/**
+ * Derive progress for the single cumulative savings goal.  The goal never
+ * reserves money by itself; retainedMinor comes exclusively from saved-money
+ * events.  A per-payday suggestion is exposed only while the goal is active
+ * and at least one configured payday remains in the inclusive date range.
+ */
+export function calculateSavingsGoalProgress(
+  goal: SavingsGoal,
+  retained: RetainedSavingsSummary | bigint,
+  paydayDay: number | undefined,
+  now = new Date(),
+): SavingsGoalProgress {
+  localDateFromKey(goal.targetDateKey);
+  if (
+    !Number.isSafeInteger(goal.targetMinor) ||
+    goal.targetMinor < 0 ||
+    goal.targetMinor > Number.MAX_SAFE_INTEGER ||
+    !Number.isFinite(now.getTime())
+  ) {
+    throw new RangeError("invalid savings goal");
+  }
+  const summary = typeof retained === "bigint" ? undefined : retained;
+  const retainedMinor = typeof retained === "bigint"
+    ? retained
+    : retained.totalRetainedMinor;
+  const remainingMinor = BigInt(goal.targetMinor) > retainedMinor
+    ? BigInt(goal.targetMinor) - retainedMinor
+    : 0n;
+  const todayDateKey = currentLocalDateKey(now);
+  const status = remainingMinor === 0n
+    ? "completed" as const
+    : goal.targetDateKey < todayDateKey
+      ? "overdue" as const
+      : "active" as const;
+  const paydays = status === "active" && paydayDay !== undefined
+    ? listPaydayDateKeys(paydayDay, todayDateKey, goal.targetDateKey)
+    : [];
+  const remainingPaydayCount = paydays.length > 0 ? paydays.length : undefined;
+  const suggestedPerCycleMinor = remainingPaydayCount === undefined
+    ? undefined
+    : (remainingMinor + BigInt(remainingPaydayCount) - 1n) /
+      BigInt(remainingPaydayCount);
+
+  return {
+    targetDateKey: goal.targetDateKey,
+    targetMinor: goal.targetMinor,
+    retainedMinor,
+    remainingMinor,
+    status,
+    ...(remainingPaydayCount === undefined
+      ? {}
+      : { remainingPaydayCount, suggestedPerCycleMinor }),
+    needsCorrection: summary?.needsCorrection ?? retainedMinor < 0n,
   };
 }
 
@@ -765,11 +837,6 @@ export function payCyclePlanFromSettings(
   ) {
     return undefined;
   }
-  try {
-    savingsTargetFromPlan(plan);
-  } catch {
-    return undefined;
-  }
   return plan;
 }
 
@@ -816,6 +883,20 @@ export function calculatePayCycleStatus(
   };
 }
 
+/** Total money immediately available for spending after actual retained funds. */
+export function calculateSpendableBalanceMinor(
+  balanceMinor: number,
+  retained: RetainedSavingsSummary | bigint,
+): bigint {
+  if (!Number.isSafeInteger(balanceMinor)) {
+    throw new RangeError("balance must use safe integer minor units");
+  }
+  const retainedMinor = typeof retained === "bigint"
+    ? retained
+    : retained.totalRetainedMinor;
+  return BigInt(balanceMinor) - retainedMinor;
+}
+
 /**
  * Derives lightweight spending forecasts from local ledger entries.
  * The result is intentionally not persisted: changing an entry or the local
@@ -844,6 +925,9 @@ export function calculateSpendingAnalysis(
     : savingsInput?.savingsEvents ?? [];
   const effectiveTargetOverride = targetOverride
     ?? (isSavingsEventArray(savingsInput) ? undefined : savingsInput?.targetOverride);
+  const cumulativeSavingsGoal = isSavingsEventArray(savingsInput)
+    ? undefined
+    : savingsInput?.savingsGoal;
 
   const todayDateKey = currentLocalDateKey(now);
   const yesterdayDateKey = addLocalDays(todayDateKey, -1);
@@ -936,9 +1020,7 @@ export function calculateSpendingAnalysis(
     )
     : undefined;
   const rawSpendableMinor = currentSavings && currentRetainedSavings
-    ? BigInt(balanceMinor)
-      - currentRetainedSavings.totalRetainedMinor
-      - currentSavings.remainingTargetMinor
+    ? calculateSpendableBalanceMinor(balanceMinor, currentRetainedSavings)
     : BigInt(balanceMinor) - BigInt(legacyAnalysisTargetMinor);
   const currentBalanceHeadroomMinor = rawSpendableMinor;
   const currentSafeToSpendMinor = currentBalanceHeadroomMinor > 0n
@@ -963,7 +1045,6 @@ export function calculateSpendingAnalysis(
     : currentSavings && currentRetainedSavings
       ? projectedEndBalanceMinor
         - currentRetainedSavings.totalRetainedMinor
-        - currentSavings.remainingTargetMinor
       : projectedEndBalanceMinor - BigInt(legacyAnalysisTargetMinor);
 
   const upcomingPaydayDateKey = incomeForecast?.targetPaydayDateKey
@@ -990,9 +1071,6 @@ export function calculateSpendingAnalysis(
   );
   const referenceSpendMinor = forecastIsAvailable
     ? scaledExpense(statisticsTotalExpenseMinor, nextCycleDayCount, statisticsDayCount)
-    : undefined;
-  const nextSavingsTargetMinor = hasSavingsInput
-    ? nonNegativeSavingsTargetFromPlan(plan)
     : undefined;
   const incomeForecastIsUpcoming = incomeForecast !== undefined &&
     incomeForecast.targetPaydayDateKey >= todayDateKey;
@@ -1024,10 +1102,6 @@ export function calculateSpendingAnalysis(
       ? {
         totalBalanceMinor: BigInt(balanceMinor),
         retainedBalanceMinor: currentRetainedSavings.totalRetainedMinor,
-        cycleOpeningRetainedMinor: currentSavings.openingRetainedMinor,
-        cycleNetGrowthMinor: currentSavings.netGrowthMinor,
-        savingsTargetMinor: currentSavings.targetMinor,
-        remainingSavingsTargetMinor: currentSavings.remainingTargetMinor,
         spendableBalanceMinor: rawSpendableMinor,
         savingsNeedsCorrection:
           currentSavings.needsCorrection || currentRetainedSavings.needsCorrection,
@@ -1053,24 +1127,23 @@ export function calculateSpendingAnalysis(
     cycleEndDateKey: nextRange.cycleEndDateKey,
     nextPaydayDateKey: nextRange.nextPaydayDateKey,
     days: nextCycleDayCount,
-    ...(nextSavingsTargetMinor !== undefined
-      ? { defaultSavingsTargetMinor: nextSavingsTargetMinor }
-      : {}),
     ...(referenceSpendMinor !== undefined
       ? {
         referenceSpendMinor,
         ...(incomeForecastIsUpcoming
           ? {
-            minimumIncomeScenario: incomeScenario(
-              incomeForecast.minimumIncomeMinor,
-              referenceSpendMinor,
-              nextSavingsTargetMinor,
-            ),
             expectedIncomeScenario: incomeScenario(
               incomeForecast.expectedIncomeMinor,
               referenceSpendMinor,
-              nextSavingsTargetMinor,
             ),
+            ...(incomeForecast.minimumIncomeMinor !== undefined
+              ? {
+                minimumIncomeScenario: incomeScenario(
+                  incomeForecast.minimumIncomeMinor,
+                  referenceSpendMinor,
+                ),
+              }
+              : {}),
           }
           : {}),
       }
@@ -1084,6 +1157,14 @@ export function calculateSpendingAnalysis(
     )
     : undefined;
   if (savingsHistory) nextCycle.savingsHistory = savingsHistory;
+  const savingsGoalProgress = cumulativeSavingsGoal && currentRetainedSavings
+    ? calculateSavingsGoalProgress(
+      cumulativeSavingsGoal,
+      currentRetainedSavings,
+      plan.paydayDay,
+      now,
+    )
+    : undefined;
 
   return {
     asOfDateKey: todayDateKey,
@@ -1097,10 +1178,9 @@ export function calculateSpendingAnalysis(
       : {}),
     ...(hasSavingsInput
       ? {
-        defaultSavingsTargetMinor: nonNegativeSavingsTargetFromPlan(plan),
         retainedSavings: currentRetainedSavings!,
-        currentSavings: currentSavings!,
-        savingsHistory: savingsHistory!,
+        ...(savingsHistory ? { savingsHistory } : {}),
+        ...(savingsGoalProgress ? { savingsGoal: savingsGoalProgress } : {}),
       }
       : {}),
     currentCycle,

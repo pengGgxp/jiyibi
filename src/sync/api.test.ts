@@ -82,17 +82,15 @@ function syncResponse(): SyncResponse {
           id: "primary",
           currency: "CNY",
           initialBalanceMinor: 500,
-          monthEndBalanceGoalMinor: 25_000,
           payCycle: {
             paydayDay: 10,
-            defaultSavingsTargetMinor: 100_000,
           },
           incomeForecast: {
             id: "forecast-2026-08-10",
             targetPaydayDateKey: "2026-08-10",
-            minimumIncomeMinor: 600_000,
             expectedIncomeMinor: 800_000,
           },
+          lastExpectedIncomeMinor: 800_000,
           schemaVersion: 1,
           updatedAt: "2026-07-30T05:00:00.000Z",
         },
@@ -402,6 +400,7 @@ describe("sync API client", () => {
     const changes = response.changes as Array<Record<string, unknown>>;
     const settings = changes[1].payload as Record<string, unknown>;
     delete settings.incomeForecast;
+    delete settings.lastExpectedIncomeMinor;
     settings._legacyMonthlySalaryMinor = 700_000;
     const fetcher = mockFetch(jsonResponse(response));
 
@@ -420,11 +419,11 @@ describe("sync API client", () => {
       entityType: "settings",
       claimLegacyIncomeForecast: true,
       payload: {
-        payCycle: { paydayDay: 10, defaultSavingsTargetMinor: 100_000 },
+        payCycle: { paydayDay: 10 },
+        lastExpectedIncomeMinor: 700_000,
         incomeForecast: {
           id: "legacy-income-2026-08-10",
           targetPaydayDateKey: "2026-08-10",
-          minimumIncomeMinor: 0,
           expectedIncomeMinor: 700_000,
         },
       },
@@ -432,12 +431,33 @@ describe("sync API client", () => {
     expect(settingsChange.payload).not.toHaveProperty("_legacyMonthlySalaryMinor");
   });
 
+  it("backfills the last expected amount from an active legacy forecast", async () => {
+    const response = syncResponse();
+    response.results = [];
+    const settings = response.changes[1];
+    if (settings.entityType !== "settings") throw new Error("Expected settings change");
+    delete settings.payload.lastExpectedIncomeMinor;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    const result = await createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3);
+
+    const settingsChange = result.changes[1];
+    expect(settingsChange).toMatchObject({
+      entityType: "settings",
+      payload: { lastExpectedIncomeMinor: 800_000 },
+    });
+  });
+
   it.each([
-    [25_000, 25_000, false],
-    [-25_000, 0, true],
+    [25_000],
+    [-25_000],
   ])(
     "normalizes and claims a legacy balance floor: %s",
-    async (legacyTarget, expectedTarget, needsReview) => {
+    async (legacyTarget) => {
       const response = syncResponse() as unknown as Record<string, unknown>;
       response.results = [];
       const changes = response.changes as Array<Record<string, unknown>>;
@@ -461,15 +481,9 @@ describe("sync API client", () => {
       expect(settingsChange).toMatchObject({
         entityType: "settings",
         claimLegacySavingsTarget: true,
-        payload: {
-          payCycle: { paydayDay: 10, defaultSavingsTargetMinor: expectedTarget },
-        },
+        payload: { payCycle: { paydayDay: 10 } },
       });
-      if (needsReview) {
-        expect(settingsChange.payload).toHaveProperty("savingsTargetNeedsReview", true);
-      } else {
-        expect(settingsChange.payload).not.toHaveProperty("savingsTargetNeedsReview");
-      }
+      expect(settingsChange.payload).toHaveProperty("savingsGoalNeedsSetup", true);
       expect(settingsChange.payload.payCycle).not.toHaveProperty("cycleEndBalanceGoalMinor");
     },
   );
@@ -482,6 +496,7 @@ describe("sync API client", () => {
       const changes = response.changes as Array<Record<string, unknown>>;
       const settings = changes[1].payload as Record<string, unknown>;
       delete settings.incomeForecast;
+      delete settings.lastExpectedIncomeMinor;
       settings._legacyMonthlySalaryMinor = legacySalary;
       const fetcher = mockFetch(jsonResponse(response));
 
@@ -520,25 +535,146 @@ describe("sync API client", () => {
     const init = fetcher.mock.calls[0][1];
     expect(JSON.parse(String(init?.body))).toMatchObject({
       mutations: [{ payload: {
-        monthEndBalanceGoalMinor: 25_000,
         payCycle: {
           paydayDay: 10,
-          defaultSavingsTargetMinor: 100_000,
         },
         incomeForecast: {
           targetPaydayDateKey: "2026-08-10",
-          minimumIncomeMinor: 600_000,
           expectedIncomeMinor: 800_000,
         },
       } }],
     });
   });
 
+  it("accepts the version-seven savings goal and last expected amount", async () => {
+    const response = syncResponse();
+    response.results = [];
+    const settings = response.changes[1];
+    if (settings.entityType !== "settings") throw new Error("Expected settings change");
+    settings.payload.savingsGoal = {
+      targetDateKey: "2026-12-31",
+      targetMinor: 1_000_000,
+    };
+    settings.payload.lastExpectedIncomeMinor = 800_000;
+    const fetcher = mockFetch(jsonResponse(response));
+
+    await expect(createSyncApiClient(fetcher).sync({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "0",
+      mutations: [],
+    }, 3)).resolves.toMatchObject({
+      changes: expect.arrayContaining([
+        expect.objectContaining({
+          entityType: "settings",
+          payload: expect.objectContaining({
+            savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 1_000_000 },
+            lastExpectedIncomeMinor: 800_000,
+          }),
+        }),
+      ]),
+    });
+  });
+
+  it("accepts a canonical income confirmation result for its settings mutation", async () => {
+    const confirmationEntry = entry({
+      id: "forecast-2026-08-10",
+      amountMinor: 750_000,
+      note: "本次实际收入",
+      occurredAt: "2026-08-10T04:00:00.000Z",
+      localDateKey: "2026-08-10",
+      localMonthKey: "2026-08",
+      treatment: "ordinary_income",
+    });
+    const request = {
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      cursor: "8",
+      mutations: [{
+        id: "mutation-confirm-income",
+        entityType: "settings" as const,
+        entityId: "primary",
+        baseVersion: 1,
+        payload: {
+          id: "primary" as const,
+          currency: "CNY" as const,
+          initialBalanceMinor: 500,
+          incomeForecast: null,
+          lastExpectedIncomeMinor: 800_000,
+          incomeConfirmation: {
+            confirmationId: "confirmation-1",
+            forecastId: "forecast-2026-08-10",
+            targetPaydayDateKey: "2026-08-10",
+            expectedIncomeMinor: 800_000,
+            actualIncomeMinor: 750_000,
+            confirmedAt: "2026-08-10T04:00:00.000Z",
+            entryMutationId: "mutation-entry-1",
+            entry: confirmationEntry,
+          },
+          schemaVersion: 1 as const,
+          updatedAt: "2026-08-10T04:00:00.000Z",
+        },
+      }],
+    };
+    const response: SyncResponse = {
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      results: [{
+        id: "mutation-confirm-income",
+        status: "duplicate",
+        version: 2,
+        incomeConfirmation: {
+          confirmationId: "confirmation-1",
+          forecastId: "forecast-2026-08-10",
+          actualIncomeMinor: 750_000,
+          entryVersion: 1,
+          entry: confirmationEntry,
+        },
+      }],
+      changes: [],
+      nextCursor: "8",
+      hasMore: false,
+    };
+
+    await expect(
+      createSyncApiClient(mockFetch(jsonResponse(response))).sync(request, 3),
+    ).resolves.toEqual(response);
+
+    const edited = structuredClone(response);
+    const editedResult = edited.results[0];
+    if (
+      editedResult.status === "conflict" ||
+      !editedResult.incomeConfirmation?.entry
+    ) {
+      throw new Error("Expected an income confirmation entry");
+    }
+    editedResult.incomeConfirmation.entry.amountMinor = 700_000;
+    editedResult.incomeConfirmation.entry.note = "corrected income";
+    editedResult.incomeConfirmation.entryVersion = 2;
+    await expect(
+      createSyncApiClient(mockFetch(jsonResponse(edited))).sync(request, 3),
+    ).resolves.toEqual(edited);
+
+    const unrelated = structuredClone(response);
+    const unrelatedResult = unrelated.results[0];
+    if (unrelatedResult.status === "conflict" || !unrelatedResult.incomeConfirmation) {
+      throw new Error("Expected an income confirmation result");
+    }
+    unrelatedResult.incomeConfirmation.forecastId = "another-forecast";
+    await expect(
+      createSyncApiClient(mockFetch(jsonResponse(unrelated))).sync(request, 3),
+    ).rejects.toMatchObject({ code: "invalid-response" });
+
+    const missing = structuredClone(response);
+    const missingResult = missing.results[0];
+    if (missingResult.status === "conflict") throw new Error("Expected an applied result");
+    delete missingResult.incomeConfirmation;
+    await expect(
+      createSyncApiClient(mockFetch(jsonResponse(missing))).sync(request, 3),
+    ).rejects.toMatchObject({ code: "invalid-response" });
+  });
+
   it.each([
     null,
     { paydayDay: 0, cycleEndBalanceGoalMinor: 0 },
     { paydayDay: 10, cycleEndBalanceGoalMinor: 1.5 },
-    { paydayDay: 10 },
     { paydayDay: 10, monthlySalaryMinor: 1, cycleEndBalanceGoalMinor: 0 },
   ])("rejects an invalid pay cycle in a settings change: %o", async (payCycle) => {
     const response = syncResponse() as unknown as Record<string, unknown>;

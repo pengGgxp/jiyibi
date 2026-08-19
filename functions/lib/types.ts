@@ -95,6 +95,9 @@ export interface AppSettingsPayload {
   payCycle?: PayCyclePlanPayload;
   incomeForecast?: IncomeForecastPayload;
   savingsTargetOverride?: CycleSavingsTargetOverridePayload;
+  savingsGoal?: SavingsGoalPayload;
+  lastExpectedIncomeMinor?: number;
+  savingsGoalNeedsSetup?: true;
   schemaVersion: 1;
   updatedAt: string;
 }
@@ -109,6 +112,10 @@ export interface SyncAppSettingsPayload extends AppSettingsPayload {
 }
 
 export interface PayCyclePlanPayload {
+  paydayDay: number;
+}
+
+export interface V6PayCyclePlanPayload {
   paydayDay: number;
   defaultSavingsTargetMinor: number;
 }
@@ -127,14 +134,36 @@ export interface CycleSavingsTargetOverridePayload {
 export interface IncomeForecastPayload {
   id: string;
   targetPaydayDateKey: string;
-  minimumIncomeMinor: number;
+  /** Present only in v4-v6 compatibility payloads. */
+  minimumIncomeMinor?: number;
   expectedIncomeMinor: number;
+}
+
+export interface SavingsGoalPayload {
+  targetDateKey: string;
+  targetMinor: number;
+}
+
+export interface IncomeConfirmationPayload {
+  confirmationId: string;
+  forecastId: string;
+  targetPaydayDateKey: string;
+  expectedIncomeMinor: number;
+  actualIncomeMinor: number;
+  confirmedAt: string;
+  entryMutationId?: string;
+  entry?: LedgerEntryPayload;
 }
 
 export interface LegacyAppSettingsPayload
   extends Omit<
     AppSettingsPayload,
-    "payCycle" | "incomeForecast" | "savingsTargetOverride"
+    | "payCycle"
+    | "incomeForecast"
+    | "savingsTargetOverride"
+    | "savingsGoal"
+    | "lastExpectedIncomeMinor"
+    | "savingsGoalNeedsSetup"
   > {
   payCycle?: LegacyPayCyclePlanPayload;
 }
@@ -146,15 +175,22 @@ export interface SettingsMutationPayload
     | "payCycle"
     | "incomeForecast"
     | "savingsTargetOverride"
+    | "savingsGoal"
+    | "lastExpectedIncomeMinor"
+    | "savingsGoalNeedsSetup"
   > {
   monthEndBalanceGoalMinor?: number | null;
-  payCycle?: PayCyclePlanPayload | LegacyPayCyclePlanPayload | null;
+  payCycle?: PayCyclePlanPayload | V6PayCyclePlanPayload | LegacyPayCyclePlanPayload | null;
   incomeForecast?: IncomeForecastPayload | null;
   savingsTargetOverride?: CycleSavingsTargetOverridePayload | null;
+  savingsGoal?: SavingsGoalPayload | null;
+  lastExpectedIncomeMinor?: number | null;
+  savingsGoalNeedsSetup?: true | null;
+  incomeConfirmation?: IncomeConfirmationPayload;
 }
 
 export type SyncEntityType = "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 interface SyncMutationBase {
   id: string;
@@ -198,6 +234,13 @@ export type MutationResult =
       id: string;
       status: "applied" | "duplicate";
       version: number;
+      incomeConfirmation?: {
+        confirmationId: string;
+        forecastId: string;
+        actualIncomeMinor: number;
+        entryVersion?: number;
+        entry?: LedgerEntryPayload;
+      };
     }
   | {
       id: string;
