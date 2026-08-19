@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  BalanceAdjustment,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
@@ -9,10 +10,15 @@ import type {
 } from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 7 as const;
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | typeof SYNC_SCHEMA_VERSION;
+export const SYNC_SCHEMA_VERSION = 8 as const;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof SYNC_SCHEMA_VERSION;
 
-export type SyncEntityType = "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
+export type SyncEntityType =
+  | "entry"
+  | "settings"
+  | "recoveryAllocation"
+  | "savingsEvent"
+  | "balanceAdjustment";
 export type CloudSyncStatus = "disabled" | "enabled" | "deleting";
 
 export interface SessionResponse {
@@ -96,11 +102,17 @@ export interface SavingsEventSyncMutation extends SyncMutationBase {
   payload: SavingsEvent;
 }
 
+export interface BalanceAdjustmentSyncMutation extends SyncMutationBase {
+  entityType: "balanceAdjustment";
+  payload: BalanceAdjustment;
+}
+
 export type SyncMutation =
   | EntrySyncMutation
   | SettingsSyncMutation
   | RecoveryAllocationSyncMutation
-  | SavingsEventSyncMutation;
+  | SavingsEventSyncMutation
+  | BalanceAdjustmentSyncMutation;
 
 export interface SyncRequest {
   schemaVersion: typeof SYNC_SCHEMA_VERSION;
@@ -138,11 +150,17 @@ export interface SavingsEventSyncChange extends SyncChangeBase {
   payload: SavingsEvent;
 }
 
+export interface BalanceAdjustmentSyncChange extends SyncChangeBase {
+  entityType: "balanceAdjustment";
+  payload: BalanceAdjustment;
+}
+
 export type SyncChange =
   | EntrySyncChange
   | SettingsSyncChange
   | RecoveryAllocationSyncChange
-  | SavingsEventSyncChange;
+  | SavingsEventSyncChange
+  | BalanceAdjustmentSyncChange;
 
 export interface SyncAppliedResult {
   id: string;

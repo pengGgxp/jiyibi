@@ -114,7 +114,9 @@ function renderPanel(options: {
       retainedSavings={options.retainedSavings ?? retained}
       analysisError={options.error}
       loading={false}
+      hasLedgerFacts
       onOpenSettings={vi.fn()}
+      onOpenBalance={vi.fn()}
       onOpenIncomeForecast={vi.fn()}
       onOpenSavingsGoal={vi.fn()}
       onOpenAnalysis={vi.fn()}
@@ -146,7 +148,7 @@ describe("SummaryPanel", () => {
 
   it("uses one compact verdict for current money and one for expected income", () => {
     const panel = renderPanel({ payCycle: plan, spending: analysis() });
-    expect(panel.textContent).toContain("到下次够花+¥125.00");
+    expect(panel.textContent).toContain("到 9/10够花+¥125.00");
     expect(panel.textContent).toContain("下次收入¥1,000.00够花 +¥100.00");
     expect(panel.textContent).not.toContain("最低收入");
     expect(panel.textContent).not.toContain("每日可花");

@@ -160,14 +160,14 @@ async function renderView(result?: SpendingAnalysis, appSettings: AppSettings = 
 }
 
 describe("AnalysisView", () => {
-  it("shows a semantic savings goal with a derived per-cycle suggestion", async () => {
+  it("shows a semantic savings goal with the remaining target split per cycle", async () => {
     const { host } = await renderView(analysis());
     const progress = host.querySelector<HTMLProgressElement>("progress");
     expect(progress?.value).toBe(100_000);
     expect(progress?.max).toBe(500_000);
     expect(progress?.getAttribute("aria-valuetext")).toContain("已存 ¥1,000.00");
-    expect(host.textContent).toContain("每期建议¥1,000.00");
-    expect(host.textContent).toContain("剩余 4 次到账");
+    expect(host.textContent).toContain("每期需存¥1,000.00");
+    expect(host.textContent).toContain("目标均摊 · 剩余 4 次");
   });
 
   it("uses one next-income scenario and removes cycle savings conclusions", async () => {
@@ -186,10 +186,10 @@ describe("AnalysisView", () => {
     expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
     expect(host.querySelector('[data-chart-series="每日支出"]')).not.toBeNull();
     expect(Array.from(host.querySelectorAll("caption")).map((item) => item.textContent)).toEqual([
-      "存钱明细",
       "当前周期累计支出",
       "完整到账周期支出",
       "每日支出",
+      "存钱明细",
     ]);
     expect(host.textContent).not.toContain("完整周期留存");
   });
@@ -205,7 +205,7 @@ describe("AnalysisView", () => {
     const appSettings = { ...settings, payCycle: undefined };
     const { host, onOpenSettings } = await renderView(undefined, appSettings);
     expect(host.textContent).toContain("存钱目标");
-    expect(host.textContent).not.toContain("每期建议");
+    expect(host.textContent).not.toContain("每期需存");
     expect(host.textContent).toContain("设置发薪日");
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("设置发薪日"));
     await act(async () => button?.click());
@@ -220,5 +220,25 @@ describe("AnalysisView", () => {
     const button = Array.from(host.querySelectorAll("button")).find((item) => item.textContent?.includes("填写预计"));
     await act(async () => button?.click());
     expect(onOpenIncomeForecast).toHaveBeenCalledOnce();
+  });
+
+  it("shows the money equations, compact basis, and a rounded-up daily reduction", async () => {
+    const result = analysis();
+    result.currentCycle.balanceGoalDifferenceMinor = -2_101n;
+    result.currentCycle.affordability = "shortfall";
+    result.currentCycle.daysUntilPayday = 2;
+    result.excludedExpenseMinor = 80_000;
+    result.pendingConfirmationCount = 2;
+    const { host } = await renderView(result);
+
+    expect(host.textContent).toContain("资金推导");
+    expect(host.textContent).toContain("可花余额¥5,000.00预计支出¥1,200.00差额−¥21.01");
+    expect(host.textContent).toContain("每天少花 ¥10.51");
+    expect(host.textContent).toContain("日常 ¥3,000.00排除 ¥800.00待确认 2");
+
+    const headings = Array.from(host.querySelectorAll("h3")).map((item) => item.textContent?.trim());
+    expect(headings.indexOf("结论")).toBeLessThan(headings.indexOf("资金推导"));
+    expect(headings.indexOf("资金推导")).toBeLessThan(headings.indexOf("估算依据"));
+    expect(headings.indexOf("每日支出")).toBeLessThan(headings.indexOf("存钱目标"));
   });
 });

@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   Attachment,
+  BalanceAdjustment,
   CycleSavingsTargetOverride,
   IncomeForecast,
   LedgerEntry,
@@ -30,12 +31,13 @@ import {
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
-export const BACKUP_PAYLOAD_SCHEMA_VERSION = 5 as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 6 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
 export const MAX_BACKUP_RECOVERY_ALLOCATIONS = 25_000;
 export const MAX_BACKUP_SAVINGS_EVENTS = 25_000;
+export const MAX_BACKUP_BALANCE_ADJUSTMENTS = 25_000;
 export const MAX_BACKUP_ATTACHMENTS = 2_500;
 export const MAX_BACKUP_ATTACHMENT_BYTES = 40 * 1024 * 1024;
 
@@ -105,7 +107,7 @@ interface BackupPayloadV2 {
   attachments: SerializedAttachment[];
 }
 
-interface BackupPayloadV5 {
+interface BackupPayloadV6 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
@@ -114,6 +116,7 @@ interface BackupPayloadV5 {
   attachments: SerializedAttachment[];
   recoveryAllocations: RecoveryAllocation[];
   savingsEvents: SavingsEvent[];
+  balanceAdjustments: BalanceAdjustment[];
 }
 
 export interface BackupPreview {
@@ -121,6 +124,7 @@ export interface BackupPreview {
   entryCount: number;
   attachmentCount: number;
   savingsEventCount?: number;
+  balanceAdjustmentCount?: number;
   initialBalanceMinor: number;
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;
@@ -482,6 +486,12 @@ function validateSettingsV5(value: unknown): value is AppSettings {
   );
 }
 
+function validateSettingsV6(value: unknown): value is AppSettings {
+  return validateSettingsV5(value) && (
+    value.initialBalanceLockedAt === undefined || isIsoDate(value.initialBalanceLockedAt)
+  );
+}
+
 function migrateBackupSettingsToV5(
   settings: AppSettings | LegacyAppSettings,
   now: Date,
@@ -733,12 +743,19 @@ function validateSavingsEvents(
     );
   }
   const ids = new Set<string>();
+  let hasOpening = false;
   const settlementCycles = new Set<string>();
   const linkedReleaseTotals = new Map<string, bigint>();
   const events: SavingsEvent[] = [];
   for (const value of values) {
     if (!validateSavingsEventShape(value) || ids.has(value.id)) {
       throw new BackupError("备份中的留存事件无效", "invalid-payload");
+    }
+    if (value.kind === "opening") {
+      if (hasOpening) {
+        throw new BackupError("备份中存在多个初始留存事件", "invalid-payload");
+      }
+      hasOpening = true;
     }
     if (value.kind === "cycle_settlement") {
       if (settlementCycles.has(value.cycleStartDateKey)) {
@@ -764,7 +781,79 @@ function validateSavingsEvents(
   return events;
 }
 
-function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
+function validateBalanceAdjustments(values: unknown[]): BalanceAdjustment[] {
+  if (values.length > MAX_BACKUP_BALANCE_ADJUSTMENTS) {
+    throw new BackupError(
+      `备份余额调整不能超过 ${MAX_BACKUP_BALANCE_ADJUSTMENTS} 条`,
+      "limit-exceeded",
+    );
+  }
+  const ids = new Set<string>();
+  const rows: BalanceAdjustment[] = [];
+  for (const value of values) {
+    if (
+      !isRecord(value) ||
+      typeof value.id !== "string" ||
+      !SYNC_ID_PATTERN.test(value.id) ||
+      ids.has(value.id) ||
+      (value.kind !== "reconciliation" && value.kind !== "opening_correction") ||
+      !Number.isSafeInteger(value.amountMinor) ||
+      Math.abs(Number(value.amountMinor)) > MAX_AMOUNT_MINOR ||
+      typeof value.note !== "string" ||
+      value.note.length > 200 ||
+      !isIsoDate(value.occurredAt) ||
+      !isLocalDateKey(value.localDateKey) ||
+      typeof value.localMonthKey !== "string" ||
+      !/^\d{4}-\d{2}$/.test(value.localMonthKey) ||
+      !value.localDateKey.startsWith(value.localMonthKey) ||
+      !Number.isInteger(value.timezoneOffsetMinutes) ||
+      Math.abs(Number(value.timezoneOffsetMinutes)) > 14 * 60 ||
+      !hasConsistentLocalDate(
+        value.occurredAt as string,
+        value.timezoneOffsetMinutes as number,
+        value.localDateKey as string,
+        value.localMonthKey as string,
+      ) ||
+      !isIsoDate(value.createdAt) ||
+      !isIsoDate(value.updatedAt) ||
+      new Date(value.updatedAt).getTime() < new Date(value.createdAt).getTime() ||
+      (value.deletedAt !== undefined && (
+        !isIsoDate(value.deletedAt) ||
+        new Date(value.deletedAt).getTime() < new Date(value.createdAt).getTime()
+      ))
+    ) {
+      throw new BackupError("备份中的余额调整无效", "invalid-payload");
+    }
+
+    const amountMinor = Number(value.amountMinor);
+    if (value.kind === "reconciliation") {
+      if (
+        !Number.isSafeInteger(value.balanceBeforeMinor) ||
+        Math.abs(Number(value.balanceBeforeMinor)) > MAX_AMOUNT_MINOR ||
+        !Number.isSafeInteger(value.observedBalanceMinor) ||
+        Math.abs(Number(value.observedBalanceMinor)) > MAX_AMOUNT_MINOR ||
+        BigInt(amountMinor) !==
+          BigInt(Number(value.observedBalanceMinor)) - BigInt(Number(value.balanceBeforeMinor))
+      ) {
+        throw new BackupError("备份中的余额校准快照无效", "invalid-payload");
+      }
+    } else if (
+      !Number.isSafeInteger(value.previousOpeningMinor) ||
+      Math.abs(Number(value.previousOpeningMinor)) > MAX_AMOUNT_MINOR ||
+      !Number.isSafeInteger(value.nextOpeningMinor) ||
+      Math.abs(Number(value.nextOpeningMinor)) > MAX_AMOUNT_MINOR ||
+      BigInt(amountMinor) !==
+        BigInt(Number(value.nextOpeningMinor)) - BigInt(Number(value.previousOpeningMinor))
+    ) {
+      throw new BackupError("备份中的起点更正快照无效", "invalid-payload");
+    }
+    ids.add(value.id);
+    rows.push(structuredClone(value) as unknown as BalanceAdjustment);
+  }
+  return rows;
+}
+
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV6 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
@@ -773,6 +862,7 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
     || schemaVersion === 2
     || schemaVersion === 3
     || schemaVersion === 4
+    || schemaVersion === 5
     || schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
   if (!supportedSchema) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
@@ -783,7 +873,9 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
       ? validatePreSavingsSettings(value.settings)
       : schemaVersion === 4
         ? validateSettingsV4(value.settings)
-        : validateSettingsV5(value.settings);
+        : schemaVersion === 5
+          ? validateSettingsV5(value.settings)
+          : validateSettingsV6(value.settings);
   if (
     !isIsoDate(value.exportedAt) ||
     !settingsAreValid ||
@@ -791,7 +883,8 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
     !Array.isArray(value.attachments) ||
     (schemaVersion >= 3 && !Array.isArray(value.recoveryAllocations)) ||
     (schemaVersion >= 4 &&
-      !Array.isArray(value.savingsEvents))
+      !Array.isArray(value.savingsEvents)) ||
+    (schemaVersion >= 6 && !Array.isArray(value.balanceAdjustments))
   ) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
@@ -891,7 +984,10 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
       : [],
     entriesById,
   );
-  const settings = schemaVersion < BACKUP_PAYLOAD_SCHEMA_VERSION
+  const balanceAdjustments = validateBalanceAdjustments(
+    schemaVersion >= 6 ? value.balanceAdjustments as unknown[] : [],
+  );
+  const settings = schemaVersion < 5
     ? migrateBackupSettingsToV5(
       schemaVersion === DATABASE_SCHEMA_VERSION
         ? (value as unknown as BackupPayloadV1).settings
@@ -899,6 +995,16 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
       now,
     )
     : structuredClone(value.settings as AppSettings);
+  if (
+    !settings.initialBalanceLockedAt &&
+    (normalizedEntries.length > 0 || savingsEvents.length > 0 || balanceAdjustments.length > 0)
+  ) {
+    const factTimes = [...normalizedEntries, ...savingsEvents, ...balanceAdjustments]
+      .map((fact) => fact.createdAt)
+      .filter(isIsoDate)
+      .sort();
+    settings.initialBalanceLockedAt = factTimes[0] ?? now.toISOString();
+  }
   return {
     format: BACKUP_PAYLOAD_FORMAT,
     schemaVersion: BACKUP_PAYLOAD_SCHEMA_VERSION,
@@ -908,17 +1014,21 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV5 {
     attachments: value.attachments as BackupPayloadV2["attachments"],
     recoveryAllocations,
     savingsEvents,
+    balanceAdjustments,
   };
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV5> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV6> {
   const snapshot = await database.transaction(
     "r",
-    database.settings,
-    database.entries,
-    database.attachments,
-    database.recoveryAllocations,
-    database.savingsEvents,
+    [
+      database.settings,
+      database.entries,
+      database.attachments,
+      database.recoveryAllocations,
+      database.savingsEvents,
+      database.balanceAdjustments,
+    ],
     async () => {
       const settings = await database.settings.get("primary");
       const entries = (await database.entries.toArray()).filter((entry) => !entry.deletedAt);
@@ -933,10 +1043,18 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
       const savingsEvents = (await database.savingsEvents.toArray()).filter(
         (event) => !event.deletedAt,
       );
-      return { settings, entries, attachments, recoveryAllocations, savingsEvents };
+      const balanceAdjustments = await database.balanceAdjustments.toArray();
+      return {
+        settings,
+        entries,
+        attachments,
+        recoveryAllocations,
+        savingsEvents,
+        balanceAdjustments,
+      };
     },
   );
-  if (!snapshot.settings || !validateSettingsV5(snapshot.settings)) {
+  if (!snapshot.settings || !validateSettingsV6(snapshot.settings)) {
     throw new BackupError("本地设置无效，无法导出", "invalid-payload");
   }
   if (snapshot.entries.length > MAX_BACKUP_ENTRIES) {
@@ -948,6 +1066,9 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
   if (snapshot.savingsEvents.length > MAX_BACKUP_SAVINGS_EVENTS) {
     throw new BackupError(`本地留存事件不能超过 ${MAX_BACKUP_SAVINGS_EVENTS} 条`, "limit-exceeded");
   }
+  const validatedBalanceAdjustments = validateBalanceAdjustments(
+    snapshot.balanceAdjustments,
+  );
   const entriesById = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
   const validatedSavingsEvents = validateSavingsEvents(
     snapshot.savingsEvents,
@@ -1000,6 +1121,7 @@ async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<B
     attachments,
     recoveryAllocations: snapshot.recoveryAllocations,
     savingsEvents: validatedSavingsEvents,
+    balanceAdjustments: validatedBalanceAdjustments,
   };
 }
 
@@ -1111,6 +1233,7 @@ export async function decryptBackup(
       entryCount: payload.entries.length,
       attachmentCount: attachments.length,
       savingsEventCount: payload.savingsEvents.length,
+      balanceAdjustmentCount: payload.balanceAdjustments.length,
       initialBalanceMinor: payload.settings.initialBalanceMinor,
       monthEndBalanceGoalMinor: payload.settings.monthEndBalanceGoalMinor,
       ...(payload.settings.payCycle
@@ -1130,6 +1253,7 @@ export async function decryptBackup(
       attachments,
       recoveryAllocations: structuredClone(payload.recoveryAllocations),
       savingsEvents: structuredClone(payload.savingsEvents),
+      balanceAdjustments: structuredClone(payload.balanceAdjustments),
     },
   };
 }
@@ -1156,6 +1280,7 @@ export async function restorePreparedBackup(
     })),
     recoveryAllocations: prepared.replacement.recoveryAllocations,
     savingsEvents: prepared.replacement.savingsEvents ?? [],
+    balanceAdjustments: prepared.replacement.balanceAdjustments ?? [],
   };
   try {
     parsePayload(payload);

@@ -1,6 +1,7 @@
 import type {
   AppSettings,
   Attachment,
+  BalanceAdjustment,
   LedgerEntry,
   RecoveryAllocation,
   SavingsEvent,
@@ -164,12 +165,14 @@ async function listPushableMutations(
           const priority = (mutation: SyncOutboxRecord): number => {
             const deleted = "deletedAt" in mutation.payload && Boolean(mutation.payload.deletedAt);
             if (mutation.entityType === "entry" && mutation.baseVersion === 0) return 0;
-            if (mutation.entityType === "recoveryAllocation" && deleted && mutation.baseVersion > 0) {
+            if ((mutation.entityType === "recoveryAllocation" ||
+                mutation.entityType === "savingsEvent") && deleted) {
               return 1;
             }
-            if (mutation.entityType === "entry" && deleted) return 3;
-            if (mutation.entityType === "recoveryAllocation") return 2;
-            return 0;
+            if (mutation.entityType === "entry") return 2;
+            if (mutation.entityType === "recoveryAllocation" ||
+                mutation.entityType === "savingsEvent") return 3;
+            return 2;
           };
           return priority(left) - priority(right)
             || left.createdAt.localeCompare(right.createdAt)
@@ -211,6 +214,15 @@ function toMutation(record: SyncOutboxRecord): SyncMutation {
       entityId: record.entityId,
       baseVersion: record.baseVersion,
       payload: record.payload as SavingsEvent,
+    };
+  }
+  if (record.entityType === "balanceAdjustment") {
+    return {
+      id: record.id,
+      entityType: "balanceAdjustment",
+      entityId: record.entityId,
+      baseVersion: record.baseVersion,
+      payload: record.payload as BalanceAdjustment,
     };
   }
   const payload = structuredClone(record.payload as AppSettings) as SettingsSyncPayload &

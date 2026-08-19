@@ -61,7 +61,7 @@ test("仅添加截图也能保存账目", async ({ page }) => {
 
   await expect(page.locator(".record-list").getByText("截图记录", { exact: true })).toBeVisible();
   await expect(page.locator(".record-list img[alt='账目截图']")).toBeVisible();
-  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥0.00");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥6.50");
   await expect(page.locator(".summary-savings-grid div").filter({ hasText: "总余额" }).locator("dd"))
     .toHaveText("-¥6.50");
 });
@@ -77,6 +77,7 @@ test("本机存储用量读取失败时显示明确状态", async ({ page }) => 
 
   await page.getByRole("button", { name: "打开设置" }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByRole("button", { name: "数据" }).click();
   await expect(settings.getByText("读取失败", { exact: true })).toBeVisible();
 });
 
@@ -87,6 +88,7 @@ test("加密备份可导出、检查并确认整体恢复", async ({ page }) => 
 
   await page.getByRole("button", { name: "打开设置" }).click();
   const settings = page.getByRole("dialog", { name: "设置" });
+  await settings.getByRole("button", { name: "数据" }).click();
   await settings.getByText("导出备份", { exact: true }).click();
   await settings.getByLabel("设置密码").fill(password);
   await settings.getByLabel("再次输入").fill(password);
@@ -104,6 +106,7 @@ test("加密备份可导出、检查并确认整体恢复", async ({ page }) => 
 
   await page.getByRole("button", { name: "打开设置" }).click();
   const restoreSettings = page.getByRole("dialog", { name: "设置" });
+  await restoreSettings.getByRole("button", { name: "数据" }).click();
   await restoreSettings.getByText("恢复备份", { exact: true }).click();
   await restoreSettings.getByLabel("备份文件").setInputFiles({
     name: download.suggestedFilename(),

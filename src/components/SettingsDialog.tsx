@@ -1,5 +1,6 @@
 import {
   ArchiveRestore,
+  BookOpen,
   CalendarDays,
   CheckCircle2,
   Download,
@@ -10,6 +11,7 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  Target,
   TrendingUp,
   Upload,
 } from "lucide-react";
@@ -41,10 +43,15 @@ interface SettingsDialogProps {
   openingSavingsMinor?: number;
   pwa: PwaState;
   cloudSync: CloudSyncSectionProps;
+  initialPane?: SettingsPane;
   onClose(): void;
   onDataChanged(): void;
   onOpenIncomeForecast(): void;
+  onOpenBalance(mode: "reconciliation" | "opening_correction"): void;
+  onOpenSavingsGoal(): void;
 }
+
+export type SettingsPane = "ledger" | "data";
 
 function signedInput(minor: number): string {
   const sign = minor < 0 ? "-" : "";
@@ -62,6 +69,24 @@ function bytesLabel(bytes: number): string {
 function readableDateKey(dateKey: string): string {
   const [, month, day] = dateKey.split("-");
   return month && day ? `${Number(month)} 月 ${Number(day)} 日` : dateKey;
+}
+
+function readLocalValue(key: string): string | undefined {
+  try {
+    const storage = globalThis.localStorage;
+    return typeof storage?.getItem === "function" ? storage.getItem(key) ?? undefined : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeLocalValue(key: string, value: string): void {
+  try {
+    const storage = globalThis.localStorage;
+    if (typeof storage?.setItem === "function") storage.setItem(key, value);
+  } catch {
+    // Optional device-only metadata must never block backup export.
+  }
 }
 
 function backupErrorMessage(reason: unknown): string {
@@ -89,10 +114,14 @@ export function SettingsDialog({
   openingSavingsMinor = 0,
   pwa,
   cloudSync,
+  initialPane = "ledger",
   onClose,
   onDataChanged,
   onOpenIncomeForecast,
+  onOpenBalance,
+  onOpenSavingsGoal,
 }: SettingsDialogProps) {
+  const [pane, setPane] = useState<SettingsPane>(initialPane);
   const [initialBalance, setInitialBalanceInput] = useState("0.00");
   const [balanceError, setBalanceError] = useState<string>();
   const [balanceStatus, setBalanceStatus] = useState<string>();
@@ -116,8 +145,15 @@ export function SettingsDialog({
   const [prepared, setPrepared] = useState<PreparedBackup>();
   const [restoreStatus, setRestoreStatus] = useState<string>();
   const [restoring, setRestoring] = useState(false);
+  const [lastBackupAt, setLastBackupAt] = useState<string>();
   const initializedForOpen = useRef(false);
-  const { estimate, error: estimateError, refresh: refreshEstimate } = useStorageEstimate(open);
+  const {
+    estimate,
+    persistent,
+    error: estimateError,
+    refresh: refreshEstimate,
+    requestPersistence,
+  } = useStorageEstimate(open);
 
   useEffect(() => {
     if (!open) {
@@ -130,7 +166,9 @@ export function SettingsDialog({
     setPayCycleEnabled(settings.payCycle !== undefined);
     setPaydayInput(String(settings.payCycle?.paydayDay ?? 1));
     setInitialSavingsInput(signedInput(openingSavingsMinor));
-  }, [open, openingSavingsMinor, settings]);
+    setPane(initialPane);
+    setLastBackupAt(readLocalValue("jiyibi:last-backup-at"));
+  }, [initialPane, open, openingSavingsMinor, settings]);
 
   useEffect(() => {
     if (!open) {
@@ -251,6 +289,9 @@ export function SettingsDialog({
       setExportPassword("");
       setExportConfirm("");
       setExportStatus("加密备份已下载");
+      const exportedAt = new Date().toISOString();
+      setLastBackupAt(exportedAt);
+      writeLocalValue("jiyibi:last-backup-at", exportedAt);
       void refreshEstimate();
     } catch (reason) {
       setExportStatus(backupErrorMessage(reason));
@@ -301,8 +342,17 @@ export function SettingsDialog({
   };
 
   return (
-    <Modal open={open} title="设置" description="管理本机账本、云同步和备份。" size="wide" onClose={onClose}>
+    <Modal open={open} title="设置" description={pane === "ledger" ? "余额、到账与存钱。" : "同步、存储与备份。"} size="wide" onClose={onClose}>
+      <nav className="settings-nav" aria-label="设置分类">
+        <button type="button" className={pane === "ledger" ? "is-active" : ""} aria-current={pane === "ledger" ? "page" : undefined} onClick={() => setPane("ledger")}>
+          <BookOpen aria-hidden="true" /> 账本
+        </button>
+        <button type="button" className={pane === "data" ? "is-active" : ""} aria-current={pane === "data" ? "page" : undefined} onClick={() => setPane("data")}>
+          <ShieldCheck aria-hidden="true" /> 数据
+        </button>
+      </nav>
       <div className="settings-stack">
+        {pane === "ledger" ? <>
         <section className="settings-section" aria-labelledby="balance-setting-title">
           <div className="settings-section-heading">
             <div className="settings-icon"><HardDrive aria-hidden="true" /></div>
@@ -311,7 +361,15 @@ export function SettingsDialog({
               <p>当前余额会在这个数值上累计每笔收支。</p>
             </div>
           </div>
-          <form className="inline-setting-form" onSubmit={(event) => void saveBalance(event)} noValidate>
+          {settings?.initialBalanceLockedAt ? (
+            <div className="locked-balance-setting">
+              <div><span>当前起点</span><strong>{formatCny(settings.initialBalanceMinor)}</strong><small>已有记录，起点已锁定</small></div>
+              <div>
+                <button type="button" className="secondary-button" onClick={() => onOpenBalance("reconciliation")}>校准余额</button>
+                <button type="button" className="text-button" onClick={() => onOpenBalance("opening_correction")}>更正起点</button>
+              </div>
+            </div>
+          ) : <form className="inline-setting-form" onSubmit={(event) => void saveBalance(event)} noValidate>
             <div className="field-group compact-field">
               <label htmlFor="initial-balance">人民币金额</label>
               <div className="signed-input">
@@ -335,7 +393,7 @@ export function SettingsDialog({
               {savingBalance ? <LoaderCircle className="spin" aria-hidden="true" /> : <Save aria-hidden="true" />}
               保存余额
             </button>
-          </form>
+          </form>}
           {balanceStatus ? <p className="success-status" role="status"><CheckCircle2 aria-hidden="true" /> {balanceStatus}</p> : null}
           <form className="inline-setting-form settings-subform" onSubmit={(event) => void saveInitialSavings(event)} noValidate>
             <div className="field-group compact-field">
@@ -440,7 +498,16 @@ export function SettingsDialog({
               </button>
             </div>
           ) : null}
+          <div className="income-setting-row">
+            <div>
+              <span><Target aria-hidden="true" /> 存钱目标</span>
+              <strong>{settings?.savingsGoal ? `${formatCny(settings.savingsGoal.targetMinor)} · ${readableDateKey(settings.savingsGoal.targetDateKey)}` : "尚未设置"}</strong>
+            </div>
+            <button type="button" className="secondary-button" onClick={onOpenSavingsGoal}>{settings?.savingsGoal ? "修改目标" : "设置目标"}</button>
+          </div>
         </section>
+
+        </> : <>
 
         <CloudSyncSection {...cloudSync} />
 
@@ -466,6 +533,11 @@ export function SettingsDialog({
                 <progress max={estimate.quota} value={estimate.usage} aria-label="本机存储用量" />
               ) : null}
             </div>
+            <div className="storage-persistence">
+              <span>存储保护</span>
+              <strong>{persistent === true ? "已保护" : persistent === false ? "未保护" : "不支持"}</strong>
+              {persistent === false ? <button type="button" className="text-button" onClick={() => void requestPersistence()}>尝试保护</button> : null}
+            </div>
             {pwa.canInstall ? (
               <button type="button" className="secondary-button" onClick={() => void pwa.install()}>
                 <MonitorDown aria-hidden="true" /> 安装应用
@@ -487,6 +559,7 @@ export function SettingsDialog({
               <p>密码不会保存，丢失后无法找回。</p>
             </div>
           </div>
+          <p className="backup-freshness">上次备份：{lastBackupAt ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(lastBackupAt)) : "尚未备份"}</p>
 
           <details className="settings-disclosure">
             <summary><span><Download aria-hidden="true" /> 导出备份</span></summary>
@@ -569,6 +642,7 @@ export function SettingsDialog({
             </details>
           )}
         </section>
+        </>}
       </div>
     </Modal>
   );

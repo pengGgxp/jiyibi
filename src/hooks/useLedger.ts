@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getSettings,
   listActiveEntries,
+  listBalanceAdjustments,
   listActiveRecoveryAllocations,
   listActiveSavingsEvents,
 } from "../data";
@@ -13,6 +14,7 @@ import {
   currentLocalDateKey,
   payCyclePlanFromSettings,
   type AppSettings,
+  type BalanceAdjustment,
   type LedgerEntry,
   type LedgerSummary,
   type PayCycleStatus,
@@ -26,6 +28,7 @@ interface LedgerSnapshot {
   settings: AppSettings;
   allocations: RecoveryAllocation[];
   savingsEvents: SavingsEvent[];
+  balanceAdjustments: BalanceAdjustment[];
 }
 
 export interface LedgerState {
@@ -35,6 +38,8 @@ export interface LedgerState {
   payCycleStatus?: PayCycleStatus;
   analysis?: SpendingAnalysis;
   savingsEvents: SavingsEvent[];
+  balanceAdjustments: BalanceAdjustment[];
+  recoveryAllocations: RecoveryAllocation[];
   analysisError?: Error;
   loading: boolean;
   error?: Error;
@@ -47,13 +52,14 @@ export function useLedger(): LedgerState {
 
   useEffect(() => {
     const subscription = liveQuery(async () => {
-      const [entries, settings, allocations, savingsEvents] = await Promise.all([
+      const [entries, settings, allocations, savingsEvents, balanceAdjustments] = await Promise.all([
         listActiveEntries(),
         getSettings(),
         listActiveRecoveryAllocations(),
         listActiveSavingsEvents(),
+        listBalanceAdjustments(),
       ]);
-      return { entries, settings, allocations, savingsEvents };
+      return { entries, settings, allocations, savingsEvents, balanceAdjustments };
     }).subscribe({
       next: (nextSnapshot) => {
         setSnapshot(nextSnapshot);
@@ -107,6 +113,7 @@ export function useLedger(): LedgerState {
       snapshot.entries,
       snapshot.settings,
       localDateKey.slice(0, 7),
+      snapshot.balanceAdjustments,
     );
   }, [localDateKey, snapshot]);
 
@@ -152,6 +159,8 @@ export function useLedger(): LedgerState {
   return {
     entries: snapshot?.entries ?? [],
     savingsEvents: snapshot?.savingsEvents ?? [],
+    balanceAdjustments: snapshot?.balanceAdjustments ?? [],
+    recoveryAllocations: snapshot?.allocations ?? [],
     settings: snapshot?.settings,
     summary,
     payCycleStatus,

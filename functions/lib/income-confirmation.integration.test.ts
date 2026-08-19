@@ -93,7 +93,7 @@ describe("income confirmation D1 transaction", () => {
       d1Databases: { DB: crypto.randomUUID() },
     });
     database = await runtime.getD1Database("DB");
-    for (let version = 1; version <= 10; version += 1) {
+    for (let version = 1; version <= 11; version += 1) {
       const prefix = String(version).padStart(4, "0");
       const migration = new URL(
         `../../migrations/${prefix}_${[
@@ -107,6 +107,7 @@ describe("income confirmation D1 transaction", () => {
           "savings_events",
           "savings_goal",
           "savings_goal_compatibility_fix",
+          "balance_adjustments",
         ][version - 1]}.sql`,
         import.meta.url,
       );
@@ -319,7 +320,7 @@ describe("income confirmation D1 transaction", () => {
       USER_ID,
       GENERATION,
       settingsMutation("settings_after_confirmation", 2, {
-        initialBalanceMinor: 123,
+        lastExpectedIncomeMinor: 123,
       }),
       7,
     );
@@ -407,6 +408,38 @@ describe("income confirmation D1 transaction", () => {
     expect(settings).toEqual({
       income_forecast_id: "forecast_2026_08_10",
       initial_balance_minor: 1,
+    });
+  });
+
+  it("lets a version-four client explicitly clear a compatible pay cycle", async () => {
+    await seedForecast();
+
+    await expect(applyMutation(
+      database,
+      USER_ID,
+      GENERATION,
+      settingsMutation("settings_clear_v4", 1, {
+        payCycle: null,
+        incomeForecast: null,
+      }),
+      4,
+    )).resolves.toMatchObject({ status: "applied", version: 2 });
+
+    const settings = await database.prepare(
+      `SELECT payday_day, default_savings_target_minor,
+              income_forecast_id, expected_income_minor
+       FROM ledger_settings`,
+    ).first<{
+      payday_day: number | null;
+      default_savings_target_minor: number | null;
+      income_forecast_id: string | null;
+      expected_income_minor: number | null;
+    }>();
+    expect(settings).toEqual({
+      payday_day: null,
+      default_savings_target_minor: null,
+      income_forecast_id: null,
+      expected_income_minor: null,
     });
   });
 });

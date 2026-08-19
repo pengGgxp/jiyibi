@@ -33,7 +33,9 @@ interface SummaryPanelProps {
   retainedSavings?: RetainedSavingsSummary;
   analysisError?: Error;
   loading: boolean;
+  hasLedgerFacts: boolean;
   onOpenSettings(): void;
+  onOpenBalance(): void;
   onOpenIncomeForecast(): void;
   onOpenSavingsGoal(): void;
   onOpenAnalysis(): void;
@@ -60,6 +62,11 @@ function signedAmount(value: bigint): string {
 function readableDate(dateKey: string): string {
   const [, month, day] = dateKey.split("-");
   return month && day ? `${Number(month)}月${Number(day)}日` : dateKey;
+}
+
+function compactDate(dateKey: string): string {
+  const [, month, day] = dateKey.split("-");
+  return month && day ? `${Number(month)}/${Number(day)}` : dateKey;
 }
 
 function outcomeCopy(
@@ -111,7 +118,9 @@ export function SummaryPanel({
   retainedSavings,
   analysisError,
   loading,
+  hasLedgerFacts,
   onOpenSettings,
+  onOpenBalance,
   onOpenIncomeForecast,
   onOpenSavingsGoal,
   onOpenAnalysis,
@@ -122,9 +131,7 @@ export function SummaryPanel({
   const rawSpendableMinor = summary
     ? calculateSpendableBalanceMinor(summary.balanceMinor, retainedMinor)
     : undefined;
-  const displayBalance = rawSpendableMinor !== undefined && rawSpendableMinor > 0n
-    ? rawSpendableMinor
-    : 0n;
+  const displayBalance = rawSpendableMinor;
   const progress = analysis?.savingsGoal
     ?? goalProgress(settings, retainedSavings, payCycle?.paydayDay);
   const currentCopy = analysis
@@ -141,17 +148,29 @@ export function SummaryPanel({
     ? scenarioCopy(analysis.nextCycle.expectedIncomeScenario, analysis)
     : undefined;
 
+  if (!loading && summary && !hasLedgerFacts) {
+    return (
+      <section className="summary-panel summary-panel--first-use" aria-labelledby="summary-title">
+        <div className="summary-topline"><p id="summary-title"><WalletCards aria-hidden="true" /> 当前余额</p></div>
+        <p className="balance-value">{formatCny(summary.balanceMinor)}</p>
+        <button type="button" className="summary-first-use-action" onClick={onOpenBalance}>
+          <PencilLine aria-hidden="true" /> 设置余额
+        </button>
+      </section>
+    );
+  }
+
   return (
     <section className="summary-panel" aria-labelledby="summary-title" aria-busy={loading}>
       <div className="summary-topline">
         <p id="summary-title"><WalletCards aria-hidden="true" /> 可花余额</p>
-        <button type="button" className="summary-edit" onClick={onOpenSettings}>
+        <button type="button" className="summary-edit" onClick={onOpenBalance}>
           <PencilLine aria-hidden="true" /> 余额设置
         </button>
       </div>
 
       {summary ? (
-        <p className="balance-value">{formatCny(displayBalance)}</p>
+        <p className="balance-value">{formatCny(displayBalance ?? 0n)}</p>
       ) : (
         <span className="summary-skeleton balance-skeleton" aria-hidden="true" />
       )}
@@ -199,17 +218,21 @@ export function SummaryPanel({
 
           {retainedSavings?.needsCorrection || rawSpendableMinor !== undefined && rawSpendableMinor < 0n ? (
             <p className="summary-savings-warning" role="status">
-              <CircleAlert aria-hidden="true" /> {retainedSavings?.needsCorrection ? "存钱待校正" : "已动用存款"}
+              <CircleAlert aria-hidden="true" /> {retainedSavings?.needsCorrection
+                ? "存款待校正"
+                : retainedMinor > 0n
+                  ? <>动用存款 {formatCny(-(rawSpendableMinor ?? 0n))}</>
+                  : <>余额不足 {formatCny(-(rawSpendableMinor ?? 0n))}</>}
             </p>
           ) : null}
 
-          <div className="summary-savings-actions" aria-label="存钱操作">
-            <button type="button" className="secondary-button" onClick={onReserveSavings}>
+          <div className="summary-savings-actions" role="group" aria-label="存钱操作">
+            {rawSpendableMinor !== undefined && rawSpendableMinor > 0n ? <button type="button" className="secondary-button" onClick={onReserveSavings}>
               <Plus aria-hidden="true" /> 存一笔
-            </button>
-            <button type="button" className="text-button" onClick={onReleaseSavings}>
+            </button> : null}
+            {retainedMinor > 0n ? <button type="button" className="text-button" onClick={onReleaseSavings}>
               <Minus aria-hidden="true" /> 取用
-            </button>
+            </button> : null}
             {progress ? (
               <button type="button" className="text-button" onClick={onOpenSavingsGoal}>
                 <PencilLine aria-hidden="true" /> 修改
@@ -237,7 +260,7 @@ export function SummaryPanel({
           <div className="summary-forecast-list" aria-live="polite" aria-atomic="true">
             <div className={`summary-forecast summary-forecast--${analysis.currentCycle.affordability ?? "pending"}`}>
               <OutcomeIcon outcome={analysis.currentCycle.affordability} />
-              <span><small>到下次</small><strong>{currentCopy.label}</strong></span>
+              <span><small>到 {compactDate(analysis.currentCycle.nextPaydayDateKey)}</small><strong>{currentCopy.label}</strong></span>
               <p>{currentCopy.amount}</p>
             </div>
             <div className={`summary-forecast summary-forecast--${analysis.nextCycle.expectedIncomeScenario?.affordability ?? "pending"}`}>
@@ -252,6 +275,7 @@ export function SummaryPanel({
               )}
             </div>
           </div>
+          <p className="summary-forecast-basis">按已记花法</p>
           <a className="summary-analysis-link" href="#analysis" onClick={onOpenAnalysis}>
             详细分析 <ArrowRight aria-hidden="true" />
           </a>

@@ -14,6 +14,7 @@ import {
   assertRecoveryAllocationValid,
   defaultTreatmentFromAmount,
   normalizeLedgerEntry,
+  RecoveryAllocationError,
 } from "../domain/entry-treatment";
 import {
   calculateLedgerSummary,
@@ -22,6 +23,7 @@ import {
 import type {
   AppSettings,
   Attachment,
+  BalanceAdjustment,
   ConfirmationStatus,
   EntryDraft,
   EntryTreatment,
@@ -49,14 +51,19 @@ import {
 
 export const DATABASE_NAME = "jiyibi";
 export const DATABASE_SCHEMA_VERSION = 1 as const;
-/** v3: cloud sync. v4: entry treatment/recovery. v5: retained savings. v6: savings goal. */
-export const INDEXED_DB_VERSION = 6 as const;
+/** v3: cloud sync. v4: treatment/recovery. v5: savings. v6: goal. v7: balance audit. */
+export const INDEXED_DB_VERSION = 7 as const;
 export const INDEXED_DB_SYNC_VERSION = 3 as const;
 
 const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type EntitySyncStatus = "clean" | "pending" | "conflict";
-type SyncEntityPayload = LedgerEntry | AppSettings | RecoveryAllocation | SavingsEvent;
+type SyncEntityPayload =
+  | LedgerEntry
+  | AppSettings
+  | RecoveryAllocation
+  | SavingsEvent
+  | BalanceAdjustment;
 
 export interface SyncState {
   id: "primary";
@@ -145,7 +152,10 @@ export class LedgerDataError extends Error {
       | "not-linked"
       | "sync-conflict"
       | "sync-linked"
-      | "sync-tombstone-missing",
+      | "sync-tombstone-missing"
+      | "initial-balance-locked"
+      | "no-change"
+      | "undo-window-expired",
   ) {
     super(message);
     this.name = "LedgerDataError";
@@ -305,6 +315,7 @@ export class LedgerDatabase extends Dexie {
   settings!: EntityTable<AppSettings, "id">;
   recoveryAllocations!: EntityTable<RecoveryAllocation, "id">;
   savingsEvents!: EntityTable<SavingsEvent, "id">;
+  balanceAdjustments!: EntityTable<BalanceAdjustment, "id">;
   syncState!: EntityTable<SyncState, "id">;
   entitySyncState!: EntityTable<EntitySyncState, "id">;
   syncOutbox!: EntityTable<SyncOutboxRecord, "entityKey">;
@@ -443,7 +454,7 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
-    this.version(INDEXED_DB_VERSION).stores({
+    this.version(6).stores({
       entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
       attachments: "id, entryId, createdAt",
       settings: "id",
@@ -491,6 +502,77 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
+    this.version(INDEXED_DB_VERSION).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      recoveryAllocations: "id, refundEntryId, expenseEntryId, deletedAt, createdAt",
+      savingsEvents: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, linkedExpenseEntryId, cycleStartDateKey, &[kind+cycleStartDateKey]",
+      balanceAdjustments: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    }).upgrade(async (transaction) => {
+      const settingsTable = transaction.table<AppSettings>("settings");
+      const settings = await settingsTable.get("primary");
+      if (!settings || settings.initialBalanceLockedAt) return;
+
+      const [entries, savingsEvents] = await Promise.all([
+        transaction.table<LedgerEntry>("entries").toArray(),
+        transaction.table<SavingsEvent>("savingsEvents").toArray(),
+      ]);
+      const facts = [...entries, ...savingsEvents];
+      if (facts.length === 0) return;
+      const fallback = (migrationNow ? new Date(migrationNow) : new Date()).toISOString();
+      const createdAt = facts
+        .map((fact) => fact.createdAt)
+        .filter((value) => !Number.isNaN(Date.parse(value)))
+        .sort()[0] ?? fallback;
+      const lockedSettings: AppSettings = {
+        ...settings,
+        initialBalanceLockedAt: createdAt,
+      };
+      await settingsTable.put(lockedSettings);
+
+      const outboxTable = transaction.table<SyncOutboxRecord>("syncOutbox");
+      const pendingSettingsMutations = (await outboxTable.toArray())
+        .filter((record) => record.entityType === "settings");
+      const migratedMutationIds = new Map(
+        pendingSettingsMutations.map((record) => [record.id, createId("mutation")]),
+      );
+      for (const record of pendingSettingsMutations) {
+        const absorbedSettingsMutationId = record.absorbedSettingsMutationId
+          ? migratedMutationIds.get(record.absorbedSettingsMutationId) ??
+            record.absorbedSettingsMutationId
+          : undefined;
+        await outboxTable.put({
+          ...record,
+          // The payload hash changes when the lock is added, so the old
+          // idempotency key cannot be reused after a lost server response.
+          id: migratedMutationIds.get(record.id)!,
+          payload: {
+            ...(record.payload as AppSettings),
+            initialBalanceLockedAt: createdAt,
+          },
+          ...(absorbedSettingsMutationId
+            ? { absorbedSettingsMutationId }
+            : {}),
+        });
+      }
+
+      const conflictsTable = transaction.table<SyncConflict>("syncConflicts");
+      for (const conflict of await conflictsTable.toArray()) {
+        if (conflict.entityType !== "settings") continue;
+        await conflictsTable.put({
+          ...conflict,
+          localPayload: {
+            ...(conflict.localPayload as AppSettings),
+            initialBalanceLockedAt: createdAt,
+          },
+        });
+      }
+    });
     this.on("populate", (transaction) =>
       transaction.table<AppSettings>("settings").add(createDefaultSettings()),
     );
@@ -519,6 +601,7 @@ function isDefaultSettings(settings: AppSettings): boolean {
     settings.currency === "CNY" &&
     settings.schemaVersion === DATABASE_SCHEMA_VERSION &&
     settings.initialBalanceMinor === 0 &&
+    settings.initialBalanceLockedAt === undefined &&
     settings.monthEndBalanceGoalMinor === undefined &&
     settings.payCycle === undefined &&
     settings.savingsGoal === undefined &&
@@ -618,6 +701,104 @@ export async function listActiveRecoveryAllocations(
 ): Promise<RecoveryAllocation[]> {
   const rows = await database.recoveryAllocations.toArray();
   return rows.filter((row) => !row.deletedAt);
+}
+
+export interface RecoveryAllocationSelection {
+  expenseEntryId: string;
+  amountMinor: number;
+}
+
+export async function confirmTreatmentWithAllocations(
+  entryId: string,
+  treatment: EntryTreatment,
+  selections: readonly RecoveryAllocationSelection[],
+  options: {
+    detectionRuleVersion?: number;
+    markPrompted?: boolean;
+  } = {},
+  database = ledgerDb,
+  now = new Date(),
+): Promise<{ entry: LedgerEntry; allocations: RecoveryAllocation[] }> {
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existingEntry = await database.entries.get(entryId);
+      if (!existingEntry) throw new LedgerDataError("找不到这条记录", "not-found");
+      if (existingEntry.deletedAt) throw new LedgerDataError("已删除的记录不能编辑", "already-deleted");
+      if (!treatmentMatchesAmountSafe(treatment, existingEntry.amountMinor)) {
+        throw new LedgerDataError("处理方式与金额方向不一致", "invalid-settings");
+      }
+      if (treatment !== "refund_reimbursement" && selections.length > 0) {
+        throw new LedgerDataError("只有退款或报销可以关联支出", "invalid-settings");
+      }
+      const selectedIds = new Set<string>();
+      for (const selection of selections) {
+        if (selectedIds.has(selection.expenseEntryId)) {
+          throw new LedgerDataError("同一支出不能重复分摊", "invalid-settings");
+        }
+        selectedIds.add(selection.expenseEntryId);
+      }
+
+      const nowIso = now.toISOString();
+      const entry: LedgerEntry = {
+        ...normalizeLedgerEntry(existingEntry),
+        treatment,
+        confirmationStatus: "confirmed",
+        detectionRuleVersion: options.detectionRuleVersion ?? existingEntry.detectionRuleVersion,
+        promptedRevision: options.markPrompted ? nowIso : existingEntry.promptedRevision,
+        updatedAt: nowIso,
+      };
+      const existing = await database.recoveryAllocations.toArray();
+      const existingForRefund = existing.filter((row) => row.refundEntryId === entryId);
+      const untouched = existing.filter((row) => row.refundEntryId !== entryId);
+      const nextRows: RecoveryAllocation[] = [];
+      const validationRows = [...untouched];
+
+      for (const selection of selections) {
+        const expense = await database.entries.get(selection.expenseEntryId);
+        if (!expense) throw new LedgerDataError("找不到关联的支出", "not-found");
+        const previous = existingForRefund.find(
+          (row) => row.expenseEntryId === selection.expenseEntryId,
+        );
+        assertRecoveryAllocationValid(selection.amountMinor, {
+          refund: entry,
+          expense: normalizeLedgerEntry(expense),
+          existing: validationRows,
+          ignoreAllocationId: previous?.id,
+        });
+        const row: RecoveryAllocation = {
+          id: previous?.id ?? createId("recovery"),
+          refundEntryId: entryId,
+          expenseEntryId: selection.expenseEntryId,
+          amountMinor: selection.amountMinor,
+          createdAt: previous?.createdAt ?? nowIso,
+          updatedAt: nowIso,
+        };
+        validationRows.push(row);
+        nextRows.push(row);
+      }
+
+      const removed = existingForRefund
+        .filter((row) => !row.deletedAt && !selectedIds.has(row.expenseEntryId))
+        .map((row): RecoveryAllocation => ({ ...row, deletedAt: nowIso, updatedAt: nowIso }));
+      await database.entries.put(entry);
+      if (nextRows.length > 0) await database.recoveryAllocations.bulkPut(nextRows);
+      if (removed.length > 0) await database.recoveryAllocations.bulkPut(removed);
+      await queueSyncMutation("entry", entry.id, entry, database, nowIso);
+      for (const row of [...nextRows, ...removed]) {
+        await queueSyncMutation("recoveryAllocation", row.id, row, database, nowIso);
+      }
+      return { entry, allocations: nextRows };
+    },
+  );
 }
 
 export async function upsertRecoveryAllocation(
@@ -920,6 +1101,7 @@ export async function linkSyncAccount(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -991,6 +1173,16 @@ export async function linkSyncAccount(
             nowIso,
           );
         }
+        const balanceAdjustments = await database.balanceAdjustments.toArray();
+        for (const adjustment of balanceAdjustments) {
+          await queueSyncMutation(
+            "balanceAdjustment",
+            adjustment.id,
+            adjustment,
+            database,
+            nowIso,
+          );
+        }
         const settings = await database.settings.get("primary");
         if (settings && !(session.cloud.hasData && isDefaultSettings(settings))) {
           await queueSyncMutation("settings", settings.id, settings, database, nowIso);
@@ -1031,6 +1223,44 @@ export async function getSettings(database = ledgerDb): Promise<AppSettings> {
   return defaults;
 }
 
+async function hasLedgerFacts(database: LedgerDatabase): Promise<boolean> {
+  const [entryCount, savingsEventCount, adjustmentCount] = await Promise.all([
+    database.entries.count(),
+    database.savingsEvents.count(),
+    database.balanceAdjustments.count(),
+  ]);
+  return entryCount > 0 || savingsEventCount > 0 || adjustmentCount > 0;
+}
+
+async function lockInitialBalanceInTransaction(
+  database: LedgerDatabase,
+  nowIso: string,
+): Promise<AppSettings> {
+  const current = (await database.settings.get("primary"))
+    ?? createDefaultSettings(new Date(nowIso));
+  if (current.initialBalanceLockedAt) return current;
+  const next: AppSettings = {
+    ...current,
+    initialBalanceLockedAt: nowIso,
+    updatedAt: nowIso,
+  };
+  await database.settings.put(next);
+  return next;
+}
+
+async function preserveInitialBalanceLockFromFact(
+  database: LedgerDatabase,
+  factCreatedAt: string,
+): Promise<void> {
+  const current = (await database.settings.get("primary"))
+    ?? createDefaultSettings(new Date(factCreatedAt));
+  const lockedAt = current.initialBalanceLockedAt && current.initialBalanceLockedAt <= factCreatedAt
+    ? current.initialBalanceLockedAt
+    : factCreatedAt;
+  if (current.initialBalanceLockedAt === lockedAt) return;
+  await database.settings.put({ ...current, initialBalanceLockedAt: lockedAt });
+}
+
 export async function setInitialBalance(
   initialBalanceMinor: number,
   database = ledgerDb,
@@ -1044,15 +1274,27 @@ export async function setInitialBalance(
   }
   return database.transaction(
     "rw",
-    database.settings,
-    database.syncState,
-    database.entitySyncState,
-    database.syncOutbox,
-    database.syncConflicts,
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.balanceAdjustments,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
     async () => {
       const nowIso = now.toISOString();
+      const current = (await database.settings.get("primary")) ?? createDefaultSettings(now);
+      if (current.initialBalanceLockedAt || await hasLedgerFacts(database)) {
+        throw new LedgerDataError(
+          "The opening balance is locked after the first ledger fact",
+          "initial-balance-locked",
+        );
+      }
       const next: AppSettings = {
-        ...((await database.settings.get("primary")) ?? createDefaultSettings(now)),
+        ...current,
         initialBalanceMinor,
         updatedAt: nowIso,
       };
@@ -1348,6 +1590,219 @@ function isIncomeForecastTargetInWindow(
     targetDateKey <= window.maximumDateKey
   );
 }
+
+export interface BalanceReconciliationInput {
+  observedBalanceMinor: number;
+  note?: string;
+}
+
+export interface OpeningBalanceCorrectionInput {
+  nextOpeningMinor: number;
+  note?: string;
+}
+
+function assertBalanceMinor(value: number, label = "余额"): void {
+  if (!Number.isSafeInteger(value) || Math.abs(value) > MAX_AMOUNT_MINOR) {
+    throw new LedgerDataError(`${label}必须是有效的整数分`, "invalid-settings");
+  }
+}
+
+function balanceDelta(left: number, right: number, label: string): number {
+  const result = BigInt(left) - BigInt(right);
+  if (result < -BigInt(MAX_AMOUNT_MINOR) || result > BigInt(MAX_AMOUNT_MINOR)) {
+    throw new LedgerDataError(`${label}超出金额范围`, "invalid-settings");
+  }
+  if (result === 0n) {
+    throw new LedgerDataError("当前金额已经一致", "no-change");
+  }
+  return Number(result);
+}
+
+function addBalanceMinor(left: number, right: number): number {
+  const result = BigInt(left) + BigInt(right);
+  if (result < BigInt(Number.MIN_SAFE_INTEGER) || result > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new LedgerDataError("余额合计超出安全范围", "invalid-settings");
+  }
+  return Number(result);
+}
+
+function adjustmentOccurrence(now: Date): ReturnType<typeof savingsOccurrence> {
+  return savingsOccurrence(undefined, now);
+}
+
+async function currentBalanceExcludingAdjustment(
+  database: LedgerDatabase,
+  ignoredId?: string,
+): Promise<number> {
+  const settings = (await database.settings.get("primary")) ?? createDefaultSettings();
+  const adjustments = await database.balanceAdjustments.toArray();
+  return calculateLedgerSummary(
+    await database.entries.toArray(),
+    settings,
+    currentLocalMonthKey(),
+    ignoredId ? adjustments.filter((item) => item.id !== ignoredId) : adjustments,
+  ).balanceMinor;
+}
+
+async function effectiveOpeningBalanceInTransaction(
+  database: LedgerDatabase,
+): Promise<number> {
+  const settings = (await database.settings.get("primary")) ?? createDefaultSettings();
+  let value = settings.initialBalanceMinor;
+  const adjustments = await database.balanceAdjustments.toArray();
+  for (const adjustment of adjustments) {
+    if (!adjustment.deletedAt && adjustment.kind === "opening_correction") {
+      value = addBalanceMinor(value, adjustment.amountMinor);
+    }
+  }
+  return value;
+}
+
+/** Create an audit event that aligns the computed total balance to an observed value. */
+export async function reconcileBalance(
+  input: BalanceReconciliationInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<BalanceAdjustment> {
+  assertBalanceMinor(input.observedBalanceMinor, "实际余额");
+  const note = normalizedSavingsNote(input.note ?? "余额校准");
+  const occurrence = adjustmentOccurrence(now);
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.balanceAdjustments,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const balanceBeforeMinor = await currentBalanceExcludingAdjustment(database);
+      assertBalanceMinor(balanceBeforeMinor, "校准前余额");
+      const amountMinor = balanceDelta(
+        input.observedBalanceMinor,
+        balanceBeforeMinor,
+        "校准差额",
+      );
+      const nowIso = now.toISOString();
+      const event: BalanceAdjustment = {
+        id: createId("balance-reconciliation"),
+        kind: "reconciliation",
+        amountMinor,
+        balanceBeforeMinor,
+        observedBalanceMinor: input.observedBalanceMinor,
+        note,
+        ...occurrence,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await lockInitialBalanceInTransaction(database, nowIso);
+      await database.balanceAdjustments.add(event);
+      await queueSyncMutation("balanceAdjustment", event.id, event, database, nowIso);
+      return event;
+    },
+  );
+}
+
+/** Record a deliberate correction to the opening balance while retaining audit history. */
+export async function correctOpeningBalance(
+  input: OpeningBalanceCorrectionInput,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<BalanceAdjustment> {
+  assertBalanceMinor(input.nextOpeningMinor, "新的起点余额");
+  const note = normalizedSavingsNote(input.note ?? "起点更正");
+  const occurrence = adjustmentOccurrence(now);
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.settings,
+      database.savingsEvents,
+      database.balanceAdjustments,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const previousOpeningMinor = await effectiveOpeningBalanceInTransaction(database);
+      assertBalanceMinor(previousOpeningMinor, "原起点余额");
+      const amountMinor = balanceDelta(
+        input.nextOpeningMinor,
+        previousOpeningMinor,
+        "起点更正差额",
+      );
+      const nowIso = now.toISOString();
+      const event: BalanceAdjustment = {
+        id: createId("balance-opening-correction"),
+        kind: "opening_correction",
+        amountMinor,
+        previousOpeningMinor,
+        nextOpeningMinor: input.nextOpeningMinor,
+        note,
+        ...occurrence,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await lockInitialBalanceInTransaction(database, nowIso);
+      await database.balanceAdjustments.add(event);
+      await queueSyncMutation("balanceAdjustment", event.id, event, database, nowIso);
+      return event;
+    },
+  );
+}
+
+export const createBalanceReconciliation = reconcileBalance;
+export const createOpeningBalanceCorrection = correctOpeningBalance;
+
+export async function listBalanceAdjustments(
+  database = ledgerDb,
+): Promise<BalanceAdjustment[]> {
+  return database.balanceAdjustments.orderBy("occurredAt").reverse().toArray();
+}
+
+export async function listActiveBalanceAdjustments(
+  database = ledgerDb,
+): Promise<BalanceAdjustment[]> {
+  return (await listBalanceAdjustments(database)).filter((item) => !item.deletedAt);
+}
+
+export async function softDeleteBalanceAdjustment(
+  adjustmentId: string,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<BalanceAdjustment> {
+  return database.transaction(
+    "rw",
+    [
+      database.balanceAdjustments,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      const existing = await database.balanceAdjustments.get(adjustmentId);
+      if (!existing) throw new LedgerDataError("找不到余额调整", "not-found");
+      if (existing.deletedAt) throw new LedgerDataError("余额调整已作废", "already-deleted");
+      if (now.getTime() - Date.parse(existing.createdAt) > 8_000) {
+        throw new LedgerDataError("撤销时间已过", "undo-window-expired");
+      }
+      const nowIso = now.toISOString();
+      const deleted: BalanceAdjustment = { ...existing, deletedAt: nowIso, updatedAt: nowIso };
+      await database.balanceAdjustments.put(deleted);
+      await queueSyncMutation("balanceAdjustment", deleted.id, deleted, database, nowIso);
+      return deleted;
+    },
+  );
+}
+
+/** Product-facing name: undoing a just-saved adjustment creates an audit tombstone. */
+export const undoBalanceAdjustment = softDeleteBalanceAdjustment;
 
 function isValidIncomeForecastRevision(
   value: IncomeForecastRevision,
@@ -1684,6 +2139,7 @@ async function ledgerBalanceMinorInTransaction(
     await database.entries.toArray(),
     settings,
     currentLocalMonthKey(),
+    await database.balanceAdjustments.toArray(),
   ).balanceMinor;
 }
 
@@ -1703,6 +2159,18 @@ function assertSavingsFitsBalance(
 ): void {
   if (retainedMinor > BigInt(balanceMinor)) {
     throw new LedgerDataError("留存金额不能超过当前未留存资金", "invalid-settings");
+  }
+}
+
+function assertSavingsDoesNotWorsenNegativeBalance(
+  currentRetainedMinor: bigint,
+  nextRetainedMinor: bigint,
+): void {
+  if (nextRetainedMinor < 0n && nextRetainedMinor < currentRetainedMinor) {
+    throw new LedgerDataError(
+      "留存记录调整后会造成负余额",
+      "invalid-settings",
+    );
   }
 }
 
@@ -1774,6 +2242,7 @@ export async function setOpeningSavings(
       database.entries,
       database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1782,8 +2251,17 @@ export async function setOpeningSavings(
     async () => {
       const existing = await database.savingsEvents.get(OPENING_SAVINGS_EVENT_ID);
       const nowIso = now.toISOString();
+      const currentRetainedMinor = await retainedMinorInTransaction(database);
+      const retainedWithoutOpening = await retainedMinorInTransaction(
+        database,
+        OPENING_SAVINGS_EVENT_ID,
+      );
       if (amountMinor === 0) {
         if (!existing || existing.deletedAt) return undefined;
+        assertSavingsDoesNotWorsenNegativeBalance(
+          currentRetainedMinor,
+          retainedWithoutOpening,
+        );
         const deleted: SavingsEvent = {
           ...existing,
           deletedAt: nowIso,
@@ -1794,12 +2272,13 @@ export async function setOpeningSavings(
         return deleted;
       }
 
-      const retainedWithoutOpening = await retainedMinorInTransaction(
-        database,
-        OPENING_SAVINGS_EVENT_ID,
+      const nextRetainedMinor = retainedWithoutOpening + BigInt(amountMinor);
+      assertSavingsDoesNotWorsenNegativeBalance(
+        currentRetainedMinor,
+        nextRetainedMinor,
       );
       assertSavingsFitsBalance(
-        retainedWithoutOpening + BigInt(amountMinor),
+        nextRetainedMinor,
         await ledgerBalanceMinorInTransaction(database),
       );
       const event: SavingsEvent = {
@@ -1818,6 +2297,7 @@ export async function setOpeningSavings(
         createdAt: existing?.createdAt ?? nowIso,
         updatedAt: nowIso,
       };
+      await lockInitialBalanceInTransaction(database, nowIso);
       await database.savingsEvents.put(event);
       await queueSyncMutation("savingsEvent", event.id, event, database, nowIso);
       return event;
@@ -1852,6 +2332,7 @@ export async function recordSavingsEvent(
       database.entries,
       database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1889,6 +2370,7 @@ export async function recordSavingsEvent(
         createdAt: nowIso,
         updatedAt: nowIso,
       };
+      await lockInitialBalanceInTransaction(database, nowIso);
       await database.savingsEvents.add(event);
       await queueSyncMutation("savingsEvent", event.id, event, database, nowIso);
       return event;
@@ -1925,6 +2407,7 @@ export async function updateSavingsEvent(
       database.entries,
       database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -1956,8 +2439,14 @@ export async function updateSavingsEvent(
         ? input.linkedExpenseEntryId ?? existing.linkedExpenseEntryId
         : undefined;
       if (existing.kind === "reserve") {
+        const currentRetainedMinor = await retainedMinorInTransaction(database);
+        const nextRetainedMinor = retainedWithoutCurrent + BigInt(input.amountMinor);
+        assertSavingsDoesNotWorsenNegativeBalance(
+          currentRetainedMinor,
+          nextRetainedMinor,
+        );
         assertSavingsFitsBalance(
-          retainedWithoutCurrent + BigInt(input.amountMinor),
+          nextRetainedMinor,
           await ledgerBalanceMinorInTransaction(database),
         );
       } else {
@@ -2123,6 +2612,17 @@ export async function softDeleteSavingsEvent(
     if (existing.deletedAt) {
       throw new LedgerDataError("这条留存记录已经删除", "already-deleted");
     }
+    if (existing.kind === "cycle_settlement") {
+      throw new LedgerDataError("历史周期结算仅供查看", "invalid-settings");
+    }
+    if (existing.kind === "opening" || existing.kind === "reserve") {
+      const currentRetainedMinor = await retainedMinorInTransaction(database);
+      const nextRetainedMinor = await retainedMinorInTransaction(database, eventId);
+      assertSavingsDoesNotWorsenNegativeBalance(
+        currentRetainedMinor,
+        nextRetainedMinor,
+      );
+    }
     const nowIso = now.toISOString();
     const deleted: SavingsEvent = {
       ...existing,
@@ -2144,7 +2644,10 @@ export async function undoDeleteSavingsEvent(
   return database.transaction(
     "rw",
     [
+      database.entries,
+      database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -2155,6 +2658,30 @@ export async function undoDeleteSavingsEvent(
     if (!existing) throw new LedgerDataError("找不到这条留存记录", "not-found");
     if (!existing.deletedAt) {
       throw new LedgerDataError("这条留存记录并未删除", "not-deleted");
+    }
+    if (existing.kind === "cycle_settlement") {
+      throw new LedgerDataError("历史周期结算仅供查看", "invalid-settings");
+    }
+    const retainedWithoutCurrent = await retainedMinorInTransaction(database, eventId);
+    if (existing.kind === "opening" || existing.kind === "reserve") {
+      assertSavingsFitsBalance(
+        retainedWithoutCurrent + BigInt(existing.amountMinor),
+        await ledgerBalanceMinorInTransaction(database),
+      );
+    } else {
+      const nextRetainedMinor = retainedWithoutCurrent - BigInt(existing.amountMinor);
+      assertSavingsDoesNotWorsenNegativeBalance(
+        retainedWithoutCurrent,
+        nextRetainedMinor,
+      );
+      if (existing.linkedExpenseEntryId) {
+        await assertLinkedReleaseFitsExpense(
+          database,
+          existing.linkedExpenseEntryId,
+          existing.amountMinor,
+          eventId,
+        );
+      }
     }
     const restored: SavingsEvent = { ...existing, updatedAt: now.toISOString() };
     delete restored.deletedAt;
@@ -2240,6 +2767,7 @@ export async function recordActualIncome(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -2309,7 +2837,7 @@ export async function recordActualIncome(
             localMonthKey: occurred.localMonthKey,
             timezoneOffsetMinutes: occurred.timezoneOffsetMinutes,
             treatment: "ordinary_income",
-            confirmationStatus: "not_needed",
+            confirmationStatus: "confirmed",
             createdAt: nowIso,
             updatedAt: nowIso,
           };
@@ -2321,6 +2849,9 @@ export async function recordActualIncome(
       const settings: AppSettings = {
         ...current,
         lastExpectedIncomeMinor: forecast.expectedIncomeMinor,
+        ...(entry && !current.initialBalanceLockedAt
+          ? { initialBalanceLockedAt: nowIso }
+          : {}),
         updatedAt: nowIso,
       };
       delete settings.incomeForecast;
@@ -2456,7 +2987,9 @@ export async function createEntry(
     [
       database.entries,
       database.attachments,
+      database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -2464,6 +2997,7 @@ export async function createEntry(
     ],
     async () => {
       if (attachment) await database.attachments.add(attachment);
+      await lockInitialBalanceInTransaction(database, nowIso);
       await database.entries.add(entry);
       await queueSyncMutation("entry", entry.id, entry, database, nowIso);
     },
@@ -2528,7 +3062,9 @@ export async function createSavingsFundedExpense(
     [
       database.entries,
       database.attachments,
+      database.settings,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -2540,6 +3076,7 @@ export async function createSavingsFundedExpense(
         throw new LedgerDataError("取用金额不能超过当前已留存金额", "invalid-settings");
       }
       if (attachment) await database.attachments.add(attachment);
+      await lockInitialBalanceInTransaction(database, nowIso);
       await database.entries.add(entry);
       await database.savingsEvents.add(savingsEvent);
       await queueSyncMutation("entry", entry.id, entry, database, nowIso);
@@ -2566,6 +3103,7 @@ export async function updateEntry(
     [
       database.entries,
       database.attachments,
+      database.recoveryAllocations,
       database.savingsEvents,
       database.syncState,
       database.entitySyncState,
@@ -2626,6 +3164,37 @@ export async function updateEntry(
           : undefined,
       updatedAt: nowIso,
     };
+    const activeAllocations = await database.recoveryAllocations
+      .filter((allocation) => !allocation.deletedAt)
+      .toArray();
+    const relatedAllocations = activeAllocations.filter(
+      (allocation) =>
+        allocation.refundEntryId === entryId || allocation.expenseEntryId === entryId,
+    );
+    const invalidAllocations: RecoveryAllocation[] = [];
+    for (const allocation of relatedAllocations) {
+      const refund = allocation.refundEntryId === entryId
+        ? updated
+        : await database.entries.get(allocation.refundEntryId);
+      const expense = allocation.expenseEntryId === entryId
+        ? updated
+        : await database.entries.get(allocation.expenseEntryId);
+      if (!refund || !expense) {
+        invalidAllocations.push(allocation);
+        continue;
+      }
+      try {
+        assertRecoveryAllocationValid(allocation.amountMinor, {
+          refund: normalizeLedgerEntry(refund),
+          expense: normalizeLedgerEntry(expense),
+          existing: activeAllocations,
+          ignoreAllocationId: allocation.id,
+        });
+      } catch (reason) {
+        if (!(reason instanceof RecoveryAllocationError)) throw reason;
+        invalidAllocations.push(allocation);
+      }
+    }
     const linkedReleases = await database.savingsEvents
       .where("linkedExpenseEntryId")
       .equals(entryId)
@@ -2648,6 +3217,21 @@ export async function updateEntry(
       );
     }
     await database.entries.put(updated);
+    for (const allocation of invalidAllocations) {
+      const tombstone: RecoveryAllocation = {
+        ...allocation,
+        deletedAt: nowIso,
+        updatedAt: nowIso,
+      };
+      await database.recoveryAllocations.put(tombstone);
+      await queueSyncMutation(
+        "recoveryAllocation",
+        tombstone.id,
+        tombstone,
+        database,
+        nowIso,
+      );
+    }
     for (const release of linkedReleases) {
       const updatedRelease: SavingsEvent = {
         ...release,
@@ -2767,6 +3351,37 @@ export async function undoDeleteEntry(
         updatedAt: nowIso,
       };
       delete restored.deletedAt;
+      const linkedReleases = (await database.savingsEvents
+        .where("linkedExpenseEntryId")
+        .equals(entryId)
+        .toArray())
+        .filter((event) => event.kind === "release");
+      const releasesToRestore = linkedReleases.filter(
+        (release) => release.deletedAt === entryDeletedAt,
+      );
+      if (releasesToRestore.length > 0) {
+        const activeLinkedMinor = linkedReleases
+          .filter((release) => !release.deletedAt)
+          .reduce((total, release) => total + BigInt(release.amountMinor), 0n);
+        const restoringMinor = releasesToRestore.reduce(
+          (total, release) => total + BigInt(release.amountMinor),
+          0n,
+        );
+        if (
+          restored.amountMinor >= 0
+          || activeLinkedMinor + restoringMinor > -BigInt(restored.amountMinor)
+        ) {
+          throw new LedgerDataError(
+            "恢复后的支出不足以承担关联的留存取用",
+            "invalid-settings",
+          );
+        }
+        const currentRetainedMinor = await retainedMinorInTransaction(database);
+        assertSavingsDoesNotWorsenNegativeBalance(
+          currentRetainedMinor,
+          currentRetainedMinor - restoringMinor,
+        );
+      }
       await database.entries.put(restored);
 
       // Re-activate allocations soft-deleted with this entry only if both ends are live.
@@ -2801,10 +3416,6 @@ export async function undoDeleteEntry(
         }
       }
 
-      const linkedReleases = await database.savingsEvents
-        .where("linkedExpenseEntryId")
-        .equals(entryId)
-        .toArray();
       for (const release of linkedReleases) {
         if (release.deletedAt !== entryDeletedAt) continue;
         const live: SavingsEvent = { ...release, updatedAt: nowIso };
@@ -2958,19 +3569,21 @@ export async function getLedgerSummary(
   database = ledgerDb,
 ): Promise<LedgerSummary> {
   await getSettings(database);
-  const [entries, settings] = await database.transaction(
+  const [entries, settings, balanceAdjustments] = await database.transaction(
     "r",
     database.entries,
     database.settings,
+    database.balanceAdjustments,
     async () => Promise.all([
       database.entries.toArray(),
       database.settings.get("primary"),
+      database.balanceAdjustments.toArray(),
     ]),
   );
   if (!settings) {
     throw new LedgerDataError("找不到应用设置", "invalid-settings");
   }
-  return calculateLedgerSummary(entries, settings, monthKey);
+  return calculateLedgerSummary(entries, settings, monthKey, balanceAdjustments);
 }
 
 function currentLocalPayload(
@@ -2983,6 +3596,9 @@ function currentLocalPayload(
     return database.recoveryAllocations.get(entityId);
   }
   if (entityType === "savingsEvent") return database.savingsEvents.get(entityId);
+  if (entityType === "balanceAdjustment") {
+    return database.balanceAdjustments.get(entityId);
+  }
   return database.settings.get("primary");
 }
 
@@ -2995,7 +3611,17 @@ async function applyRemotePayload(
   database: LedgerDatabase,
 ): Promise<void> {
   if (change.entityType === "settings") {
-    await database.settings.put(change.payload as AppSettings);
+    const [current, incoming] = await Promise.all([
+      database.settings.get("primary"),
+      Promise.resolve(change.payload as AppSettings),
+    ]);
+    const locks = [current?.initialBalanceLockedAt, incoming.initialBalanceLockedAt]
+      .filter((value): value is string => value !== undefined)
+      .sort();
+    await database.settings.put({
+      ...incoming,
+      ...(locks[0] ? { initialBalanceLockedAt: locks[0] } : {}),
+    });
     return;
   }
   if (change.entityType === "recoveryAllocation") {
@@ -3009,6 +3635,7 @@ async function applyRemotePayload(
   }
   if (change.entityType === "savingsEvent") {
     const event = change.payload as SavingsEvent;
+    await preserveInitialBalanceLockFromFact(database, event.createdAt);
     if (event.deletedAt) {
       await database.savingsEvents.delete(change.entityId);
     } else {
@@ -3016,8 +3643,15 @@ async function applyRemotePayload(
     }
     return;
   }
+  if (change.entityType === "balanceAdjustment") {
+    const adjustment = change.payload as BalanceAdjustment;
+    await preserveInitialBalanceLockFromFact(database, adjustment.createdAt);
+    await database.balanceAdjustments.put(adjustment);
+    return;
+  }
 
   const entry = normalizeLedgerEntry(change.payload as LedgerEntry);
+  await preserveInitialBalanceLockFromFact(database, entry.createdAt);
   const existing = await database.entries.get(change.entityId);
   if (entry.deletedAt) {
     const attachmentId = existing?.attachmentId ?? entry.attachmentId;
@@ -3213,6 +3847,7 @@ export async function applyRemoteChanges(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -3538,6 +4173,7 @@ export async function markPushResults(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.entitySyncState,
       database.syncOutbox,
       database.syncConflicts,
@@ -3565,6 +4201,7 @@ export async function commitSyncBatch(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -3603,6 +4240,7 @@ export async function resolveSyncConflict(
       database.settings,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
       database.entitySyncState,
       database.syncOutbox,
@@ -3810,12 +4448,28 @@ export interface LedgerReplacement {
   recoveryAllocations: RecoveryAllocation[];
   /** Optional until backup payload v4 becomes the only writer. */
   savingsEvents?: SavingsEvent[];
+  /** Balance audit rows include active events and soft-voided tombstones. */
+  balanceAdjustments?: BalanceAdjustment[];
 }
 
 export async function replaceLedgerData(
   replacement: LedgerReplacement,
   database = ledgerDb,
 ): Promise<void> {
+  const replacementFacts = [
+    ...replacement.entries,
+    ...(replacement.savingsEvents ?? []),
+    ...(replacement.balanceAdjustments ?? []),
+  ];
+  const settings = replacement.settings.initialBalanceLockedAt || replacementFacts.length === 0
+    ? replacement.settings
+    : {
+        ...replacement.settings,
+        initialBalanceLockedAt: replacementFacts
+          .map((fact) => fact.createdAt)
+          .filter((value) => !Number.isNaN(Date.parse(value)))
+          .sort()[0] ?? new Date().toISOString(),
+      };
   await database.transaction(
     "rw",
     [
@@ -3824,6 +4478,7 @@ export async function replaceLedgerData(
       database.attachments,
       database.recoveryAllocations,
       database.savingsEvents,
+      database.balanceAdjustments,
       database.syncState,
     ],
     async () => {
@@ -3836,9 +4491,10 @@ export async function replaceLedgerData(
       await database.attachments.clear();
       await database.recoveryAllocations.clear();
       await database.savingsEvents.clear();
+      await database.balanceAdjustments.clear();
       await database.entries.clear();
       await database.settings.clear();
-      await database.settings.add(replacement.settings);
+      await database.settings.add(settings);
       if (replacement.entries.length) await database.entries.bulkAdd(replacement.entries);
       if (replacement.attachments.length) {
         await database.attachments.bulkAdd(replacement.attachments);
@@ -3848,6 +4504,9 @@ export async function replaceLedgerData(
       }
       if (replacement.savingsEvents?.length) {
         await database.savingsEvents.bulkAdd(replacement.savingsEvents);
+      }
+      if (replacement.balanceAdjustments?.length) {
+        await database.balanceAdjustments.bulkAdd(replacement.balanceAdjustments);
       }
     },
   );

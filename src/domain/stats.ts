@@ -17,6 +17,7 @@ import {
 } from "./entry-treatment";
 import type {
   AppSettings,
+  BalanceAdjustment,
   CompletedPayCyclePoint,
   CurrentCycleSpendingPoint,
   DailyExpensePoint,
@@ -323,6 +324,7 @@ export function calculateRetainedSavingsSummary(
   let settledMinor = 0n;
   let totalRetainedMinor = 0n;
   let needsCorrection = false;
+  let openingCount = 0;
   const settlementCycles = new Set<string>();
 
   for (const event of active) {
@@ -331,7 +333,11 @@ export function calculateRetainedSavingsSummary(
         ? event.transferToRetainedMinor
         : event.amountMinor,
     );
-    if (event.kind === "opening") openingRetainedMinor += amount;
+    if (event.kind === "opening") {
+      openingCount += 1;
+      openingRetainedMinor += amount;
+      if (openingCount > 1) needsCorrection = true;
+    }
     if (event.kind === "reserve") reservedMinor += amount;
     if (event.kind === "release") releasedMinor += amount;
     if (event.kind === "cycle_settlement") {
@@ -802,10 +808,17 @@ export function calculateLedgerSummary(
   entries: readonly LedgerEntry[],
   settings: Pick<AppSettings, "initialBalanceMinor">,
   monthKey: string,
+  balanceAdjustments: readonly BalanceAdjustment[] = [],
 ): LedgerSummary {
   let balanceMinor = settings.initialBalanceMinor;
   let monthIncomeMinor = 0;
   let monthExpenseMinor = 0;
+
+  for (const adjustment of balanceAdjustments) {
+    if (!adjustment.deletedAt) {
+      balanceMinor = safeAdd(balanceMinor, adjustment.amountMinor);
+    }
+  }
 
   for (const raw of entries) {
     const entry = normalizeLedgerEntry(raw);

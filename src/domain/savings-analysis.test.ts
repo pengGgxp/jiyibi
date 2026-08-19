@@ -120,6 +120,17 @@ describe("retained savings totals", () => {
     expect(summary.needsCorrection).toBe(true);
   });
 
+  it("keeps duplicate opening amounts visible but marks them for correction", () => {
+    const summary = calculateRetainedSavingsSummary([
+      savingsEvent("opening-a", "opening", 1_000, "2026-07-01"),
+      savingsEvent("opening-b", "opening", 500, "2026-07-02"),
+    ]);
+
+    expect(summary.openingRetainedMinor).toBe(1_500n);
+    expect(summary.totalRetainedMinor).toBe(1_500n);
+    expect(summary.needsCorrection).toBe(true);
+  });
+
   it("accepts a zero settlement and flags duplicate live settlements", () => {
     const summary = calculateRetainedSavingsSummary([
       settlement("2026-07-10", "2026-08-09", 0, "settlement-a"),

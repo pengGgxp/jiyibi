@@ -21,6 +21,7 @@ import {
   applyRemoteChanges,
   assertSyncAccount,
   clearIncomeForecast,
+  confirmTreatmentWithAllocations,
   createDefaultSettings,
   createEntry,
   getAttachment,
@@ -490,6 +491,7 @@ describe("LedgerDatabase", () => {
       note: "本次实际收入",
       localDateKey: "2026-08-10",
       localMonthKey: "2026-08",
+      confirmationStatus: "confirmed",
     });
     expect(result.settings).not.toHaveProperty("incomeForecast");
     expect(await database.entries.toArray()).toEqual([result.entry]);
@@ -717,10 +719,10 @@ describe("LedgerDatabase", () => {
   });
 
   it("creates, edits and summarizes signed entries", async () => {
+    await setInitialBalance(5_000, database);
     const created = await createEntry(draft(), database);
     expect(created.amountMinor).toBe(-1234);
 
-    await setInitialBalance(5_000, database);
     await updateEntry(created.id, draft({ kind: "income", amount: "20", note: "退款" }), database);
 
     expect(await listActiveEntries(database)).toHaveLength(1);
@@ -782,8 +784,8 @@ describe("LedgerDatabase", () => {
   });
 
   it("rolls back settings, entries and attachments when replacement fails", async () => {
-    const original = await createEntry(draft({ image: image("original") }), database);
     await setInitialBalance(5_000, database);
+    const original = await createEntry(draft({ image: image("original") }), database);
     const originalAttachment = await getAttachment(original.attachmentId!, database);
     const replacementEntry: LedgerEntry = {
       ...original,
@@ -1071,6 +1073,186 @@ describe("LedgerDatabase", () => {
         id: allocation.id,
         deletedAt: "2026-07-30T14:00:00.000Z",
         updatedAt: "2026-07-30T14:00:00.000Z",
+      },
+    });
+  });
+
+  it("confirms a refund and multiple allocations in one transaction", async () => {
+    const first = await createEntry(draft({ amount: "20.00", note: "first" }), database);
+    const second = await createEntry(draft({ amount: "30.00", note: "second" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "25.00", note: "refund" }), database);
+
+    const result = await confirmTreatmentWithAllocations(refund.id, "refund_reimbursement", [
+      { expenseEntryId: first.id, amountMinor: 1_000 },
+      { expenseEntryId: second.id, amountMinor: 1_500 },
+    ], { markPrompted: true }, database, new Date("2026-07-30T13:00:00.000Z"));
+
+    expect(result.entry).toMatchObject({
+      treatment: "refund_reimbursement",
+      confirmationStatus: "confirmed",
+    });
+    expect(result.allocations).toHaveLength(2);
+    expect(result.allocations.reduce((sum, row) => sum + row.amountMinor, 0)).toBe(2_500);
+    await expect(database.recoveryAllocations.count()).resolves.toBe(2);
+  });
+
+  it("rolls back treatment and every allocation when one split exceeds its expense", async () => {
+    const first = await createEntry(draft({ amount: "20.00", note: "first" }), database);
+    const second = await createEntry(draft({ amount: "10.00", note: "second" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "30.00", note: "refund" }), database);
+
+    await expect(confirmTreatmentWithAllocations(refund.id, "refund_reimbursement", [
+      { expenseEntryId: first.id, amountMinor: 1_500 },
+      { expenseEntryId: second.id, amountMinor: 1_500 },
+    ], {}, database)).rejects.toThrow(/原始支出/);
+
+    expect(await database.entries.get(refund.id)).toMatchObject({
+      treatment: "ordinary_income",
+      confirmationStatus: "not_needed",
+    });
+    await expect(database.recoveryAllocations.count()).resolves.toBe(0);
+  });
+
+  it("soft-deletes old refund allocations when editing the treatment back to income", async () => {
+    const expense = await createEntry(draft({ amount: "20.00" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "10.00" }), database);
+    const linked = await confirmTreatmentWithAllocations(refund.id, "refund_reimbursement", [
+      { expenseEntryId: expense.id, amountMinor: 1_000 },
+    ], {}, database, new Date("2026-07-30T13:00:00.000Z"));
+
+    await confirmTreatmentWithAllocations(
+      refund.id,
+      "ordinary_income",
+      [],
+      {},
+      database,
+      new Date("2026-07-30T14:00:00.000Z"),
+    );
+
+    expect(await database.recoveryAllocations.get(linked.allocations[0].id)).toMatchObject({
+      deletedAt: "2026-07-30T14:00:00.000Z",
+    });
+  });
+
+  it("soft-deletes every related allocation when a refund edit reduces its shared cap", async () => {
+    const first = await createEntry(draft({ amount: "20.00", note: "first" }), database);
+    const second = await createEntry(draft({ amount: "30.00", note: "second" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "25.00", note: "refund" }), database);
+    const linked = await confirmTreatmentWithAllocations(refund.id, "refund_reimbursement", [
+      { expenseEntryId: first.id, amountMinor: 1_000 },
+      { expenseEntryId: second.id, amountMinor: 1_500 },
+    ], {}, database);
+    const editedAt = new Date("2026-07-30T15:00:00.000Z");
+
+    const edited = await updateEntry(
+      refund.id,
+      draft({ kind: "income", amount: "20.00", note: "refund reduced" }),
+      database,
+      editedAt,
+    );
+
+    expect(edited).toMatchObject({
+      amountMinor: 2_000,
+      treatment: "refund_reimbursement",
+    });
+    const allocations = await database.recoveryAllocations.bulkGet(
+      linked.allocations.map((allocation) => allocation.id),
+    );
+    expect(allocations).toHaveLength(2);
+    for (const [index, allocation] of allocations.entries()) {
+      expect(allocation).toMatchObject({
+        amountMinor: linked.allocations[index]?.amountMinor,
+        deletedAt: editedAt.toISOString(),
+        updatedAt: editedAt.toISOString(),
+      });
+    }
+  });
+
+  it("soft-deletes a recovery allocation when its original expense becomes too small", async () => {
+    const expense = await createEntry(draft({ amount: "20.00", note: "expense" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "15.00", note: "refund" }), database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 1_500,
+    }, database);
+    const editedAt = new Date("2026-07-30T15:10:00.000Z");
+
+    const edited = await updateEntry(
+      expense.id,
+      draft({ amount: "10.00", note: "expense reduced" }),
+      database,
+      editedAt,
+    );
+
+    expect(edited).toMatchObject({ amountMinor: -1_000 });
+    expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+      amountMinor: 1_500,
+      deletedAt: editedAt.toISOString(),
+    });
+  });
+
+  it("soft-deletes recovery allocations when an edited endpoint changes direction", async () => {
+    const expense = await createEntry(draft({ amount: "20.00", note: "expense" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "10.00", note: "refund" }), database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 1_000,
+    }, database);
+    const editedAt = new Date("2026-07-30T15:20:00.000Z");
+
+    const edited = await updateEntry(
+      refund.id,
+      draft({ amount: "10.00", note: "now expense" }),
+      database,
+      editedAt,
+    );
+
+    expect(edited).toMatchObject({
+      amountMinor: -1_000,
+      treatment: "ordinary_expense",
+    });
+    expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+      amountMinor: 1_000,
+      deletedAt: editedAt.toISOString(),
+    });
+  });
+
+  it("queues invalidated allocation tombstones atomically with an entry edit", async () => {
+    const expense = await createEntry(draft({ amount: "20.00", note: "expense" }), database);
+    const refund = await createEntry(draft({ kind: "income", amount: "10.00", note: "refund" }), database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 1_000,
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const editedAt = new Date("2026-07-30T15:30:00.000Z");
+    const nextDraft = draft({ kind: "income", amount: "5.00", note: "refund reduced" });
+    const put = vi.spyOn(database.syncOutbox, "put").mockRejectedValueOnce(new Error("quota"));
+
+    await expect(updateEntry(refund.id, nextDraft, database, editedAt)).rejects.toThrow("quota");
+    expect(await database.entries.get(refund.id)).toMatchObject({ amountMinor: 1_000 });
+    expect(await database.recoveryAllocations.get(allocation.id)).not.toHaveProperty("deletedAt");
+    await expect(database.syncOutbox.count()).resolves.toBe(0);
+
+    put.mockRestore();
+    await updateEntry(refund.id, nextDraft, database, editedAt);
+    expect(await database.syncOutbox.get(`entry:${refund.id}`)).toMatchObject({
+      entityType: "entry",
+      payload: { amountMinor: 500 },
+    });
+    expect(await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`)).toMatchObject({
+      entityType: "recoveryAllocation",
+      payload: {
+        id: allocation.id,
+        amountMinor: 1_000,
+        deletedAt: editedAt.toISOString(),
       },
     });
   });

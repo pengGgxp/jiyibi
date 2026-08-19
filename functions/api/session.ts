@@ -17,6 +17,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
            CASE WHEN
              EXISTS(SELECT 1 FROM ledger_settings WHERE user_id = ? AND account_generation = ?)
              OR EXISTS(SELECT 1 FROM ledger_entries WHERE user_id = ? AND account_generation = ?)
+             OR EXISTS(SELECT 1 FROM balance_adjustments WHERE user_id = ? AND account_generation = ?)
              OR EXISTS(SELECT 1 FROM attachments WHERE user_id = ? AND account_generation = ?)
            THEN 1 ELSE 0 END AS has_data,
            (SELECT COUNT(*) FROM ledger_entries
@@ -27,6 +28,8 @@ export const onRequest: PagesFunction<Env> = async (context) => {
             WHERE user_id = ? AND account_generation = ?) AS cursor`,
       )
       .bind(
+        user.id,
+        syncState.generation,
         user.id,
         syncState.generation,
         user.id,

@@ -15,7 +15,7 @@ import {
   resolvePayCycleRange,
 } from "./date";
 import { calculateLedgerSummary, calculatePayCycleStatus } from "./stats";
-import type { LedgerEntry } from "./types";
+import type { BalanceAdjustment, LedgerEntry } from "./types";
 import { EntryValidationError, validateEntryDraft } from "./validation";
 
 function entry(overrides: Partial<LedgerEntry>): LedgerEntry {
@@ -87,6 +87,45 @@ describe("entry validation and statistics", () => {
       balanceMinor: 11_600,
       monthIncomeMinor: 10_000,
       monthExpenseMinor: 2_500,
+    });
+  });
+
+  it("applies active balance audit events without classifying them as income or expense", () => {
+    const common = {
+      note: "audit",
+      occurredAt: "2026-07-31T04:00:00.000Z",
+      localDateKey: "2026-07-31",
+      localMonthKey: "2026-07",
+      timezoneOffsetMinutes: -480,
+      createdAt: "2026-07-31T04:00:00.000Z",
+      updatedAt: "2026-07-31T04:00:00.000Z",
+    };
+    const adjustments: BalanceAdjustment[] = [{
+      ...common,
+      id: "active",
+      kind: "reconciliation",
+      amountMinor: -400,
+      balanceBeforeMinor: 5_000,
+      observedBalanceMinor: 4_600,
+    }, {
+      ...common,
+      id: "voided",
+      kind: "opening_correction",
+      amountMinor: 5_000,
+      previousOpeningMinor: 0,
+      nextOpeningMinor: 5_000,
+      deletedAt: "2026-07-31T04:00:01.000Z",
+    }];
+
+    expect(calculateLedgerSummary(
+      [entry({ amountMinor: -100 })],
+      { initialBalanceMinor: 5_000 },
+      "2026-07",
+      adjustments,
+    )).toEqual({
+      balanceMinor: 4_500,
+      monthIncomeMinor: 0,
+      monthExpenseMinor: 100,
     });
   });
 });

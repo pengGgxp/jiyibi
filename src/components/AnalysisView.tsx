@@ -7,11 +7,13 @@ import {
   Equal,
   Info,
   ListChecks,
+  Minus,
   Settings2,
   Table2,
   Target,
+  TrendingDown,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Bar,
   BarChart,
@@ -29,7 +31,6 @@ import {
   formatCny,
   type AppSettings,
   type ForecastOutcome,
-  type IncomeScenarioAnalysis,
   type LedgerSummary,
   type PayCyclePlan,
   type SavingsEvent,
@@ -177,6 +178,96 @@ function ChartFrame({ id, title, description, keys, children, table }: ChartFram
   );
 }
 
+function useCompactCharts(): boolean {
+  const query = "(max-width: 39.99rem)";
+  const [compact, setCompact] = useState(() => (
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(query).matches
+      : false
+  ));
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(query);
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  return compact;
+}
+
+function ForecastEquation({
+  label,
+  leftLabel,
+  leftValue,
+  expenseValue,
+  difference,
+}: {
+  label: string;
+  leftLabel: string;
+  leftValue: Amount;
+  expenseValue: Amount;
+  difference?: bigint;
+}) {
+  return (
+    <div
+      className="analysis-equation"
+      role="group"
+      aria-label={`${label}：${leftLabel} ${displayAmount(leftValue)}，减去预计支出 ${displayAmount(expenseValue)}，差额 ${displaySignedAmount(difference)}`}
+    >
+      <strong className="analysis-equation-label">{label}</strong>
+      <div><span>{leftLabel}</span><strong>{displayAmount(leftValue)}</strong></div>
+      <Minus className="analysis-equation-operator" aria-hidden="true" />
+      <div><span>预计支出</span><strong>{displayAmount(expenseValue)}</strong></div>
+      <Equal className="analysis-equation-operator" aria-hidden="true" />
+      <div className={difference !== undefined && difference < 0n ? "is-negative" : "is-result"}>
+        <span>差额</span><strong>{displaySignedAmount(difference)}</strong>
+      </div>
+    </div>
+  );
+}
+
+function daysToCloseShortfall(difference: bigint | undefined, days: number): bigint | undefined {
+  if (difference === undefined || difference >= 0n || days <= 0) return undefined;
+  const shortfall = -difference;
+  return (shortfall + BigInt(days) - 1n) / BigInt(days);
+}
+
+function AnalysisBasis({ analysis }: { analysis: SpendingAnalysis }) {
+  return (
+    <section className="analysis-basis" aria-labelledby="analysis-basis-title">
+      <h3 id="analysis-basis-title">估算依据</h3>
+      <details>
+        <summary>
+          <span>日常 {displayAmount(analysis.includedExpenseMinor)}</span>
+          <span>排除 {displayAmount(analysis.excludedExpenseMinor)}</span>
+          <span>待确认 {analysis.pendingConfirmationCount}</span>
+        </summary>
+        <div className="analysis-basis-detail">
+          <dl>
+            <div><dt>完整日</dt><dd>{analysis.window.observedDays}</dd></div>
+            <div><dt>日均</dt><dd>{displayAmount(analysis.window.averageDailyExpenseMinor)}</dd></div>
+            <div><dt>零支出日</dt><dd>已计入</dd></div>
+          </dl>
+          {analysis.confidence !== "insufficient" ? <p>截至昨天；今天按完整一天估算。</p> : null}
+        </div>
+      </details>
+    </section>
+  );
+}
+
+function SecondaryChart({ compact, label, children }: { compact: boolean; label: string; children: ReactNode }) {
+  if (!compact) return children;
+  return (
+    <details className="analysis-chart-disclosure">
+      <summary><BarChart3 aria-hidden="true" /> {label}</summary>
+      {children}
+    </details>
+  );
+}
+
 function StatePanel({
   kind,
   title,
@@ -293,20 +384,6 @@ function SavingsEventDetails({ events }: { events: readonly SavingsEvent[] }) {
   );
 }
 
-function scenarioVerdict(
-  scenario: IncomeScenarioAnalysis | undefined,
-  referenceSpendMinor: number | undefined,
-): string {
-  if (!scenario) return "数据不足，暂不判断。";
-  if (scenario.affordability === "surplus") {
-    return `预计支出 ${displayAmount(referenceSpendMinor)}，还能剩 ${displayAmount(scenario.differenceMinor)}。`;
-  }
-  if (scenario.affordability === "shortfall") {
-    return `预计支出 ${displayAmount(referenceSpendMinor)}，还差 ${displayAmount(-scenario.differenceMinor)}。`;
-  }
-  return `预计支出 ${displayAmount(referenceSpendMinor)}，刚好够。`;
-}
-
 function goalProgress(
   settings: AppSettings | undefined,
   events: readonly SavingsEvent[],
@@ -359,9 +436,9 @@ function SavingsGoalSection({
         <Metric label="还差" value={displayAmount(progress.remainingMinor)} tone={progress.remainingMinor > 0n ? "pending" : "positive"} />
         {progress.suggestedPerCycleMinor !== undefined ? (
           <Metric
-            label="每期建议"
+            label="每期需存"
             value={displayAmount(progress.suggestedPerCycleMinor)}
-            detail={`剩余 ${progress.remainingPaydayCount} 次到账`}
+            detail={`目标均摊 · 剩余 ${progress.remainingPaydayCount} 次`}
           />
         ) : null}
       </dl>
@@ -395,11 +472,18 @@ export function AnalysisView({
   onOpenIncomeForecast,
   onOpenLedger,
 }: AnalysisViewProps) {
+  const compactCharts = useCompactCharts();
   const activePlan = payCycle ?? settings?.payCycle;
   const progress = analysis?.savingsGoal
     ?? goalProgress(settings, savingsEvents, activePlan?.paydayDay);
   const activeForecast = analysis && settings?.incomeForecast?.targetPaydayDateKey === analysis.nextCycle.cycleStartDateKey
     ? settings.incomeForecast
+    : undefined;
+  const dailyReduction = analysis
+    ? daysToCloseShortfall(
+      analysis.currentCycle.balanceGoalDifferenceMinor,
+      analysis.currentCycle.daysUntilPayday,
+    )
     : undefined;
 
   return (
@@ -418,10 +502,6 @@ export function AnalysisView({
         <StatePanel kind="error" title="分析不可用" message={errorMessage(error)} actionLabel="返回记账" onAction={onOpenLedger} />
       ) : (
         <>
-          {progress ? <SavingsGoalSection progress={progress} events={savingsEvents} /> : settings?.savingsGoalNeedsSetup ? (
-            <StatePanel kind="empty" title="重设目标" message="旧周期目标无法自动转换，请重新填写。" actionLabel="返回记账" onAction={onOpenLedger} />
-          ) : null}
-
           {!activePlan ? (
             <StatePanel kind="empty" title="设置发薪日" message="设置后才能估算到账前后是否够花。" actionLabel="设置发薪日" onAction={onOpenSettings} />
           ) : !analysis ? (
@@ -449,9 +529,9 @@ export function AnalysisView({
                     <div className="analysis-verdict-label"><StatusIcon value={analysis.nextCycle.expectedIncomeScenario?.affordability} /> 下次收入</div>
                     {activeForecast ? (
                       <>
-                        <strong>{displayAmount(activeForecast.expectedIncomeMinor)}</strong>
-                        <p>{scenarioVerdict(analysis.nextCycle.expectedIncomeScenario, analysis.nextCycle.referenceSpendMinor)}</p>
-                        <small>{analysis.nextCycle.days} 天</small>
+                        <strong>{affordabilityLabel(analysis.nextCycle.expectedIncomeScenario?.affordability)}</strong>
+                        <p>{displaySignedAmount(analysis.nextCycle.expectedIncomeScenario?.differenceMinor)}</p>
+                        <small>预计 {displayAmount(activeForecast.expectedIncomeMinor)} · {analysis.nextCycle.days} 天</small>
                       </>
                     ) : (
                       <button type="button" className="secondary-button analysis-income-action" onClick={onOpenIncomeForecast}>填写预计</button>
@@ -460,31 +540,46 @@ export function AnalysisView({
                 </div>
               </section>
 
-              <section className="analysis-metrics-section" aria-labelledby="analysis-data-title">
-                <div className="analysis-section-heading"><h3 id="analysis-data-title">关键数据</h3></div>
-                <dl className="analysis-metrics">
-                  <Metric label="可花余额" value={displayAmount(analysis.currentCycle.spendableBalanceMinor ?? analysis.currentCycle.safeToSpendMinor)} />
+              <section className="analysis-funds" aria-labelledby="analysis-funds-title">
+                <div className="analysis-section-heading">
+                  <h3 id="analysis-funds-title">资金推导</h3>
+                  {dailyReduction !== undefined ? (
+                    <p className="analysis-daily-reduction"><TrendingDown aria-hidden="true" /> 每天少花 {displayAmount(dailyReduction)}</p>
+                  ) : null}
+                </div>
+                <div className="analysis-equations">
+                  <ForecastEquation
+                    label="到下次"
+                    leftLabel="可花余额"
+                    leftValue={analysis.currentCycle.spendableBalanceMinor ?? analysis.currentCycle.safeToSpendMinor}
+                    expenseValue={analysis.currentCycle.estimatedRemainingExpenseMinor}
+                    difference={analysis.currentCycle.balanceGoalDifferenceMinor}
+                  />
+                  {activeForecast ? (
+                    <ForecastEquation
+                      label="下次收入"
+                      leftLabel="预计收入"
+                      leftValue={activeForecast.expectedIncomeMinor}
+                      expenseValue={analysis.nextCycle.referenceSpendMinor}
+                      difference={analysis.nextCycle.expectedIncomeScenario?.differenceMinor}
+                    />
+                  ) : null}
+                </div>
+                <dl className="analysis-metrics analysis-supporting-metrics">
                   <Metric label="总余额" value={summary ? displayAmount(summary.balanceMinor) : "—"} />
                   <Metric label="已存" value={displayAmount(analysis.retainedSavings?.totalRetainedMinor ?? 0n)} />
-                  <Metric label="到下次差额" value={displaySignedAmount(analysis.currentCycle.balanceGoalDifferenceMinor)} tone={analysis.currentCycle.affordability === "shortfall" ? "negative" : "positive"} />
-                  <Metric label="收入差额" value={displaySignedAmount(analysis.nextCycle.expectedIncomeScenario?.differenceMinor)} tone={analysis.nextCycle.expectedIncomeScenario?.affordability === "shortfall" ? "negative" : "positive"} />
-                  <Metric label="近日日均" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`${analysis.window.observedDays} 个完整日`} />
-                  <Metric label="本周期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} />
+                  <Metric label="本期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} />
                   <Metric label="本月收入" value={summary ? displayAmount(summary.monthIncomeMinor) : "—"} tone="positive" />
                   <Metric label="本月支出" value={summary ? displayAmount(summary.monthExpenseMinor) : "—"} tone="negative" />
+                  <Metric label="近日均" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`${analysis.window.observedDays} 个完整日`} />
                 </dl>
               </section>
 
-              {analysis.confidence !== "insufficient" ? (
-                <section className="analysis-insight-strip" aria-label="统计口径">
-                  <ListChecks aria-hidden="true" />
-                  <p>截至昨天的 {analysis.window.observedDays} 个完整日，包含 0 支出日；今天按完整一天估算。</p>
-                </section>
-              ) : null}
+              <AnalysisBasis analysis={analysis} />
 
               <ChartFrame
                 id="current-cycle-chart"
-                title="当前周期支出"
+                title="本期支出"
                 description={`已支出 ${displayAmount(analysis.currentCycle.actualExpenseMinor)}。`}
                 keys={<><ChartKey kind="actual">实际支出</ChartKey><ChartKey kind="predicted">预测支出</ChartKey></>}
                 table={<CurrentCycleTable analysis={analysis} />}
@@ -504,48 +599,56 @@ export function AnalysisView({
               </ChartFrame>
 
               <div className="analysis-chart-grid">
-                <ChartFrame
-                  id="completed-cycle-chart"
-                  title="完整周期支出"
-                  description={analysis.completedCycles.length ? `最近 ${analysis.completedCycles.length} 个完整周期。` : undefined}
-                  keys={<ChartKey kind="expense">实际支出</ChartKey>}
-                  table={<CompletedCyclesTable analysis={analysis} />}
-                >
-                  {analysis.completedCycles.length ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={analysis.completedCycles.map((cycle) => ({ ...cycle, dateLabel: `${shortDate(cycle.cycleStartDateKey)}–${shortDate(cycle.cycleEndDateKey)}` }))} margin={{ top: 18, right: 8, left: 4, bottom: 24 }} accessibilityLayer aria-labelledby="completed-cycle-chart-title" aria-describedby="completed-cycle-chart-description">
-                        <CartesianGrid stroke="var(--line)" strokeDasharray="2 4" vertical={false} />
-                        <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} interval="preserveStartEnd" angle={-18} textAnchor="end" height={42} />
-                        <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
-                        <Tooltip formatter={(value) => tooltipAmount(value)} />
-                        <Bar dataKey="expenseMinor" name="实际支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : <p className="analysis-chart-empty">暂无完整周期数据。</p>}
-                </ChartFrame>
+                <SecondaryChart compact={compactCharts} label="历史支出">
+                  <ChartFrame
+                    id="completed-cycle-chart"
+                    title="历史支出"
+                    description={analysis.completedCycles.length ? `最近 ${analysis.completedCycles.length} 个完整周期。` : undefined}
+                    keys={<ChartKey kind="expense">实际支出</ChartKey>}
+                    table={<CompletedCyclesTable analysis={analysis} />}
+                  >
+                    {analysis.completedCycles.length ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={analysis.completedCycles.map((cycle) => ({ ...cycle, dateLabel: `${shortDate(cycle.cycleStartDateKey)}–${shortDate(cycle.cycleEndDateKey)}` }))} margin={{ top: 18, right: 8, left: 4, bottom: 24 }} accessibilityLayer aria-labelledby="completed-cycle-chart-title" aria-describedby="completed-cycle-chart-description">
+                          <CartesianGrid stroke="var(--line)" strokeDasharray="2 4" vertical={false} />
+                          <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} interval="preserveStartEnd" angle={-18} textAnchor="end" height={42} />
+                          <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
+                          <Tooltip formatter={(value) => tooltipAmount(value)} />
+                          <Bar dataKey="expenseMinor" name="实际支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : <p className="analysis-chart-empty">暂无完整周期数据。</p>}
+                  </ChartFrame>
+                </SecondaryChart>
 
-                <ChartFrame
-                  id="daily-expense-chart"
-                  title={analysis.dailyExpenses.length ? `近 ${analysis.window.observedDays} 日支出` : "每日支出"}
-                  description={analysis.dailyExpenses.length ? `${analysis.window.observedDays} 个完整日共支出 ${displayAmount(analysis.window.totalExpenseMinor)}。` : undefined}
-                  keys={<ChartKey kind="expense">每日支出</ChartKey>}
-                  table={<DailyExpensesTable analysis={analysis} />}
-                >
-                  {analysis.dailyExpenses.length ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={analysis.dailyExpenses.map((day) => ({ ...day, dateLabel: shortDate(day.dateKey) }))} margin={{ top: 18, right: 8, left: 4, bottom: 4 }} accessibilityLayer aria-labelledby="daily-expense-chart-title" aria-describedby="daily-expense-chart-description">
-                        <CartesianGrid stroke="var(--line)" strokeDasharray="2 4" vertical={false} />
-                        <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} minTickGap={12} />
-                        <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
-                        <Tooltip formatter={(value) => tooltipAmount(value)} labelFormatter={(label) => `日期 ${label}`} />
-                        <Bar dataKey="expenseMinor" name="每日支出" fill="var(--expense)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  ) : <p className="analysis-chart-empty">暂无完整日数据。</p>}
-                </ChartFrame>
+                <SecondaryChart compact={compactCharts} label="每日支出">
+                  <ChartFrame
+                    id="daily-expense-chart"
+                    title="每日支出"
+                    description={analysis.dailyExpenses.length ? `${analysis.window.observedDays} 个完整日共支出 ${displayAmount(analysis.window.totalExpenseMinor)}。` : undefined}
+                    keys={<ChartKey kind="expense">每日支出</ChartKey>}
+                    table={<DailyExpensesTable analysis={analysis} />}
+                  >
+                    {analysis.dailyExpenses.length ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={analysis.dailyExpenses.map((day) => ({ ...day, dateLabel: shortDate(day.dateKey) }))} margin={{ top: 18, right: 8, left: 4, bottom: 4 }} accessibilityLayer aria-labelledby="daily-expense-chart-title" aria-describedby="daily-expense-chart-description">
+                          <CartesianGrid stroke="var(--line)" strokeDasharray="2 4" vertical={false} />
+                          <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} minTickGap={12} />
+                          <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
+                          <Tooltip formatter={(value) => tooltipAmount(value)} labelFormatter={(label) => `日期 ${label}`} />
+                          <Bar dataKey="expenseMinor" name="每日支出" fill="var(--expense)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : <p className="analysis-chart-empty">暂无完整日数据。</p>}
+                  </ChartFrame>
+                </SecondaryChart>
               </div>
+
             </>
           )}
+          {progress ? <SavingsGoalSection progress={progress} events={savingsEvents} /> : settings?.savingsGoalNeedsSetup ? (
+            <StatePanel kind="empty" title="重设目标" message="旧周期目标无法自动转换，请重新填写。" actionLabel="返回记账" onAction={onOpenLedger} />
+          ) : null}
         </>
       )}
     </div>

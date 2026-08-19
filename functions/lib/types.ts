@@ -87,10 +87,36 @@ export interface SavingsEventPayload {
   deletedAt?: string;
 }
 
+interface BalanceAdjustmentBasePayload {
+  id: string;
+  amountMinor: number;
+  note: string;
+  occurredAt: string;
+  localDateKey: string;
+  localMonthKey: string;
+  timezoneOffsetMinutes: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export type BalanceAdjustmentPayload =
+  | BalanceAdjustmentBasePayload & {
+      kind: "reconciliation";
+      balanceBeforeMinor: number;
+      observedBalanceMinor: number;
+    }
+  | BalanceAdjustmentBasePayload & {
+      kind: "opening_correction";
+      previousOpeningMinor: number;
+      nextOpeningMinor: number;
+    };
+
 export interface AppSettingsPayload {
   id: "primary";
   currency: "CNY";
   initialBalanceMinor: number;
+  initialBalanceLockedAt?: string;
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlanPayload;
   incomeForecast?: IncomeForecastPayload;
@@ -164,6 +190,7 @@ export interface LegacyAppSettingsPayload
     | "savingsGoal"
     | "lastExpectedIncomeMinor"
     | "savingsGoalNeedsSetup"
+    | "initialBalanceLockedAt"
   > {
   payCycle?: LegacyPayCyclePlanPayload;
 }
@@ -178,6 +205,7 @@ export interface SettingsMutationPayload
     | "savingsGoal"
     | "lastExpectedIncomeMinor"
     | "savingsGoalNeedsSetup"
+    | "initialBalanceLockedAt"
   > {
   monthEndBalanceGoalMinor?: number | null;
   payCycle?: PayCyclePlanPayload | V6PayCyclePlanPayload | LegacyPayCyclePlanPayload | null;
@@ -186,11 +214,17 @@ export interface SettingsMutationPayload
   savingsGoal?: SavingsGoalPayload | null;
   lastExpectedIncomeMinor?: number | null;
   savingsGoalNeedsSetup?: true | null;
+  initialBalanceLockedAt?: string;
   incomeConfirmation?: IncomeConfirmationPayload;
 }
 
-export type SyncEntityType = "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+export type SyncEntityType =
+  | "entry"
+  | "settings"
+  | "recoveryAllocation"
+  | "savingsEvent"
+  | "balanceAdjustment";
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 interface SyncMutationBase {
   id: string;
@@ -208,6 +242,10 @@ export type SyncMutation =
   | SyncMutationBase & {
       entityType: "savingsEvent";
       payload: SavingsEventPayload;
+    }
+  | SyncMutationBase & {
+      entityType: "balanceAdjustment";
+      payload: BalanceAdjustmentPayload;
     };
 
 export interface SyncRequestBody {
@@ -226,7 +264,8 @@ export interface RemoteChange {
     | SyncAppSettingsPayload
     | LegacyAppSettingsPayload
     | RecoveryAllocationPayload
-    | SavingsEventPayload;
+    | SavingsEventPayload
+    | BalanceAdjustmentPayload;
 }
 
 export type MutationResult =

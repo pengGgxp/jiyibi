@@ -145,6 +145,37 @@ export type SavingsEvent =
   | ReleaseSavingsEvent
   | CycleSettlementSavingsEvent;
 
+interface BalanceAdjustmentBase {
+  id: string;
+  amountMinor: number;
+  note: string;
+  occurredAt: string;
+  localDateKey: string;
+  localMonthKey: string;
+  timezoneOffsetMinutes: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+/** Aligns the book balance with the user's observed total available funds. */
+export interface ReconciliationBalanceAdjustment extends BalanceAdjustmentBase {
+  kind: "reconciliation";
+  balanceBeforeMinor: number;
+  observedBalanceMinor: number;
+}
+
+/** Corrects the effective opening balance without rewriting the original setting. */
+export interface OpeningCorrectionBalanceAdjustment extends BalanceAdjustmentBase {
+  kind: "opening_correction";
+  previousOpeningMinor: number;
+  nextOpeningMinor: number;
+}
+
+export type BalanceAdjustment =
+  | ReconciliationBalanceAdjustment
+  | OpeningCorrectionBalanceAdjustment;
+
 /** Reusable result of folding active savings events. */
 export interface RetainedSavingsSummary {
   openingRetainedMinor: bigint;
@@ -206,6 +237,8 @@ export interface AppSettings {
   id: "primary";
   currency: "CNY";
   initialBalanceMinor: number;
+  /** Once set, the original opening balance can only be corrected by an audit event. */
+  initialBalanceLockedAt?: string;
   /** Legacy v2 natural-month goal. Kept only for sync and backup compatibility. */
   monthEndBalanceGoalMinor?: number;
   payCycle?: PayCyclePlan;

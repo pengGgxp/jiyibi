@@ -528,7 +528,6 @@ describe("v6 savings goal data layer", () => {
     const local = await recordActualIncome(75_000, database, new Date(2026, 7, 10, 9));
     const sent = (await pendingIncomeConfirmation(database))!;
 
-    await setInitialBalance(12_345, database, new Date(2026, 7, 10, 9, 1));
     await setSavingsGoal(
       { targetDateKey: "2026-12-31", targetMinor: 100_000 },
       database,
@@ -553,7 +552,7 @@ describe("v6 savings goal data layer", () => {
     expect(await database.syncOutbox.get("settings:primary")).toMatchObject({
       baseVersion: 2,
       payload: {
-        initialBalanceMinor: 12_345,
+        initialBalanceMinor: 0,
         savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 100_000 },
       },
     });
@@ -730,7 +729,11 @@ describe("v6 savings goal data layer", () => {
     }, database, setup);
     const local = await recordActualIncome(75_000, database, new Date(2026, 7, 10, 9));
     const sent = (await pendingIncomeConfirmation(database))!;
-    await setInitialBalance(12_345, database, new Date(2026, 7, 10, 9, 1));
+    await setSavingsGoal(
+      { targetDateKey: "2026-12-31", targetMinor: 100_000 },
+      database,
+      new Date(2026, 7, 10, 9, 1),
+    );
     const pendingSettings = (await database.syncOutbox.get("settings:primary"))!;
 
     await markPushResults([sent], [{
@@ -749,7 +752,7 @@ describe("v6 savings goal data layer", () => {
 
     const remoteSettings: AppSettings = {
       ...(await getSettings(database)),
-      initialBalanceMinor: 0,
+      savingsGoal: { targetDateKey: "2027-06-30", targetMinor: 200_000 },
       lastExpectedIncomeMinor: 80_000,
       updatedAt: "2026-08-10T01:00:00.000Z",
     };
@@ -763,8 +766,8 @@ describe("v6 savings goal data layer", () => {
     }], "1", database);
 
     await expect(database.syncConflicts.get("settings:primary")).resolves.toMatchObject({
-      localPayload: { initialBalanceMinor: 12_345 },
-      remotePayload: { initialBalanceMinor: 0 },
+      localPayload: { savingsGoal: { targetDateKey: "2026-12-31", targetMinor: 100_000 } },
+      remotePayload: { savingsGoal: { targetDateKey: "2027-06-30", targetMinor: 200_000 } },
       remoteVersion: 2,
     });
   });

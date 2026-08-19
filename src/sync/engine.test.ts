@@ -198,7 +198,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 7,
+      schemaVersion: SYNC_SCHEMA_VERSION,
       mutations: [expect.objectContaining({
         entityType: "recoveryAllocation",
         entityId: allocation.id,
@@ -233,7 +233,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 7,
+      schemaVersion: SYNC_SCHEMA_VERSION,
       mutations: [expect.objectContaining({
         entityType: "savingsEvent",
         entityId: event.id,
@@ -671,9 +671,108 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     const request = vi.mocked(api.sync).mock.calls[0][0];
-    expect(request.schemaVersion).toBe(7);
+    expect(request.schemaVersion).toBe(SYNC_SCHEMA_VERSION);
     expect(request.mutations[0]).toMatchObject({ entityType: "settings" });
     expect(request.mutations[0].payload).not.toHaveProperty("monthEndBalanceGoalMinor");
+  });
+
+  it("pushes invalidated allocation tombstones before editing their linked entry", async () => {
+    const expense = await createEntry(draft(), database);
+    const refund = await createEntry({ ...draft(), kind: "income" }, database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    await database.entitySyncState.bulkPut([
+      {
+        id: `entry:${refund.id}`,
+        entityType: "entry",
+        entityId: refund.id,
+        serverVersion: 1,
+        status: "clean",
+        updatedAt: "2026-07-30T13:59:00.000Z",
+      },
+      {
+        id: `recoveryAllocation:${allocation.id}`,
+        entityType: "recoveryAllocation",
+        entityId: allocation.id,
+        serverVersion: 1,
+        status: "clean",
+        updatedAt: "2026-07-30T13:59:00.000Z",
+      },
+    ]);
+    await updateEntry(refund.id, {
+      ...draft(),
+      kind: "income",
+      amount: "4.00",
+    }, database, new Date("2026-07-30T14:00:00.000Z"));
+    const allocationMutation = (await database.syncOutbox.get(
+      `recoveryAllocation:${allocation.id}`,
+    ))!;
+    const entryMutation = (await database.syncOutbox.get(`entry:${refund.id}`))!;
+    const api = apiClient(emptyResponse({
+      results: [
+        { id: allocationMutation.id, status: "applied", version: 2 },
+        { id: entryMutation.id, status: "applied", version: 2 },
+      ],
+      nextCursor: "2",
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      mutations: [
+        expect.objectContaining({
+          entityType: "recoveryAllocation",
+          entityId: allocation.id,
+          payload: expect.objectContaining({ deletedAt: "2026-07-30T14:00:00.000Z" }),
+        }),
+        expect.objectContaining({
+          entityType: "entry",
+          entityId: refund.id,
+          payload: expect.objectContaining({ amountMinor: 400 }),
+        }),
+      ],
+    }), 1);
+  });
+
+  it("preserves the permanent opening-balance lock in v8 settings mutations", async () => {
+    await linkSyncAccount(session(), true, database);
+    const lockedAt = "2026-08-10T00:00:00.000Z";
+    const settings = {
+      ...(await database.settings.get("primary"))!,
+      initialBalanceLockedAt: lockedAt,
+      updatedAt: lockedAt,
+    };
+    await database.settings.put(settings);
+    await database.syncOutbox.put({
+      entityKey: "settings:primary",
+      id: "mutation_locked_settings",
+      entityType: "settings",
+      entityId: "primary",
+      baseVersion: 0,
+      payload: settings,
+      createdAt: lockedAt,
+      updatedAt: lockedAt,
+    });
+    const api = apiClient(emptyResponse({
+      results: [{ id: "mutation_locked_settings", status: "applied", version: 1 }],
+    }));
+
+    await syncNow(database, api);
+
+    expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: SYNC_SCHEMA_VERSION,
+      mutations: [expect.objectContaining({
+        entityType: "settings",
+        payload: expect.objectContaining({ initialBalanceLockedAt: lockedAt }),
+      })],
+    }), 1);
   });
 
   it("sends an explicit null only when the user clears the pay cycle", async () => {
@@ -691,7 +790,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 7,
+      schemaVersion: SYNC_SCHEMA_VERSION,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
@@ -722,7 +821,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 7,
+      schemaVersion: SYNC_SCHEMA_VERSION,
       mutations: [expect.objectContaining({
         entityType: "settings",
         payload: expect.objectContaining({
@@ -775,7 +874,7 @@ describe("sync engine", () => {
     await syncNow(database, api);
 
     expect(api.sync).toHaveBeenCalledWith(expect.objectContaining({
-      schemaVersion: 7,
+      schemaVersion: SYNC_SCHEMA_VERSION,
       cursor: "0",
       mutations: [],
     }), 1);
@@ -790,7 +889,7 @@ describe("sync engine", () => {
     });
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 7,
+      syncProtocolVersion: SYNC_SCHEMA_VERSION,
     });
     expect(await database.syncState.get("primary")).not.toHaveProperty(
       "syncProtocolRefreshPending",
@@ -866,7 +965,7 @@ describe("sync engine", () => {
     expect(await database.syncOutbox.get("settings:primary")).toBeUndefined();
     expect(await database.syncState.get("primary")).toMatchObject({
       cursor: "9",
-      syncProtocolVersion: 7,
+      syncProtocolVersion: SYNC_SCHEMA_VERSION,
     });
   });
 

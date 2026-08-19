@@ -1,5 +1,6 @@
 import { ApiError } from "./errors";
 import type {
+  BalanceAdjustmentPayload,
   IncomeConfirmationPayload,
   LedgerEntryPayload,
   RecoveryAllocationPayload,
@@ -73,6 +74,8 @@ const ENTRY_TREATMENTS = new Set([
 ]);
 const CONFIRMATION_STATUSES = new Set(["not_needed", "pending", "confirmed"]);
 const SAVINGS_EVENT_KINDS = new Set(["opening", "reserve", "release", "cycle_settlement"]);
+const BALANCE_ADJUSTMENT_KINDS = new Set(["reconciliation", "opening_correction"]);
+const BALANCE_ADJUSTMENT_UNDO_WINDOW_MS = 8_000;
 
 function treatmentMatchesAmount(treatment: unknown, amountMinor: number): boolean {
   if (treatment === "account_transfer") return amountMinor !== 0;
@@ -299,6 +302,89 @@ function validateSavingsEventPayload(
   return event;
 }
 
+function validateBalanceAdjustmentPayload(
+  value: unknown,
+  entityId: string,
+): BalanceAdjustmentPayload {
+  const commonRequired = [
+    "id",
+    "kind",
+    "amountMinor",
+    "note",
+    "occurredAt",
+    "localDateKey",
+    "localMonthKey",
+    "timezoneOffsetMinutes",
+    "createdAt",
+    "updatedAt",
+  ] as const;
+  if (!isRecord(value) || !BALANCE_ADJUSTMENT_KINDS.has(value.kind as string)) {
+    throw new ApiError(
+      400,
+      "invalid_balance_adjustment",
+      "Balance adjustment payload is invalid",
+    );
+  }
+  const isReconciliation = value.kind === "reconciliation";
+  const variantFields = isReconciliation
+    ? ["balanceBeforeMinor", "observedBalanceMinor"] as const
+    : ["previousOpeningMinor", "nextOpeningMinor"] as const;
+  if (!hasOnlyKeys(value, [...commonRequired, ...variantFields], ["deletedAt"])) {
+    throw new ApiError(
+      400,
+      "invalid_balance_adjustment",
+      "Balance adjustment payload has invalid fields",
+    );
+  }
+  const adjustment = value as unknown as BalanceAdjustmentPayload;
+  const beforeMinor = isReconciliation
+    ? Number((adjustment as Extract<BalanceAdjustmentPayload, { kind: "reconciliation" }>).balanceBeforeMinor)
+    : Number((adjustment as Extract<BalanceAdjustmentPayload, { kind: "opening_correction" }>).previousOpeningMinor);
+  const afterMinor = isReconciliation
+    ? Number((adjustment as Extract<BalanceAdjustmentPayload, { kind: "reconciliation" }>).observedBalanceMinor)
+    : Number((adjustment as Extract<BalanceAdjustmentPayload, { kind: "opening_correction" }>).nextOpeningMinor);
+  const difference = afterMinor - beforeMinor;
+  if (
+    !isValidId(adjustment.id) ||
+    adjustment.id !== entityId ||
+    !Number.isSafeInteger(adjustment.amountMinor) ||
+    adjustment.amountMinor === 0 ||
+    Math.abs(adjustment.amountMinor) > MAX_AMOUNT_MINOR ||
+    !Number.isSafeInteger(beforeMinor) ||
+    Math.abs(beforeMinor) > MAX_AMOUNT_MINOR ||
+    !Number.isSafeInteger(afterMinor) ||
+    Math.abs(afterMinor) > MAX_AMOUNT_MINOR ||
+    !Number.isSafeInteger(difference) ||
+    Math.abs(difference) > MAX_AMOUNT_MINOR ||
+    adjustment.amountMinor !== difference ||
+    typeof adjustment.note !== "string" ||
+    adjustment.note.length > 200 ||
+    !isIsoDate(adjustment.occurredAt) ||
+    !isLocalDateKey(adjustment.localDateKey) ||
+    typeof adjustment.localMonthKey !== "string" ||
+    !/^\d{4}-\d{2}$/.test(adjustment.localMonthKey) ||
+    !Number.isInteger(adjustment.timezoneOffsetMinutes) ||
+    Math.abs(adjustment.timezoneOffsetMinutes) > MAX_TIMEZONE_OFFSET_MINUTES ||
+    !hasConsistentLocalDate(adjustment as unknown as LedgerEntryPayload) ||
+    !isIsoDate(adjustment.createdAt) ||
+    !isIsoDate(adjustment.updatedAt) ||
+    (adjustment.deletedAt !== undefined && !isIsoDate(adjustment.deletedAt)) ||
+    new Date(adjustment.updatedAt).getTime() < new Date(adjustment.createdAt).getTime() ||
+    (adjustment.deletedAt !== undefined && (
+      adjustment.deletedAt !== adjustment.updatedAt ||
+      new Date(adjustment.deletedAt).getTime() - new Date(adjustment.createdAt).getTime() >
+        BALANCE_ADJUSTMENT_UNDO_WINDOW_MS
+    ))
+  ) {
+    throw new ApiError(
+      400,
+      "invalid_balance_adjustment",
+      "Balance adjustment payload is invalid",
+    );
+  }
+  return adjustment;
+}
+
 function validateSettingsPayload(
   value: unknown,
   entityId: string,
@@ -320,14 +406,24 @@ function validateSettingsPayload(
             "incomeForecast",
             "savingsTargetOverride",
             ]
-            : [
+            : protocolVersion === 7
+              ? [
               "payCycle",
               "incomeForecast",
               "savingsGoal",
               "lastExpectedIncomeMinor",
               "savingsGoalNeedsSetup",
               "incomeConfirmation",
-            ];
+              ]
+              : [
+                "payCycle",
+                "incomeForecast",
+                "savingsGoal",
+                "lastExpectedIncomeMinor",
+                "savingsGoalNeedsSetup",
+                "incomeConfirmation",
+                "initialBalanceLockedAt",
+              ];
   if (!isRecord(value) || !hasOnlyKeys(value, required, optional)) {
     throw new ApiError(400, "invalid_settings", "Settings payload has invalid fields");
   }
@@ -339,6 +435,7 @@ function validateSettingsPayload(
   const hasLastExpectedIncome = Object.hasOwn(settings, "lastExpectedIncomeMinor");
   const hasSavingsGoalNeedsSetup = Object.hasOwn(settings, "savingsGoalNeedsSetup");
   const hasIncomeConfirmation = Object.hasOwn(settings, "incomeConfirmation");
+  const hasInitialBalanceLock = Object.hasOwn(settings, "initialBalanceLockedAt");
   if (
     entityId !== "primary" ||
     settings.id !== "primary" ||
@@ -346,6 +443,9 @@ function validateSettingsPayload(
     settings.schemaVersion !== 1 ||
     !Number.isSafeInteger(settings.initialBalanceMinor) ||
     Math.abs(settings.initialBalanceMinor) > MAX_AMOUNT_MINOR ||
+    (hasInitialBalanceLock &&
+      (settings.initialBalanceLockedAt === undefined ||
+        !isIsoDate(settings.initialBalanceLockedAt))) ||
     (settings.monthEndBalanceGoalMinor !== undefined &&
       settings.monthEndBalanceGoalMinor !== null &&
       (!Number.isSafeInteger(settings.monthEndBalanceGoalMinor) ||
@@ -518,7 +618,7 @@ function isValidIncomeConfirmation(value: unknown): value is IncomeConfirmationP
       new Date(entry.occurredAt).getTime() <= new Date(value.confirmedAt).getTime() &&
       entry.attachmentId === undefined &&
       entry.treatment === "ordinary_income" &&
-      entry.confirmationStatus === "not_needed" &&
+      (entry.confirmationStatus === "not_needed" || entry.confirmationStatus === "confirmed") &&
       entry.deletedAt === undefined;
   } catch {
     return false;
@@ -544,7 +644,8 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
   if (
     (value.entityType !== "entry" && value.entityType !== "settings" &&
       (protocolVersion < 5 || value.entityType !== "recoveryAllocation") &&
-      (protocolVersion < 6 || value.entityType !== "savingsEvent")) ||
+      (protocolVersion < 6 || value.entityType !== "savingsEvent") &&
+      (protocolVersion < 8 || value.entityType !== "balanceAdjustment")) ||
     !Number.isSafeInteger(value.baseVersion) ||
     Number(value.baseVersion) < 0 ||
     Number(value.baseVersion) > MAX_VERSION
@@ -588,6 +689,26 @@ function validateMutation(value: unknown, protocolVersion: SyncProtocolVersion):
       payload: validateSavingsEventPayload(value.payload, entityId),
     };
   }
+  if (value.entityType === "balanceAdjustment") {
+    if (!isValidId(entityId)) {
+      throw new ApiError(400, "invalid_mutation", "Balance adjustment ID is invalid");
+    }
+    const payload = validateBalanceAdjustmentPayload(value.payload, entityId);
+    if (Number(value.baseVersion) > 0 && payload.deletedAt === undefined) {
+      throw new ApiError(
+        400,
+        "invalid_balance_adjustment",
+        "Balance adjustments can only be voided after creation",
+      );
+    }
+    return {
+      id: value.id,
+      entityType: "balanceAdjustment",
+      entityId,
+      baseVersion: Number(value.baseVersion),
+      payload,
+    };
+  }
   if (entityId !== "primary") {
     throw new ApiError(400, "invalid_mutation", "Settings mutation ID is invalid");
   }
@@ -608,7 +729,7 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
       value.schemaVersion !== 3 && value.schemaVersion !== 4 &&
       value.schemaVersion !== 5 && value.schemaVersion !== 6 &&
-      value.schemaVersion !== 7)
+      value.schemaVersion !== 7 && value.schemaVersion !== 8)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

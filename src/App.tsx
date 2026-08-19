@@ -14,8 +14,10 @@ import {
 import { lazy, Suspense, useEffect, useRef, useState, type MouseEvent } from "react";
 import {
   createEntry,
+  confirmTreatmentWithAllocations,
   purgeDeletedEntries,
   purgeDeletedEntry,
+  softDeleteBalanceAdjustment,
   softDeleteEntry,
   undoDeleteEntry,
   updateEntry,
@@ -25,21 +27,26 @@ import {
   affectsBookBalance,
   calculateRetainedSavingsSummary,
   currentLocalDateKey,
+  derivePendingItems,
   evaluateExceptionPrompt,
+  filterSnoozedPendingItems,
   payCyclePlanFromSettings,
   type EntryDraft,
   type EntryTreatment,
+  type BalanceAdjustment,
   type LedgerEntry,
 } from "./domain";
 import { EditEntryDialog } from "./components/EditEntryDialog";
+import { BalanceAdjustmentDialog, type BalanceEditorMode } from "./components/BalanceAdjustmentDialog";
 import { EntryComposer } from "./components/EntryComposer";
 import {
   IncomeForecastDialog,
   type IncomeDialogMode,
 } from "./components/IncomeForecastDialog";
 import { PrimaryNavigation } from "./components/PrimaryNavigation";
+import { PendingQueue } from "./components/PendingQueue";
 import { RecordList } from "./components/RecordList";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsDialog, type SettingsPane } from "./components/SettingsDialog";
 import {
   SavingsDialog,
   type SavingsDialogMode,
@@ -51,9 +58,12 @@ import { UndoToasts, type PendingDeletion } from "./components/UndoToasts";
 import { useLedger } from "./hooks/useLedger";
 import { useCloudSync } from "./hooks/useCloudSync";
 import { usePwa } from "./hooks/usePwa";
+import { usePendingDismissals } from "./hooks/usePendingDismissals";
 import { useHashView } from "./hooks/useHashView";
 import type { CloudSyncPhase } from "./components/CloudSyncSection";
 import type { ExceptionPromptKind } from "./domain/exception-prompt";
+import type { RecoveryAllocationSelection } from "./components/TreatmentConfirmationDialog";
+import { requestPersistentStorage } from "./lib/storage";
 
 const AnalysisView = lazy(async () => {
   const module = await import("./components/AnalysisView");
@@ -109,8 +119,9 @@ export default function App() {
   const [view, navigate] = useHashView();
   const [editingEntry, setEditingEntry] = useState<LedgerEntry>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPane, setSettingsPane] = useState<SettingsPane>("ledger");
+  const [balanceEditorMode, setBalanceEditorMode] = useState<BalanceEditorMode>();
   const [incomeDialogMode, setIncomeDialogMode] = useState<IncomeDialogMode>();
-  const [incomeReminderDismissed, setIncomeReminderDismissed] = useState(false);
   const [savingsDialogMode, setSavingsDialogMode] = useState<SavingsDialogMode>();
   const [savingsGoalOpen, setSavingsGoalOpen] = useState(false);
   const [savingsPrompt, setSavingsPrompt] = useState<{
@@ -126,20 +137,18 @@ export default function App() {
   }>();
   const [treatmentBusy, setTreatmentBusy] = useState(false);
   const [treatmentError, setTreatmentError] = useState<string>();
+  const [adjustmentUndo, setAdjustmentUndo] = useState<BalanceAdjustment>();
   const deletionTimers = useRef(new Map<string, number>());
   const noticeTimer = useRef<number | undefined>(undefined);
+  const adjustmentUndoTimer = useRef<number | undefined>(undefined);
+  const persistenceAttempted = useRef(false);
   const previousView = useRef(view);
   const incomeForecast = ledger.settings?.incomeForecast;
   const todayDateKey = currentLocalDateKey();
+  const { dismissals, snooze: snoozePending } = usePendingDismissals(todayDateKey);
   const activePayCycle = ledger.settings
     ? payCyclePlanFromSettings(ledger.settings)
     : undefined;
-  const dueIncomeForecast = incomeForecast && incomeForecast.targetPaydayDateKey <= todayDateKey
-    ? incomeForecast
-    : undefined;
-  const pendingConfirmations = ledger.entries.filter(
-    (entry) => entry.confirmationStatus === "pending",
-  );
   const retainedSavings = calculateRetainedSavingsSummary(ledger.savingsEvents);
   const retainedMinor = ledger.analysis?.currentCycle.retainedBalanceMinor
     ?? retainedSavings.totalRetainedMinor;
@@ -147,6 +156,19 @@ export default function App() {
   const openingSavingsMinor = ledger.savingsEvents.find(
     (event) => event.kind === "opening",
   )?.amountMinor ?? 0;
+  const hasLedgerFacts = Boolean(ledger.settings?.initialBalanceLockedAt)
+    || ledger.entries.length > 0
+    || ledger.savingsEvents.length > 0
+    || ledger.balanceAdjustments.length > 0;
+  const pendingItems = filterSnoozedPendingItems(derivePendingItems({
+    entries: ledger.entries,
+    allocations: ledger.recoveryAllocations,
+    incomeForecast,
+    retainedMinor,
+    balanceMinor: ledger.summary?.balanceMinor ?? 0,
+    todayDateKey,
+    analysis: ledger.analysis,
+  }), dismissals, todayDateKey);
   const showNotice = (next: Notice) => {
     window.clearTimeout(noticeTimer.current);
     setNotice(next);
@@ -160,6 +182,7 @@ export default function App() {
     const timers = deletionTimers.current;
     return () => {
       window.clearTimeout(noticeTimer.current);
+      window.clearTimeout(adjustmentUndoTimer.current);
       for (const timer of timers.values()) window.clearTimeout(timer);
     };
   }, []);
@@ -175,15 +198,39 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
-    setIncomeReminderDismissed(false);
-  }, [incomeForecast?.id, incomeForecast?.targetPaydayDateKey, todayDateKey]);
+    if (!hasLedgerFacts || persistenceAttempted.current) return;
+    persistenceAttempted.current = true;
+    const key = "jiyibi:persistent-storage-attempted";
+    try {
+      const storage = globalThis.localStorage;
+      if (typeof storage?.getItem === "function" && storage.getItem(key)) return;
+      if (typeof storage?.setItem === "function") storage.setItem(key, new Date().toISOString());
+    } catch {
+      // Persistence is an enhancement; IndexedDB remains the source of truth.
+    }
+    void requestPersistentStorage();
+  }, [hasLedgerFacts]);
 
-  const maybePromptTreatment = (entry: LedgerEntry) => {
+  const maybePromptTreatment = async (entry: LedgerEntry): Promise<boolean> => {
     const decision = evaluateExceptionPrompt(entry, ledger.entries, ledger.analysis);
     if (!decision.shouldPrompt) return false;
     setTreatmentError(undefined);
+    let pendingEntry = entry;
+    try {
+      pendingEntry = await updateEntryTreatment(
+        entry.id,
+        entry.treatment,
+        {
+          confirmationStatus: "pending",
+          detectionRuleVersion: decision.detectionRuleVersion,
+        },
+      );
+      cloud.requestSync();
+    } catch {
+      // The confirmation layer still lets the user retry the atomic final write.
+    }
     setTreatmentPrompt({
-      entry,
+      entry: pendingEntry,
       kind: decision.kind,
       detectionRuleVersion: decision.detectionRuleVersion,
     });
@@ -193,6 +240,7 @@ export default function App() {
   const savingsUsePromptFor = (
     entry: LedgerEntry,
     treatment: EntryTreatment = entry.treatment,
+    previousEntry?: LedgerEntry,
   ) => {
     if (
       entry.amountMinor >= 0
@@ -200,9 +248,15 @@ export default function App() {
       || !affectsBookBalance({ ...entry, treatment })
     ) return undefined;
 
-    const snapshotIncludesEntry = ledger.entries.some((item) => item.id === entry.id);
-    const balanceAfterEntry = BigInt(ledger.summary?.balanceMinor ?? 0)
-      + (snapshotIncludesEntry ? 0n : BigInt(entry.amountMinor));
+    let balanceAfterEntry = BigInt(ledger.summary?.balanceMinor ?? 0);
+    if (previousEntry) {
+      if (affectsBookBalance(previousEntry)) {
+        balanceAfterEntry -= BigInt(previousEntry.amountMinor);
+      }
+      balanceAfterEntry += BigInt(entry.amountMinor);
+    } else if (!ledger.entries.some((item) => item.id === entry.id)) {
+      balanceAfterEntry += BigInt(entry.amountMinor);
+    }
     const penetrationMinor = retainedMinor - balanceAfterEntry;
     if (penetrationMinor <= 0n) return undefined;
     const expenseMinor = -BigInt(entry.amountMinor);
@@ -224,17 +278,20 @@ export default function App() {
     }
   };
 
-  const handleCreated = (entry?: LedgerEntry) => {
+  const handleCreated = async (entry?: LedgerEntry) => {
     const nextSavingsPrompt = entry ? savingsUsePromptFor(entry) : undefined;
-    setSavingsPrompt(nextSavingsPrompt);
-    if (entry && maybePromptTreatment(entry)) {
+    if (entry && await maybePromptTreatment(entry)) {
+      setSavingsPrompt(undefined);
       showNotice({
         kind: "success",
         message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
       });
       return;
     }
-    if (nextSavingsPrompt) setSavingsDialogMode("release");
+    if (nextSavingsPrompt) {
+      setSavingsPrompt(nextSavingsPrompt);
+      setSavingsDialogMode("release");
+    }
     showNotice({
       kind: "success",
       message: cloud.linked ? "已保存到本机，正在同步" : "已保存，余额已更新",
@@ -243,35 +300,46 @@ export default function App() {
 
   const saveEdit = async (id: string, draft: EntryDraft) => {
     try {
+      const previousEntry = ledger.entries.find((entry) => entry.id === id);
       const updated = await updateEntry(id, draft);
+      const nextSavingsPrompt = savingsUsePromptFor(
+        updated,
+        updated.treatment,
+        previousEntry,
+      );
       cloud.requestSync();
       showNotice({ kind: "success", message: "记录已更新，余额已重算" });
-      maybePromptTreatment(updated);
+      if (await maybePromptTreatment(updated)) {
+        setSavingsPrompt(undefined);
+      } else if (nextSavingsPrompt) {
+        setSavingsPrompt(nextSavingsPrompt);
+        setSavingsDialogMode("release");
+      }
     } catch (reason) {
       throw mutationError(reason, "修改没有保存，请重试");
     }
   };
 
-  const confirmTreatment = async (treatment: EntryTreatment) => {
+  const confirmTreatment = async (
+    treatment: EntryTreatment,
+    allocations: readonly RecoveryAllocationSelection[] = [],
+  ) => {
     if (!treatmentPrompt) return;
     setTreatmentBusy(true);
     setTreatmentError(undefined);
     try {
-      await updateEntryTreatment(treatmentPrompt.entry.id, treatment, {
-        confirmationStatus: "confirmed",
-        detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
-        markPrompted: true,
-      });
+      await confirmTreatmentWithAllocations(
+        treatmentPrompt.entry.id,
+        treatment,
+        allocations,
+        {
+          detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
+          markPrompted: true,
+        },
+      );
       cloud.requestSync();
       setTreatmentPrompt(undefined);
-      if (
-        savingsPrompt?.entry.id === treatmentPrompt.entry.id
-        && affectsBookBalance({ ...treatmentPrompt.entry, treatment })
-      ) {
-        setSavingsDialogMode("release");
-      } else if (savingsPrompt?.entry.id === treatmentPrompt.entry.id) {
-        setSavingsPrompt(undefined);
-      }
+      if (savingsPrompt?.entry.id === treatmentPrompt.entry.id) setSavingsPrompt(undefined);
       showNotice({ kind: "success", message: "处理方式已更新，分析已重算" });
     } catch (reason) {
       setTreatmentError(reason instanceof Error ? reason.message : "处理方式没有保存，请重试");
@@ -280,35 +348,12 @@ export default function App() {
     }
   };
 
-  const deferTreatment = async () => {
+  const deferTreatment = () => {
     if (!treatmentPrompt) return;
-    setTreatmentBusy(true);
     setTreatmentError(undefined);
-    try {
-      await updateEntryTreatment(
-        treatmentPrompt.entry.id,
-        treatmentPrompt.entry.treatment,
-        {
-          confirmationStatus: "pending",
-          detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
-          markPrompted: true,
-        },
-      );
-      cloud.requestSync();
-      setTreatmentPrompt(undefined);
-      if (
-        savingsPrompt?.entry.id === treatmentPrompt.entry.id
-        && affectsBookBalance(treatmentPrompt.entry)
-      ) {
-        setSavingsDialogMode("release");
-      } else if (savingsPrompt?.entry.id === treatmentPrompt.entry.id) {
-        setSavingsPrompt(undefined);
-      }
-    } catch (reason) {
-      setTreatmentError(reason instanceof Error ? reason.message : "未能标记稍后处理，请重试");
-    } finally {
-      setTreatmentBusy(false);
-    }
+    snoozePending(`treatment:${treatmentPrompt.entry.id}`);
+    setTreatmentPrompt(undefined);
+    if (savingsPrompt?.entry.id === treatmentPrompt.entry.id) setSavingsPrompt(undefined);
   };
 
   const openPendingConfirmation = (entry: LedgerEntry) => {
@@ -375,6 +420,52 @@ export default function App() {
     setIncomeDialogMode(mode);
   };
 
+  const openSettings = (pane: SettingsPane = "ledger") => {
+    setSettingsPane(pane);
+    setSettingsOpen(true);
+  };
+
+  const openPendingItem = (item: (typeof pendingItems)[number]) => {
+    if (item.kind === "income_due") {
+      openIncomeDialog("actual");
+      return;
+    }
+    if (item.kind === "entry_treatment") {
+      openPendingConfirmation(item.entry);
+      return;
+    }
+    if (item.kind === "savings_penetration") {
+      setSavingsPrompt(item.sourceEntry ? {
+        entry: item.sourceEntry,
+        suggestedAmountMinor: item.suggestedAmountMinor,
+      } : undefined);
+      setSavingsDialogMode("release");
+      return;
+    }
+    setTreatmentError(undefined);
+    setTreatmentPrompt({ entry: item.refund, kind: "income" });
+  };
+
+  const offerAdjustmentUndo = (adjustment?: BalanceAdjustment) => {
+    if (!adjustment) return;
+    window.clearTimeout(adjustmentUndoTimer.current);
+    setAdjustmentUndo(adjustment);
+    adjustmentUndoTimer.current = window.setTimeout(() => setAdjustmentUndo(undefined), 8_000);
+  };
+
+  const undoAdjustment = async () => {
+    if (!adjustmentUndo) return;
+    window.clearTimeout(adjustmentUndoTimer.current);
+    try {
+      await softDeleteBalanceAdjustment(adjustmentUndo.id);
+      cloud.requestSync();
+      setAdjustmentUndo(undefined);
+      showNotice({ kind: "success", message: "余额调整已撤销" });
+    } catch (reason) {
+      showNotice({ kind: "error", message: reason instanceof Error ? reason.message : "撤销失败" });
+    }
+  };
+
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content" onClick={skipToMain}>跳到主要内容</a>
@@ -390,14 +481,14 @@ export default function App() {
           <button
             type="button"
             className={`local-status sync-status-button ${cloud.phase === "offline" ? "is-offline" : ""} ${["error", "conflict", "account-mismatch"].includes(cloud.phase) ? "has-error" : ""}`}
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => openSettings("data")}
             aria-label={`查看云同步详情：${cloud.headerLabel}`}
             title={`${cloud.headerLabel}，查看同步详情`}
           >
             <CloudStatusIcon phase={cloud.phase} />
             <span>{cloud.headerLabel}</span>
           </button>
-          <button type="button" className="icon-button header-settings" onClick={() => setSettingsOpen(true)} aria-label="打开设置" title="设置">
+          <button type="button" className="icon-button header-settings" onClick={() => openSettings("ledger")} aria-label="打开设置" title="设置">
             <Settings aria-hidden="true" />
           </button>
         </div>
@@ -424,51 +515,16 @@ export default function App() {
       <main id="main-content" tabIndex={-1}>
         {view === "ledger" ? (
           <>
-            {dueIncomeForecast && !incomeReminderDismissed ? (
-              <section className="income-reminder" aria-labelledby="income-reminder-title">
-                <div>
-                  <CircleAlert aria-hidden="true" />
-                  <span>
-                    <strong id="income-reminder-title">
-                      {dueIncomeForecast.targetPaydayDateKey === todayDateKey
-                        ? "今天是预计到账日，记一下实际收入"
-                        : "预计到账日已过，记一下实际收入"}
-                    </strong>
-                    <small>确认后才会计入余额，并结束本次提醒。</small>
-                  </span>
-                </div>
-                <div className="income-reminder-actions">
-                  <button type="button" className="text-button" onClick={() => setIncomeReminderDismissed(true)}>稍后</button>
-                  <button type="button" className="secondary-button" onClick={() => openIncomeDialog("postpone")}>延期到账</button>
-                  <button type="button" className="primary-button" onClick={() => openIncomeDialog("actual")}>填写实际收入</button>
-                </div>
-              </section>
-            ) : null}
-            {pendingConfirmations.length > 0 ? (
-              <section className="income-reminder treatment-pending-reminder" aria-labelledby="treatment-pending-title">
-                <div>
-                  <CircleAlert aria-hidden="true" />
-                  <span>
-                    <strong id="treatment-pending-title">
-                      {pendingConfirmations.length === 1
-                        ? "有一笔交易待确认，估算可能变化"
-                        : `有 ${pendingConfirmations.length} 笔交易待确认，估算可能变化`}
-                    </strong>
-                    <small>先按日常默认计入；确认后会立即重算余额与分析。</small>
-                  </span>
-                </div>
-                <div className="income-reminder-actions">
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onClick={() => openPendingConfirmation(pendingConfirmations[0]!)}
-                  >
-                    去确认
-                  </button>
-                </div>
-              </section>
-            ) : null}
-            <div className="workspace-grid">
+            <PendingQueue
+              items={pendingItems}
+              onOpen={openPendingItem}
+              onSnooze={(item) => snoozePending(item.id)}
+            />
+            <div className={`workspace-grid${!hasLedgerFacts ? " is-first-use" : ""}`}>
+              <EntryComposer
+                onCreate={create}
+                onSaved={handleCreated}
+              />
               <SummaryPanel
                 summary={ledger.summary}
                 settings={ledger.settings}
@@ -477,7 +533,9 @@ export default function App() {
                 retainedSavings={retainedSavings}
                 analysisError={ledger.analysisError}
                 loading={ledger.loading}
-                onOpenSettings={() => setSettingsOpen(true)}
+                hasLedgerFacts={hasLedgerFacts}
+                onOpenSettings={() => openSettings("ledger")}
+                onOpenBalance={() => setBalanceEditorMode(ledger.settings?.initialBalanceLockedAt ? "reconciliation" : "initial")}
                 onOpenIncomeForecast={() => openIncomeDialog("forecast")}
                 onOpenSavingsGoal={() => setSavingsGoalOpen(true)}
                 onOpenAnalysis={() => navigate("analysis")}
@@ -490,10 +548,6 @@ export default function App() {
                   setSavingsDialogMode("release");
                 }}
               />
-              <EntryComposer
-                onCreate={create}
-                onSaved={handleCreated}
-              />
             </div>
 
             {ledger.error ? (
@@ -504,6 +558,7 @@ export default function App() {
             ) : (
               <RecordList
                 entries={ledger.entries}
+                balanceAdjustments={ledger.balanceAdjustments}
                 loading={ledger.loading}
                 loadAttachment={cloud.loadAttachment}
                 onEdit={setEditingEntry}
@@ -523,7 +578,7 @@ export default function App() {
               entryCount={ledger.entries.length}
               loading={ledger.loading}
               error={ledger.analysisError?.message ?? ledger.error?.message}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={() => openSettings("ledger")}
               onOpenIncomeForecast={() => openIncomeDialog("forecast")}
               onOpenLedger={() => navigate("ledger")}
             />
@@ -542,7 +597,7 @@ export default function App() {
         onClose={() => setEditingEntry(undefined)}
         onSave={saveEdit}
         onTreatmentChange={async (id, treatment) => {
-          await updateEntryTreatment(id, treatment, { confirmationStatus: "confirmed" });
+          await confirmTreatmentWithAllocations(id, treatment, []);
           cloud.requestSync();
           showNotice({ kind: "success", message: "处理方式已更新，分析已重算" });
         }}
@@ -550,23 +605,49 @@ export default function App() {
       <TreatmentConfirmationDialog
         entry={treatmentPrompt?.entry}
         kind={treatmentPrompt?.kind ?? "expense"}
+        entries={ledger.entries}
+        allocations={ledger.recoveryAllocations}
         busy={treatmentBusy}
         error={treatmentError}
         onConfirm={confirmTreatment}
         onDefer={deferTreatment}
-        onClose={() => void deferTreatment()}
+        onClose={deferTreatment}
       />
       <SettingsDialog
         open={settingsOpen}
+        initialPane={settingsPane}
         settings={ledger.settings}
         openingSavingsMinor={openingSavingsMinor}
         pwa={pwa}
         cloudSync={cloud.settingsProps}
         onClose={() => setSettingsOpen(false)}
         onOpenIncomeForecast={() => openIncomeDialog("forecast")}
+        onOpenSavingsGoal={() => {
+          setSettingsOpen(false);
+          setSavingsGoalOpen(true);
+        }}
+        onOpenBalance={(mode) => {
+          setSettingsOpen(false);
+          setBalanceEditorMode(mode);
+        }}
         onDataChanged={() => {
           cloud.requestSync();
           showNotice({ kind: "success", message: cloud.linked ? "本机数据已更新，正在同步" : "本机数据已更新" });
+        }}
+      />
+      <BalanceAdjustmentDialog
+        open={balanceEditorMode !== undefined}
+        mode={balanceEditorMode}
+        currentBalanceMinor={ledger.summary?.balanceMinor ?? 0}
+        initialBalanceMinor={ledger.settings?.initialBalanceMinor ?? 0}
+        locked={Boolean(ledger.settings?.initialBalanceLockedAt)}
+        adjustments={ledger.balanceAdjustments}
+        onClose={() => setBalanceEditorMode(undefined)}
+        onSaved={(adjustment) => {
+          setBalanceEditorMode(undefined);
+          cloud.requestSync();
+          offerAdjustmentUndo(adjustment);
+          showNotice({ kind: "success", message: adjustment ? "余额已更新，可在 8 秒内撤销" : "余额已更新" });
         }}
       />
       <SavingsDialog
@@ -609,7 +690,14 @@ export default function App() {
         }}
       />
 
-      <UndoToasts items={pendingDeletes} onUndo={(id) => void undoDelete(id)} />
+      <UndoToasts items={pendingDeletes} onUndo={(id) => void undoDelete(id)}>
+        {adjustmentUndo ? (
+          <div className="adjustment-undo-toast">
+            <span role="status">{adjustmentUndo.kind === "reconciliation" ? "余额已校准" : "起点已更正"}</span>
+            <button type="button" className="text-button" onClick={() => void undoAdjustment()}>撤销</button>
+          </div>
+        ) : null}
+      </UndoToasts>
       {notice ? (
         <div className={`notice-toast notice-toast--${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>
           {notice.kind === "success" ? <CheckCircle2 aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}

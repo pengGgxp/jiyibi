@@ -98,6 +98,8 @@ async function renderDialog(linked: boolean, appSettings: AppSettings = settings
       onClose={vi.fn()}
       onDataChanged={vi.fn()}
       onOpenIncomeForecast={onOpenIncomeForecast}
+      onOpenBalance={vi.fn()}
+      onOpenSavingsGoal={vi.fn()}
     />,
   ));
   return { host, onOpenIncomeForecast };
@@ -117,6 +119,7 @@ async function click(host: HTMLElement, text: string) {
 describe("SettingsDialog", () => {
   it("keeps restore unavailable for a cloud-linked ledger", async () => {
     const { host } = await renderDialog(true);
+    await click(host, "数据");
     expect(host.querySelector<HTMLButtonElement>('button[aria-describedby="restore-unavailable-reason"]')?.disabled).toBe(true);
     expect(host.querySelector("#restore-file")).toBeNull();
     expect(host.querySelector("#restore-unavailable-reason")).not.toBeNull();
@@ -124,6 +127,7 @@ describe("SettingsDialog", () => {
 
   it("keeps restore available for a local-only ledger", async () => {
     const { host } = await renderDialog(false);
+    await click(host, "数据");
     expect(host.querySelector<HTMLInputElement>("#restore-file")?.disabled).toBe(false);
     expect(host.querySelector("#restore-unavailable-reason")).toBeNull();
   });

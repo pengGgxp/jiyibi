@@ -23,6 +23,7 @@ import {
   softDeleteSavingsEvent,
   softDeleteEntry,
   undoDeleteEntry,
+  undoDeleteSavingsEvent,
   updateEntry,
   updateSavingsEvent,
 } from "./database";
@@ -175,6 +176,55 @@ describe("savings data layer", () => {
     expect(await database.savingsEvents.get(reserve.id)).toBeUndefined();
   });
 
+  it("does not let local edits or deletes create a negative retained balance", async () => {
+    await setInitialBalance(5_000, database);
+    await setOpeningSavings(1_000, database, new Date(2026, 6, 1, 9));
+    const reserve = await reserveSavings({ amountMinor: 1_000 }, database);
+    await releaseSavings({ amountMinor: 1_500 }, database);
+
+    await expect(updateSavingsEvent(reserve.id, {
+      amountMinor: 400,
+    }, database)).rejects.toMatchObject({ code: "invalid-settings" });
+    await expect(setOpeningSavings(400, database)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
+    await expect(softDeleteSavingsEvent(reserve.id, database)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
+
+    expect(calculateRetainedSavingsSummary(
+      await listActiveSavingsEvents(database),
+    ).totalRetainedMinor).toBe(500n);
+  });
+
+  it("revalidates balance and expense caps before restoring a savings event", async () => {
+    await setInitialBalance(5_000, database);
+    await setOpeningSavings(3_000, database, new Date(2026, 6, 1, 9));
+    const funded = await createSavingsFundedExpense(
+      expenseDraft(),
+      600,
+      database,
+      new Date(2026, 7, 8, 12, 30),
+    );
+    await softDeleteSavingsEvent(
+      funded.savingsEvent.id,
+      database,
+      new Date(2026, 7, 8, 12, 31),
+    );
+    await releaseSavings({
+      amountMinor: 1_200,
+      linkedExpenseEntryId: funded.entry.id,
+    }, database, new Date(2026, 7, 8, 12, 32));
+
+    await expect(undoDeleteSavingsEvent(
+      funded.savingsEvent.id,
+      database,
+      new Date(2026, 7, 8, 12, 33),
+    )).rejects.toMatchObject({ code: "invalid-settings" });
+    expect((await database.savingsEvents.get(funded.savingsEvent.id))?.deletedAt)
+      .toBeDefined();
+  });
+
   it("keeps a savings-funded expense and its release linked through edit/delete/undo", async () => {
     await setInitialBalance(5_000, database);
     await setOpeningSavings(1_000, database, new Date(2026, 6, 1, 9));
@@ -214,6 +264,32 @@ describe("savings data layer", () => {
     expect((await database.savingsEvents.get(result.savingsEvent.id))?.deletedAt).toBeUndefined();
     expect(calculateRetainedSavingsSummary(await listActiveSavingsEvents(database)).totalRetainedMinor)
       .toBe(400n);
+  });
+
+  it("rolls back entry undo when its linked release would make savings negative", async () => {
+    await setInitialBalance(5_000, database);
+    await setOpeningSavings(2_000, database, new Date(2026, 6, 1, 9));
+    const funded = await createSavingsFundedExpense(
+      expenseDraft(),
+      600,
+      database,
+      new Date(2026, 7, 8, 12, 30),
+    );
+    const deleted = await softDeleteEntry(
+      funded.entry.id,
+      database,
+      new Date(2026, 7, 8, 12, 31),
+    );
+    await releaseSavings({ amountMinor: 1_500 }, database, new Date(2026, 7, 8, 12, 32));
+
+    await expect(undoDeleteEntry(
+      funded.entry.id,
+      database,
+      new Date(2026, 7, 8, 12, 33),
+    )).rejects.toMatchObject({ code: "invalid-settings" });
+    expect((await database.entries.get(funded.entry.id))?.deletedAt).toBe(deleted.deletedAt);
+    expect((await database.savingsEvents.get(funded.savingsEvent.id))?.deletedAt)
+      .toBe(deleted.deletedAt);
   });
 
   it("limits all active releases linked to one expense as a combined amount", async () => {
@@ -361,6 +437,9 @@ describe("savings data layer", () => {
     expect(calculateRetainedSavingsSummary(
       await listActiveSavingsEvents(database),
     ).totalRetainedMinor).toBe(650n);
+    await expect(softDeleteSavingsEvent(settled.id, database)).rejects.toMatchObject({
+      code: "invalid-settings",
+    });
   });
 
   it("rejects a legacy one-cycle target when income is postponed", async () => {

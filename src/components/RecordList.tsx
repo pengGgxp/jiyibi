@@ -13,12 +13,14 @@ import {
   entryToLocalDateTimeInput,
   formatCny,
   type Attachment,
+  type BalanceAdjustment,
   type LedgerEntry,
 } from "../domain";
 import { useObjectUrl } from "../hooks/useObjectUrl";
 
 interface RecordListProps {
   entries: LedgerEntry[];
+  balanceAdjustments?: BalanceAdjustment[];
   loading: boolean;
   loadAttachment?(attachmentId: string): Promise<Attachment | undefined>;
   onEdit(entry: LedgerEntry): void;
@@ -154,6 +156,7 @@ function AttachmentThumbnail({
 
 export function RecordList({
   entries,
+  balanceAdjustments = [],
   loading,
   loadAttachment = getAttachment,
   onEdit,
@@ -184,7 +187,7 @@ export function RecordList({
         <div className="record-loading" aria-label="正在读取账目">
           <span /><span /><span />
         </div>
-      ) : groups.length === 0 ? (
+      ) : groups.length === 0 && balanceAdjustments.length === 0 ? (
         <div className="empty-records">
           <ReceiptText aria-hidden="true" />
           <div>
@@ -195,6 +198,30 @@ export function RecordList({
         </div>
       ) : (
         <div className="record-groups">
+          {balanceAdjustments.length > 0 ? (
+            <section className="balance-adjustment-history" aria-labelledby="balance-adjustment-history-title">
+              <div className="date-heading">
+                <h3 id="balance-adjustment-history-title">余额变动</h3>
+                <span>{balanceAdjustments.length} 条</span>
+              </div>
+              <ul className="record-list">
+                {balanceAdjustments.map((adjustment) => (
+                  <li key={adjustment.id}>
+                    <article className={`record-row balance-adjustment-row${adjustment.deletedAt ? " is-reverted" : ""}`}>
+                      <span className="record-thumbnail balance-adjustment-icon" aria-hidden="true"><ReceiptText /></span>
+                      <div className="record-copy">
+                        <p>{adjustment.kind === "reconciliation" ? "余额校准" : "起点更正"}</p>
+                        <span>{adjustment.localDateKey} · {adjustment.note || "无说明"}{adjustment.deletedAt ? " · 已撤销" : ""}</span>
+                      </div>
+                      <strong className="balance-adjustment-amount">
+                        {adjustment.amountMinor > 0 ? "+" : "−"}{formatCny(Math.abs(adjustment.amountMinor))}
+                      </strong>
+                    </article>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
           {groups.map(([dateKey, dateEntries]) => (
             <section className="record-group" key={dateKey} aria-labelledby={`date-${dateKey}`}>
               <div className="date-heading">

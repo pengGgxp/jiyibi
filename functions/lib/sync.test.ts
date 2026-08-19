@@ -380,16 +380,17 @@ describe("sync mutation receipts", () => {
     }), 4);
 
     expect(updates[0].slice(3, 21)).toEqual([
-      1, 0, 10, 10, 1, 800_000, 1, 800_000, 1, 100_000,
+      1, 1, 10, 10, 1, 800_000, 1, 800_000, 1, 100_000,
       1, incomeForecast.id,
       1, incomeForecast.targetPaydayDateKey,
       1, incomeForecast.minimumIncomeMinor,
       1, incomeForecast.expectedIncomeMinor,
     ]);
     expect(updates[1].slice(3, 21)).toEqual([
-      1, 0, null, null, 1, null, 0, null, 1, null,
+      1, 1, null, null, 1, null, 0, null, 1, null,
       1, null, 1, null, 1, null, 1, null,
     ]);
+    expect(updates[1].slice(21, 23)).toEqual([1, null]);
   });
 
   it("writes recovery allocations as independent versioned entities", async () => {
@@ -676,7 +677,44 @@ describe("sync mutation receipts", () => {
     } as unknown as D1Database;
 
     await pullChanges(db, "user_1", 3, "0", 4);
-    expect(bindings).toEqual(["user_1", 3, "0", 4, 4, 101]);
+    expect(bindings).toEqual(["user_1", 3, "0", 101]);
+  });
+
+  it("advances legacy cursors past hidden entity tombstones", async () => {
+    const row = {
+      cursor: "12",
+      mutation_id: "mutation_savings_deleted",
+      entity_type: "savingsEvent" as const,
+      entity_id: "savings_deleted",
+      entity_version: 2,
+      mutation_hash: "hash",
+      payload_json: "{}",
+      savings_id: "savings_deleted",
+      savings_kind: "reserve",
+      savings_amount_minor: 100,
+      savings_note: "",
+      savings_occurred_at: "2026-07-30T12:00:00.000Z",
+      savings_local_date_key: "2026-07-30",
+      savings_local_month_key: "2026-07",
+      savings_timezone_offset_minutes: 0,
+      savings_created_at: "2026-07-30T12:00:00.000Z",
+      savings_updated_at: "2026-07-30T13:00:00.000Z",
+      savings_deleted_at: "2026-07-30T13:00:00.000Z",
+    };
+    const db = {
+      prepare() {
+        return {
+          bind() { return this; },
+          async all() { return { results: [row] }; },
+        };
+      },
+    } as unknown as D1Database;
+
+    await expect(pullChanges(db, "user_1", 3, "0", 5)).resolves.toEqual({
+      changes: [],
+      nextCursor: "12",
+      hasMore: false,
+    });
   });
 
   it("hides the version-two goal from version-one pull responses", async () => {
@@ -847,12 +885,12 @@ describe("sync mutation receipts", () => {
       settings_initial_balance_minor: 500,
       settings_month_end_balance_goal_minor: null,
       settings_payday_day: 10,
-      settings_monthly_salary_minor: null,
+      settings_monthly_salary_minor: 800_000,
       settings_cycle_end_balance_goal_minor: 0,
-      settings_income_forecast_id: null,
-      settings_income_forecast_target_payday_date_key: null,
-      settings_minimum_income_minor: null,
-      settings_expected_income_minor: null,
+      settings_income_forecast_id: "forecast_2026_08_10",
+      settings_income_forecast_target_payday_date_key: "2026-08-10",
+      settings_minimum_income_minor: 600_000,
+      settings_expected_income_minor: 800_000,
       settings_default_savings_target_minor: 0,
       settings_savings_override_target_payday_date_key: "2026-08-12",
       settings_savings_override_target_minor: 80_000,
@@ -882,6 +920,12 @@ describe("sync mutation receipts", () => {
     expect(v6.changes[0].payload).toHaveProperty("savingsTargetOverride", {
       targetPaydayDateKey: "2026-08-12",
       targetMinor: 80_000,
+    });
+    expect(v6.changes[0].payload).toHaveProperty("incomeForecast", {
+      id: "forecast_2026_08_10",
+      targetPaydayDateKey: "2026-08-10",
+      minimumIncomeMinor: 600_000,
+      expectedIncomeMinor: 800_000,
     });
   });
 

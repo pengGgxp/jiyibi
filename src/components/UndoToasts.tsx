@@ -1,4 +1,5 @@
 import { RotateCcw } from "lucide-react";
+import type { ReactNode } from "react";
 
 export interface PendingDeletion {
   id: string;
@@ -7,11 +8,12 @@ export interface PendingDeletion {
 
 interface UndoToastsProps {
   items: PendingDeletion[];
+  children?: ReactNode;
   onUndo(id: string): void;
 }
 
-export function UndoToasts({ items, onUndo }: UndoToastsProps) {
-  if (!items.length) return null;
+export function UndoToasts({ items, children, onUndo }: UndoToastsProps) {
+  if (!items.length && !children) return null;
   return (
     <div className="toast-stack" aria-live="polite" aria-relevant="additions removals">
       {items.map((item) => (
@@ -26,6 +28,7 @@ export function UndoToasts({ items, onUndo }: UndoToastsProps) {
           <span className="undo-timer" aria-hidden="true" />
         </div>
       ))}
+      {children}
     </div>
   );
 }

@@ -19,3 +19,13 @@ export async function estimateLocalStorage(): Promise<StorageEstimate> {
     supported: true,
   };
 }
+
+export async function persistentStorageStatus(): Promise<boolean | undefined> {
+  if (!navigator.storage?.persisted) return undefined;
+  return navigator.storage.persisted();
+}
+
+export async function requestPersistentStorage(): Promise<boolean | undefined> {
+  if (!navigator.storage?.persist) return undefined;
+  return navigator.storage.persist();
+}

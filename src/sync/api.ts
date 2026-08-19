@@ -8,6 +8,7 @@ import {
 import type {
   AppSettings,
   Attachment,
+  BalanceAdjustment,
   IncomeForecast,
   LedgerEntry,
   PayCyclePlan,
@@ -221,6 +222,7 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
         "savingsGoalNeedsSetup",
         "savingsTargetOverride",
         "_legacyMonthlySalaryMinor",
+        "initialBalanceLockedAt",
       ],
     ) &&
     value.id === "primary" &&
@@ -243,6 +245,7 @@ function isAppSettings(value: unknown): value is SyncSettingsResponsePayload {
       Number(value.lastExpectedIncomeMinor) <= MAX_AMOUNT_MINOR
     )) &&
     (value.savingsGoalNeedsSetup === undefined || value.savingsGoalNeedsSetup === true) &&
+    (value.initialBalanceLockedAt === undefined || isIsoDate(value.initialBalanceLockedAt)) &&
     (value._legacyMonthlySalaryMinor === undefined || (
       Number.isSafeInteger(value._legacyMonthlySalaryMinor) &&
       Number(value._legacyMonthlySalaryMinor) > 0 &&
@@ -393,6 +396,45 @@ function isSavingsEvent(value: unknown): value is SavingsEvent {
     (value.transferToRetainedMinor === undefined || value.transferToRetainedMinor === value.amountMinor);
 }
 
+function isBalanceAdjustment(value: unknown): value is BalanceAdjustment {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  const reconciliation = value.kind === "reconciliation";
+  const openingCorrection = value.kind === "opening_correction";
+  if (!reconciliation && !openingCorrection) return false;
+  const required = reconciliation
+    ? [
+        "id", "kind", "amountMinor", "balanceBeforeMinor", "observedBalanceMinor",
+        "note", "occurredAt", "localDateKey", "localMonthKey",
+        "timezoneOffsetMinutes", "createdAt", "updatedAt",
+      ]
+    : [
+        "id", "kind", "amountMinor", "previousOpeningMinor", "nextOpeningMinor",
+        "note", "occurredAt", "localDateKey", "localMonthKey",
+        "timezoneOffsetMinutes", "createdAt", "updatedAt",
+      ];
+  if (!hasExactKeys(value, required, ["deletedAt"])) return false;
+  if (
+    typeof value.id !== "string" || !SYNC_ID_PATTERN.test(value.id) ||
+    !Number.isSafeInteger(value.amountMinor) || value.amountMinor === 0 ||
+    Math.abs(Number(value.amountMinor)) > MAX_AMOUNT_MINOR ||
+    typeof value.note !== "string" || value.note.length > 200 ||
+    !isIsoDate(value.occurredAt) || !isLocalDateKey(value.localDateKey) ||
+    value.localMonthKey !== value.localDateKey.slice(0, 7) ||
+    !Number.isInteger(value.timezoneOffsetMinutes) ||
+    Math.abs(Number(value.timezoneOffsetMinutes)) > 14 * 60 ||
+    !isIsoDate(value.createdAt) || !isIsoDate(value.updatedAt) ||
+    new Date(value.updatedAt).getTime() < new Date(value.createdAt).getTime() ||
+    (value.deletedAt !== undefined && (!isIsoDate(value.deletedAt) || value.deletedAt !== value.updatedAt))
+  ) return false;
+  if (!hasConsistentLocalDate(value as unknown as LedgerEntry)) return false;
+
+  const before = reconciliation ? value.balanceBeforeMinor : value.previousOpeningMinor;
+  const target = reconciliation ? value.observedBalanceMinor : value.nextOpeningMinor;
+  return Number.isSafeInteger(before) && Math.abs(Number(before)) <= MAX_AMOUNT_MINOR &&
+    Number.isSafeInteger(target) && Math.abs(Number(target)) <= MAX_AMOUNT_MINOR &&
+    BigInt(Number(target)) - BigInt(Number(before)) === BigInt(Number(value.amountMinor));
+}
+
 function isSyncChange(value: unknown): value is SyncChange {
   if (
     !isRecord(value) ||
@@ -416,6 +458,9 @@ function isSyncChange(value: unknown): value is SyncChange {
   }
   if (value.entityType === "savingsEvent") {
     return isSavingsEvent(value.payload) && value.payload.id === value.entityId;
+  }
+  if (value.entityType === "balanceAdjustment") {
+    return isBalanceAdjustment(value.payload) && value.payload.id === value.entityId;
   }
   return false;
 }

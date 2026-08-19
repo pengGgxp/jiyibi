@@ -35,6 +35,9 @@ vi.mock("../data", () => ({
     updatedAt: "2026-08-10T00:00:00.000Z",
   })),
   listActiveEntries: vi.fn(async () => []),
+  listActiveRecoveryAllocations: vi.fn(async () => []),
+  listActiveSavingsEvents: vi.fn(async () => []),
+  listBalanceAdjustments: vi.fn(async () => []),
 }));
 
 const roots: Root[] = [];

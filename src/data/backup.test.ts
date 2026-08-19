@@ -25,7 +25,9 @@ import {
   LedgerDatabase,
   createEntry,
   getSettings,
+  listBalanceAdjustments,
   listActiveSavingsEvents,
+  reconcileBalance,
   releaseSavings,
   reserveSavings,
   setInitialBalance,
@@ -34,6 +36,7 @@ import {
   setMonthEndBalanceGoal,
   setPayCyclePlan,
   setSavingsGoal,
+  softDeleteBalanceAdjustment,
   upsertRecoveryAllocation,
   updateEntryTreatment,
 } from "./database";
@@ -247,6 +250,7 @@ describe("encrypted backups", () => {
       payCycle: { paydayDay: 10 },
       incomeForecast,
       savingsEventCount: 0,
+      balanceAdjustmentCount: 0,
       currency: "CNY",
     });
 
@@ -439,6 +443,31 @@ describe("encrypted backups", () => {
         [],
         [release("savings-release-a", 6_000), release("savings-release-b", 5_000)],
       ),
+      target,
+    )).rejects.toMatchObject({ code: "invalid-payload" });
+    expect(await target.entries.get(existing.id)).toBeDefined();
+  });
+
+  it("rejects multiple opening savings events without replacing the ledger", async () => {
+    const existing = await createEntry(
+      { ...draft(), note: "existing", image: undefined },
+      target,
+    );
+    const opening = (id: string): SavingsEvent => ({
+      id,
+      kind: "opening",
+      amountMinor: 100,
+      note: "opening",
+      occurredAt: "2026-07-30T08:30:00.000Z",
+      localDateKey: "2026-07-30",
+      localMonthKey: "2026-07",
+      timezoneOffsetMinutes: 0,
+      createdAt: "2026-07-30T08:30:00.000Z",
+      updatedAt: "2026-07-30T08:30:00.000Z",
+    });
+
+    await expect(restorePreparedBackup(
+      preparedWith([], [], [], [opening("opening-a"), opening("opening-b")]),
       target,
     )).rejects.toMatchObject({ code: "invalid-payload" });
     expect(await target.entries.get(existing.id)).toBeDefined();
@@ -712,5 +741,50 @@ describe("encrypted backups", () => {
     await expect(
       restorePreparedBackup(preparedWith(entries, attachments), target),
     ).rejects.toMatchObject({ code: "limit-exceeded" });
+  });
+
+  it("round trips soft-voided balance adjustments as audit history", async () => {
+    const createdAt = new Date("2026-07-30T10:00:00.000Z");
+    const adjustment = await reconcileBalance(
+      { observedBalanceMinor: 12_345, note: "校准" },
+      source,
+      createdAt,
+    );
+    await softDeleteBalanceAdjustment(
+      adjustment.id,
+      source,
+      new Date("2026-07-30T10:00:07.000Z"),
+    );
+
+    const backup = await createEncryptedBackup("audit-password", source, createdAt);
+    const prepared = await decryptBackup(backup, "audit-password");
+    expect(prepared.preview.balanceAdjustmentCount).toBe(1);
+    expect(prepared.replacement.balanceAdjustments).toEqual([
+      expect.objectContaining({
+        id: adjustment.id,
+        amountMinor: 12_345,
+        deletedAt: "2026-07-30T10:00:07.000Z",
+      }),
+    ]);
+
+    await restorePreparedBackup(prepared, target);
+    expect(await listBalanceAdjustments(target)).toEqual(
+      prepared.replacement.balanceAdjustments,
+    );
+  });
+
+  it("locks the opening balance when importing a v5 backup that already has facts", async () => {
+    const backup = await createEncryptedBackup("legacy-lock", source);
+    const legacy = await rewriteEncryptedPayload(backup, "legacy-lock", (payload) => {
+      payload.schemaVersion = 5;
+      delete payload.balanceAdjustments;
+      const settings = payload.settings as Record<string, unknown>;
+      delete settings.initialBalanceLockedAt;
+      payload.entries = [validEntry(1)];
+    });
+
+    const prepared = await decryptBackup(legacy, "legacy-lock");
+    expect(prepared.replacement.settings.initialBalanceLockedAt)
+      .toBe("2026-07-30T08:30:00.000Z");
   });
 });

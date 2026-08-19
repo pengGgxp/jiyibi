@@ -13,7 +13,7 @@ test("核心记账布局在当前视口可用且无障碍", async ({ page }, tes
   const longNote = "一笔用于验证手机平板桌面长文本换行的账目说明".repeat(8).slice(0, 200);
   await addTextEntry(page, { amount: "25.80", note: longNote });
 
-  await expect(page.locator(".summary-panel .balance-value")).toHaveText("¥0.00");
+  await expect(page.locator(".summary-panel .balance-value")).toHaveText("-¥25.80");
   await expect(page.locator(".summary-savings-grid div").filter({ hasText: "总余额" }).locator("dd"))
     .toHaveText("-¥25.80");
   await expect(page.getByText(longNote, { exact: true })).toBeVisible();

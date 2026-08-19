@@ -1,6 +1,7 @@
 import { ApiError } from "./errors";
 import { cleanupPendingAttachments } from "./cleanup";
 import type {
+  BalanceAdjustmentPayload,
   IncomeConfirmationPayload,
   IncomeForecastPayload,
   LegacyAppSettingsPayload,
@@ -24,7 +25,12 @@ const CHANGE_PAGE_SIZE = 100;
 interface ChangeRow {
   cursor: string;
   mutation_id: string;
-  entity_type: "entry" | "settings" | "recoveryAllocation" | "savingsEvent";
+  entity_type:
+    | "entry"
+    | "settings"
+    | "recoveryAllocation"
+    | "savingsEvent"
+    | "balanceAdjustment";
   entity_id: string;
   entity_version: number;
   mutation_hash: string;
@@ -32,6 +38,7 @@ interface ChangeRow {
   settings_id?: string | null;
   settings_currency?: string | null;
   settings_initial_balance_minor?: number | null;
+  settings_initial_balance_locked_at?: string | null;
   settings_month_end_balance_goal_minor?: number | null;
   settings_payday_day?: number | null;
   settings_monthly_salary_minor?: number | null;
@@ -82,12 +89,28 @@ interface ChangeRow {
   savings_created_at?: string | null;
   savings_updated_at?: string | null;
   savings_deleted_at?: string | null;
+  adjustment_id?: string | null;
+  adjustment_kind?: string | null;
+  adjustment_amount_minor?: number | null;
+  adjustment_note?: string | null;
+  adjustment_occurred_at?: string | null;
+  adjustment_local_date_key?: string | null;
+  adjustment_local_month_key?: string | null;
+  adjustment_timezone_offset_minutes?: number | null;
+  adjustment_balance_before_minor?: number | null;
+  adjustment_observed_balance_minor?: number | null;
+  adjustment_previous_opening_minor?: number | null;
+  adjustment_next_opening_minor?: number | null;
+  adjustment_created_at?: string | null;
+  adjustment_updated_at?: string | null;
+  adjustment_deleted_at?: string | null;
 }
 
 const SETTINGS_PROJECTION_COLUMNS = `
   current_settings.id AS settings_id,
   current_settings.currency AS settings_currency,
   current_settings.initial_balance_minor AS settings_initial_balance_minor,
+  current_settings.initial_balance_locked_at AS settings_initial_balance_locked_at,
   current_settings.month_end_balance_goal_minor AS settings_month_end_balance_goal_minor,
   current_settings.payday_day AS settings_payday_day,
   current_settings.monthly_salary_minor AS settings_monthly_salary_minor,
@@ -166,14 +189,43 @@ const SAVINGS_PROJECTION_JOIN = `
    AND current_savings.account_generation = current_change.account_generation
    AND current_savings.id = current_change.entity_id`;
 
+const ADJUSTMENT_PROJECTION_COLUMNS = `
+  current_adjustment.id AS adjustment_id,
+  current_adjustment.kind AS adjustment_kind,
+  current_adjustment.amount_minor AS adjustment_amount_minor,
+  current_adjustment.note AS adjustment_note,
+  current_adjustment.occurred_at AS adjustment_occurred_at,
+  current_adjustment.local_date_key AS adjustment_local_date_key,
+  current_adjustment.local_month_key AS adjustment_local_month_key,
+  current_adjustment.timezone_offset_minutes AS adjustment_timezone_offset_minutes,
+  current_adjustment.balance_before_minor AS adjustment_balance_before_minor,
+  current_adjustment.observed_balance_minor AS adjustment_observed_balance_minor,
+  current_adjustment.previous_opening_minor AS adjustment_previous_opening_minor,
+  current_adjustment.next_opening_minor AS adjustment_next_opening_minor,
+  current_adjustment.created_at AS adjustment_created_at,
+  current_adjustment.updated_at AS adjustment_updated_at,
+  current_adjustment.deleted_at AS adjustment_deleted_at`;
+
+const ADJUSTMENT_PROJECTION_JOIN = `
+  LEFT JOIN balance_adjustments AS current_adjustment
+    ON current_change.entity_type = 'balanceAdjustment'
+   AND current_adjustment.user_id = current_change.user_id
+   AND current_adjustment.account_generation = current_change.account_generation
+   AND current_adjustment.id = current_change.entity_id`;
+
 interface VersionRow {
   version: number;
+}
+
+interface InitialBalanceLockRow {
+  initial_balance_minor: number;
+  initial_balance_locked_at: string | null;
 }
 
 function payloadFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
-): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload | RecoveryAllocationPayload | SavingsEventPayload {
+): LedgerEntryPayload | SyncAppSettingsPayload | LegacyAppSettingsPayload | RecoveryAllocationPayload | SavingsEventPayload | BalanceAdjustmentPayload {
   try {
     const payload = JSON.parse(row.payload_json) as unknown;
     if (row.entity_type === "recoveryAllocation") {
@@ -181,6 +233,9 @@ function payloadFromRow(
     }
     if (row.entity_type === "savingsEvent") {
       return savingsEventPayloadFromRow(row) ?? payload as SavingsEventPayload;
+    }
+    if (row.entity_type === "balanceAdjustment") {
+      return balanceAdjustmentPayloadFromRow(row) ?? payload as BalanceAdjustmentPayload;
     }
     if (row.entity_type === "entry") {
       return entryPayloadFromRow(row, protocolVersion) ?? payload as LedgerEntryPayload;
@@ -258,6 +313,38 @@ function savingsEventPayloadFromRow(row: ChangeRow): SavingsEventPayload | null 
   return payload;
 }
 
+function balanceAdjustmentPayloadFromRow(row: ChangeRow): BalanceAdjustmentPayload | null {
+  if (typeof row.adjustment_id !== "string" || typeof row.adjustment_kind !== "string") {
+    return null;
+  }
+  const common = {
+    id: row.adjustment_id,
+    amountMinor: Number(row.adjustment_amount_minor),
+    note: String(row.adjustment_note ?? ""),
+    occurredAt: String(row.adjustment_occurred_at),
+    localDateKey: String(row.adjustment_local_date_key),
+    localMonthKey: String(row.adjustment_local_month_key),
+    timezoneOffsetMinutes: Number(row.adjustment_timezone_offset_minutes),
+    createdAt: String(row.adjustment_created_at),
+    updatedAt: String(row.adjustment_updated_at),
+    ...(row.adjustment_deleted_at ? { deletedAt: row.adjustment_deleted_at } : {}),
+  };
+  if (row.adjustment_kind === "reconciliation") {
+    return {
+      ...common,
+      kind: "reconciliation",
+      balanceBeforeMinor: Number(row.adjustment_balance_before_minor),
+      observedBalanceMinor: Number(row.adjustment_observed_balance_minor),
+    };
+  }
+  return {
+    ...common,
+    kind: "opening_correction",
+    previousOpeningMinor: Number(row.adjustment_previous_opening_minor),
+    nextOpeningMinor: Number(row.adjustment_next_opening_minor),
+  };
+}
+
 function settingsPayloadFromRow(
   row: ChangeRow,
   protocolVersion: SyncProtocolVersion,
@@ -272,6 +359,9 @@ function settingsPayloadFromRow(
     schemaVersion: row.settings_schema_version,
     updatedAt: row.settings_updated_at,
   };
+  if (protocolVersion >= 8 && row.settings_initial_balance_locked_at) {
+    payload.initialBalanceLockedAt = row.settings_initial_balance_locked_at;
+  }
   if (row.settings_month_end_balance_goal_minor !== null &&
       row.settings_month_end_balance_goal_minor !== undefined) {
     payload.monthEndBalanceGoalMinor = row.settings_month_end_balance_goal_minor;
@@ -360,6 +450,9 @@ function projectSettingsPayload(
     schemaVersion: value.schemaVersion as 1,
     updatedAt: value.updatedAt as string,
   };
+  if (protocolVersion >= 8 && typeof value.initialBalanceLockedAt === "string") {
+    base.initialBalanceLockedAt = value.initialBalanceLockedAt;
+  }
   if (protocolVersion >= 2 && protocolVersion < 7 &&
       value.monthEndBalanceGoalMinor !== undefined) {
     base.monthEndBalanceGoalMinor = value.monthEndBalanceGoalMinor as number;
@@ -428,7 +521,7 @@ function projectSettingsPayload(
     if (forecast) {
       base.incomeForecast = {
         ...forecast,
-        minimumIncomeMinor: forecast.expectedIncomeMinor,
+        minimumIncomeMinor: forecast.minimumIncomeMinor ?? forecast.expectedIncomeMinor,
       };
     }
     if (isRecord(value.savingsTargetOverride)) {
@@ -506,7 +599,8 @@ function changeFromRow(
     row.entity_type !== "entry" &&
     row.entity_type !== "settings" &&
     row.entity_type !== "recoveryAllocation" &&
-    row.entity_type !== "savingsEvent"
+    row.entity_type !== "savingsEvent" &&
+    row.entity_type !== "balanceAdjustment"
   ) {
     throw new Error("Stored sync entity type is invalid");
   }
@@ -555,11 +649,13 @@ async function latestRemoteChange(
               current_change.payload_json,
               ${SETTINGS_PROJECTION_COLUMNS},
               ${ENTRY_PROJECTION_COLUMNS},
-              ${SAVINGS_PROJECTION_COLUMNS}
+              ${SAVINGS_PROJECTION_COLUMNS},
+              ${ADJUSTMENT_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
        ${ENTRY_PROJECTION_JOIN}
        ${SAVINGS_PROJECTION_JOIN}
+       ${ADJUSTMENT_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
          AND current_change.account_generation = ?
          AND current_change.entity_type = ?
@@ -878,6 +974,93 @@ async function writeSavingsEvent(
     .first<VersionRow>();
 }
 
+async function writeBalanceAdjustment(
+  db: D1Database,
+  userId: string,
+  generation: number,
+  mutation: Extract<SyncMutation, { entityType: "balanceAdjustment" }>,
+): Promise<VersionRow | null> {
+  const adjustment = mutation.payload;
+  const now = new Date().toISOString();
+  const mutationHash = await syncMutationHash(mutation);
+  const values = [
+    adjustment.kind,
+    adjustment.amountMinor,
+    adjustment.note,
+    adjustment.occurredAt,
+    adjustment.localDateKey,
+    adjustment.localMonthKey,
+    adjustment.timezoneOffsetMinutes,
+    adjustment.kind === "reconciliation" ? adjustment.balanceBeforeMinor : null,
+    adjustment.kind === "reconciliation" ? adjustment.observedBalanceMinor : null,
+    adjustment.kind === "opening_correction" ? adjustment.previousOpeningMinor : null,
+    adjustment.kind === "opening_correction" ? adjustment.nextOpeningMinor : null,
+    adjustment.createdAt,
+    adjustment.updatedAt,
+    adjustment.deletedAt ?? null,
+  ] as const;
+  if (mutation.baseVersion === 0) {
+    return db.prepare(
+      `INSERT INTO balance_adjustments (
+         user_id, account_generation, id, kind, amount_minor, note,
+         occurred_at, local_date_key, local_month_key, timezone_offset_minutes,
+         balance_before_minor, observed_balance_minor, previous_opening_minor,
+         next_opening_minor, created_at, updated_at, deleted_at, version,
+         last_mutation_id, last_mutation_hash, server_updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT(user_id, id) DO NOTHING
+       RETURNING version`,
+    ).bind(
+      userId,
+      generation,
+      adjustment.id,
+      ...values,
+      mutation.id,
+      mutationHash,
+      now,
+    ).first<VersionRow>();
+  }
+  return db.prepare(
+    `UPDATE balance_adjustments SET
+       deleted_at = ?, updated_at = ?, version = version + 1,
+       last_mutation_id = ?, last_mutation_hash = ?, server_updated_at = ?
+     WHERE user_id = ? AND account_generation = ? AND id = ? AND version = ?
+       AND last_mutation_id <> ?
+       AND kind = ? AND amount_minor = ? AND note = ? AND occurred_at = ?
+       AND local_date_key = ? AND local_month_key = ?
+       AND timezone_offset_minutes = ?
+       AND balance_before_minor IS ? AND observed_balance_minor IS ?
+       AND previous_opening_minor IS ? AND next_opening_minor IS ?
+       AND created_at = ?
+       AND deleted_at IS NULL AND ? IS NOT NULL
+     RETURNING version`,
+  ).bind(
+    adjustment.deletedAt ?? null,
+    adjustment.updatedAt,
+    mutation.id,
+    mutationHash,
+    now,
+    userId,
+    generation,
+    adjustment.id,
+    mutation.baseVersion,
+    mutation.id,
+    adjustment.kind,
+    adjustment.amountMinor,
+    adjustment.note,
+    adjustment.occurredAt,
+    adjustment.localDateKey,
+    adjustment.localMonthKey,
+    adjustment.timezoneOffsetMinutes,
+    adjustment.kind === "reconciliation" ? adjustment.balanceBeforeMinor : null,
+    adjustment.kind === "reconciliation" ? adjustment.observedBalanceMinor : null,
+    adjustment.kind === "opening_correction" ? adjustment.previousOpeningMinor : null,
+    adjustment.kind === "opening_correction" ? adjustment.nextOpeningMinor : null,
+    adjustment.createdAt,
+    adjustment.deletedAt ?? null,
+  ).first<VersionRow>();
+}
+
 async function prepareSettingsV7Write(
   db: D1Database,
   userId: string,
@@ -918,9 +1101,10 @@ async function prepareSettingsV7Write(
            minimum_income_minor, expected_income_minor,
            default_savings_target_minor, savings_goal_target_date_key,
            savings_goal_target_minor, last_expected_income_minor,
-           savings_goal_needs_setup, schema_version, updated_at, version,
+           savings_goal_needs_setup, initial_balance_locked_at,
+           schema_version, updated_at, version,
            last_mutation_id, last_mutation_hash, server_updated_at
-         ) SELECT ?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?
+         ) SELECT ?, ?, 'primary', 'CNY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?
          WHERE ? IS NULL OR EXISTS (
            SELECT 1 FROM income_confirmations
            WHERE user_id = ? AND account_generation = ? AND confirmation_id = ?
@@ -944,6 +1128,7 @@ async function prepareSettingsV7Write(
         savingsGoal?.targetMinor ?? null,
         settings.lastExpectedIncomeMinor ?? null,
         savingsGoal ? 0 : needsSetup,
+        settings.initialBalanceLockedAt ?? null,
         settings.updatedAt,
         mutation.id,
         mutationHash,
@@ -961,6 +1146,9 @@ async function prepareSettingsV7Write(
     .prepare(
       `UPDATE ledger_settings SET
          currency = 'CNY', initial_balance_minor = ?,
+         initial_balance_locked_at = CASE
+           WHEN initial_balance_locked_at IS NOT NULL THEN initial_balance_locked_at
+           ELSE ? END,
          payday_day = CASE WHEN ? = 1 THEN ? ELSE payday_day END,
          monthly_salary_minor = CASE
            WHEN ? = 1 THEN ?
@@ -1005,6 +1193,7 @@ async function prepareSettingsV7Write(
     )
     .bind(
       settings.initialBalanceMinor,
+      settings.initialBalanceLockedAt ?? null,
       writesPayCycle ? 1 : 0,
       payCycle?.paydayDay ?? null,
       writesForecast ? 1 : 0,
@@ -1087,6 +1276,10 @@ async function writeSettings(
     Object.prototype.hasOwnProperty.call(settings, "savingsTargetOverride");
   const savingsTargetOverride = settings.savingsTargetOverride ?? null;
   const writesCanonicalSavingsPlan = protocolVersion >= 6 && writesPayCycle;
+  const clearsCompatibilitySavingsPlan = protocolVersion >= 4 &&
+    protocolVersion < 6 && writesPayCycle && payCycle === null;
+  const writesSavingsPlanColumn = writesCanonicalSavingsPlan ||
+    clearsCompatibilitySavingsPlan;
   const legacyPayCycle = protocolVersion === 3 && payCycle
     ? payCycle as LegacyPayCyclePlanPayload
     : null;
@@ -1180,7 +1373,7 @@ async function writeSettings(
       writesGoal ? 1 : 0,
       settings.monthEndBalanceGoalMinor ?? null,
       writesPayCycle ? 1 : 0,
-      protocolVersion >= 6 ? 1 : 0,
+      protocolVersion >= 4 ? 1 : 0,
       payCycle?.paydayDay ?? null,
       payCycle?.paydayDay ?? null,
       writesCompatibilitySalary ? 1 : 0,
@@ -1197,7 +1390,7 @@ async function writeSettings(
       incomeForecast?.minimumIncomeMinor ?? null,
       writesForecast ? 1 : 0,
       incomeForecast?.expectedIncomeMinor ?? null,
-      writesCanonicalSavingsPlan ? 1 : 0,
+      writesSavingsPlanColumn ? 1 : 0,
       canonicalSavingsTarget,
       writesSavingsOverride ? 1 : 0,
       savingsTargetOverride?.targetPaydayDateKey ?? null,
@@ -1213,6 +1406,29 @@ async function writeSettings(
       mutation.id,
     )
     .first<VersionRow>();
+}
+
+async function assertInitialBalanceWritable(
+  db: D1Database,
+  userId: string,
+  generation: number,
+  settings: SettingsMutationPayload,
+): Promise<void> {
+  const current = await db.prepare(
+    `SELECT initial_balance_minor, initial_balance_locked_at
+     FROM ledger_settings
+     WHERE user_id = ? AND account_generation = ? AND id = 'primary'`,
+  ).bind(userId, generation).first<InitialBalanceLockRow>();
+  if (
+    current?.initial_balance_locked_at &&
+    current.initial_balance_minor !== settings.initialBalanceMinor
+  ) {
+    throw new ApiError(
+      409,
+      "initial_balance_locked",
+      "Initial balance is locked after the first ledger fact",
+    );
+  }
 }
 
 interface IncomeConfirmationRow {
@@ -1447,6 +1663,14 @@ export async function applyMutation(
   mutation: SyncMutation,
   protocolVersion: SyncProtocolVersion = 1,
 ): Promise<MutationResult> {
+  if (mutation.entityType === "settings") {
+    await assertInitialBalanceWritable(
+      db,
+      userId,
+      generation,
+      mutation.payload,
+    );
+  }
   if (
     protocolVersion >= 7 &&
     mutation.entityType === "settings" &&
@@ -1490,6 +1714,8 @@ export async function applyMutation(
       written = await writeRecoveryAllocation(db, userId, generation, mutation);
     } else if (mutation.entityType === "savingsEvent") {
       written = await writeSavingsEvent(db, userId, generation, mutation);
+    } else if (mutation.entityType === "balanceAdjustment") {
+      written = await writeBalanceAdjustment(db, userId, generation, mutation);
     } else {
       written = await writeSettings(db, userId, generation, mutation, protocolVersion);
     }
@@ -1507,6 +1733,13 @@ export async function applyMutation(
         409,
         "mutation_id_reused",
         "A mutation ID was already used for another request",
+      );
+    }
+    if (String(error).includes("initial_balance_locked")) {
+      throw new ApiError(
+        409,
+        "initial_balance_locked",
+        "Initial balance is locked after the first ledger fact",
       );
     }
     throw error;
@@ -1564,16 +1797,16 @@ export async function pullChanges(
               current_change.payload_json,
               ${SETTINGS_PROJECTION_COLUMNS},
               ${ENTRY_PROJECTION_COLUMNS},
-              ${SAVINGS_PROJECTION_COLUMNS}
+              ${SAVINGS_PROJECTION_COLUMNS},
+              ${ADJUSTMENT_PROJECTION_COLUMNS}
        FROM sync_changes AS current_change
        ${SETTINGS_PROJECTION_JOIN}
        ${ENTRY_PROJECTION_JOIN}
        ${SAVINGS_PROJECTION_JOIN}
+       ${ADJUSTMENT_PROJECTION_JOIN}
        WHERE current_change.user_id = ?
           AND current_change.account_generation = ?
          AND current_change.seq > CAST(? AS INTEGER)
-         AND (? >= 5 OR current_change.entity_type <> 'recoveryAllocation')
-         AND (? >= 6 OR current_change.entity_type <> 'savingsEvent')
          AND NOT EXISTS (
            SELECT 1
            FROM sync_changes AS newer_change
@@ -1586,12 +1819,21 @@ export async function pullChanges(
        ORDER BY current_change.seq ASC
        LIMIT ?`,
     )
-    .bind(userId, generation, cursor, protocolVersion, protocolVersion, CHANGE_PAGE_SIZE + 1)
+    .bind(
+      userId,
+      generation,
+      cursor,
+      CHANGE_PAGE_SIZE + 1,
+    )
     .all<ChangeRow>();
   const hasMore = result.results.length > CHANGE_PAGE_SIZE;
   const page = result.results.slice(0, CHANGE_PAGE_SIZE);
+  const visiblePage = page.filter((row) =>
+    (protocolVersion >= 5 || row.entity_type !== "recoveryAllocation") &&
+    (protocolVersion >= 6 || row.entity_type !== "savingsEvent") &&
+    (protocolVersion >= 8 || row.entity_type !== "balanceAdjustment"));
   return {
-    changes: page.map((row) => changeFromRow(row, protocolVersion)),
+    changes: visiblePage.map((row) => changeFromRow(row, protocolVersion)),
     nextCursor: page.at(-1)?.cursor ?? cursor,
     hasMore,
   };
@@ -1628,9 +1870,10 @@ export async function assertLegacyClientCompatible(
   generation: number,
   protocolVersion: SyncProtocolVersion,
 ): Promise<void> {
-  if (protocolVersion >= 7) return;
+  if (protocolVersion >= 8) return;
   const checksV5Semantics = protocolVersion < 5;
   const checksV6Semantics = protocolVersion < 6;
+  const checksV7Semantics = protocolVersion < 7;
   const row = await db
     .prepare(
       `SELECT CASE WHEN EXISTS (
@@ -1671,11 +1914,16 @@ export async function assertLegacyClientCompatible(
         ) OR EXISTS (
           SELECT 1 FROM ledger_settings
           WHERE user_id = ? AND account_generation = ?
+            AND ? = 1
             AND (
               savings_goal_target_date_key IS NOT NULL
               OR savings_goal_target_minor IS NOT NULL
               OR savings_goal_needs_setup = 1
             )
+        ) OR EXISTS (
+          SELECT 1 FROM balance_adjustments
+          WHERE user_id = ? AND account_generation = ?
+            AND deleted_at IS NULL
         ) THEN 1 ELSE 0 END AS requires_upgrade`,
     )
     .bind(
@@ -1696,13 +1944,16 @@ export async function assertLegacyClientCompatible(
       checksV6Semantics ? 1 : 0,
       userId,
       generation,
+      checksV7Semantics ? 1 : 0,
+      userId,
+      generation,
     )
     .first<{ requires_upgrade: number }>();
   if (row?.requires_upgrade === 1) {
     throw new ApiError(
       409,
       "upgrade_required",
-      "This ledger uses analysis fields that require a newer client",
+      "This ledger uses facts that require a newer client",
     );
   }
 }

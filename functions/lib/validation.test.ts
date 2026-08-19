@@ -695,7 +695,7 @@ describe("validateSyncRequest", () => {
             localMonthKey: "2026-08",
             timezoneOffsetMinutes: -480,
             treatment: "ordinary_income",
-            confirmationStatus: "not_needed",
+            confirmationStatus: "confirmed",
             createdAt: "2026-08-31T01:00:00.000Z",
             updatedAt: "2026-08-31T01:00:00.000Z",
           },
@@ -765,6 +765,112 @@ describe("validateSyncRequest", () => {
     expect(() => validateSyncRequest(beforeOccurrence)).toThrowError(
       "Settings payload is invalid",
     );
+  });
+
+  it("accepts version-eight settings locks and balance adjustments", () => {
+    const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
+    request.schemaVersion = 8;
+    request.mutations = [
+      {
+        id: "mutation_lock_1",
+        entityType: "settings",
+        entityId: "primary",
+        baseVersion: 1,
+        payload: {
+          id: "primary",
+          currency: "CNY",
+          initialBalanceMinor: 500,
+          initialBalanceLockedAt: "2026-08-31T01:00:00.000Z",
+          schemaVersion: 1,
+          updatedAt: "2026-08-31T01:00:00.000Z",
+        },
+      },
+      {
+        id: "mutation_adjustment_1",
+        entityType: "balanceAdjustment",
+        entityId: "adjustment_1",
+        baseVersion: 0,
+        payload: {
+          id: "adjustment_1",
+          kind: "reconciliation",
+          amountMinor: -250,
+          balanceBeforeMinor: 1_000,
+          observedBalanceMinor: 750,
+          note: "cash check",
+          occurredAt: "2026-08-31T01:00:00.000Z",
+          localDateKey: "2026-08-31",
+          localMonthKey: "2026-08",
+          timezoneOffsetMinutes: 0,
+          createdAt: "2026-08-31T01:00:00.000Z",
+          updatedAt: "2026-08-31T01:00:00.000Z",
+        },
+      },
+    ];
+
+    expect(validateSyncRequest(request).mutations).toHaveLength(2);
+    const openingCorrection = structuredClone(request) as {
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    openingCorrection.mutations = [openingCorrection.mutations[1]];
+    openingCorrection.mutations[0].payload = {
+      ...openingCorrection.mutations[0].payload,
+      kind: "opening_correction",
+      amountMinor: 200,
+      previousOpeningMinor: 500,
+      nextOpeningMinor: 700,
+    };
+    delete openingCorrection.mutations[0].payload.balanceBeforeMinor;
+    delete openingCorrection.mutations[0].payload.observedBalanceMinor;
+    expect(() => validateSyncRequest(openingCorrection)).not.toThrow();
+  });
+
+  it("rejects invalid or pre-v8 balance adjustments", () => {
+    const request = validRequest() as {
+      schemaVersion: number;
+      mutations: Array<{
+        entityType: string;
+        entityId: string;
+        baseVersion?: number;
+        payload: Record<string, unknown>;
+      }>;
+    };
+    request.schemaVersion = 8;
+    request.mutations[0] = {
+      ...request.mutations[0],
+      entityType: "balanceAdjustment",
+      entityId: "adjustment_1",
+      payload: {
+        id: "adjustment_1",
+        kind: "reconciliation",
+        amountMinor: 100,
+        balanceBeforeMinor: 500,
+        observedBalanceMinor: 600,
+        note: "",
+        occurredAt: "2026-07-30T04:00:00.000Z",
+        localDateKey: "2026-07-30",
+        localMonthKey: "2026-07",
+        timezoneOffsetMinutes: 0,
+        createdAt: "2026-07-30T04:00:00.000Z",
+        updatedAt: "2026-07-30T04:00:00.000Z",
+      },
+    };
+    const wrongDelta = structuredClone(request);
+    wrongDelta.mutations[0].payload.amountMinor = 99;
+    expect(() => validateSyncRequest(wrongDelta)).toThrowError(ApiError);
+    const zeroDelta = structuredClone(request);
+    zeroDelta.mutations[0].payload.amountMinor = 0;
+    zeroDelta.mutations[0].payload.observedBalanceMinor = 500;
+    expect(() => validateSyncRequest(zeroDelta)).toThrowError(ApiError);
+    const lateVoid = structuredClone(request);
+    lateVoid.mutations[0].payload.updatedAt = "2026-07-30T04:00:09.000Z";
+    lateVoid.mutations[0].payload.deletedAt = "2026-07-30T04:00:09.000Z";
+    expect(() => validateSyncRequest(lateVoid)).toThrowError(ApiError);
+    const resurrection = structuredClone(request);
+    resurrection.mutations[0].baseVersion = 2;
+    expect(() => validateSyncRequest(resurrection)).toThrowError(ApiError);
+    const legacy = structuredClone(request);
+    legacy.schemaVersion = 7;
+    expect(() => validateSyncRequest(legacy)).toThrowError(ApiError);
   });
 
   it("accepts a create-then-delete tombstone without requiring its local attachment", () => {

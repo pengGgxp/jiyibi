@@ -30,13 +30,15 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
   await openLedger(page);
   await seedAnalysisLedger(page, { includeCompletedCycleExpense: true });
 
-  await expect(page.getByText("到下次", { exact: true })).toBeVisible();
+  const currentCycleLabel = page.locator(".summary-forecast").first().locator("small");
+  await expect(currentCycleLabel).toHaveText(/^到 \d{1,2}\/\d{1,2}$/);
   await expect(page.getByText("下次收入", { exact: true })).toBeVisible();
   await expect(page.locator(".summary-panel")).not.toContainText("最低收入");
   await expect(page.locator(".summary-panel")).not.toContainText("每期建议");
 
   if (testInfo.project.name === "mobile-chrome") {
-    await expect(page.getByText("到下次", { exact: true })).toBeInViewport();
+    await expect(page.getByText("可花余额", { exact: true })).toBeInViewport();
+    await expect(currentCycleLabel).toBeInViewport();
     await expect(page.getByRole("heading", { level: 2, name: "记一笔" })).toBeInViewport();
     const amountBounds = await page.getByLabel("金额").evaluate((input) => {
       const bounds = input.getBoundingClientRect();
@@ -44,14 +46,18 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
     });
     expect(amountBounds.top).toBeGreaterThanOrEqual(0);
     expect(amountBounds.bottom).toBeLessThanOrEqual(amountBounds.viewportHeight);
+    await expect(page.locator(".save-entry-button")).toBeInViewport();
   }
 
   await page.getByRole("link", { name: "分析", exact: true }).click();
   await expect(page.locator(".analysis-confidence").getByText("近 30 天", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "资金推导" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 3, name: "估算依据" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 3, name: /存钱目标/ })).toBeVisible();
-  await expect(page.getByText("每期建议", { exact: true })).toBeVisible();
-  await expect(page.getByText("下次收入", { exact: true })).toBeVisible();
+  await expect(page.getByText("每期需存", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("资金推导").getByText("下次收入", { exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText("最低收入");
+  await expect(page.locator("body")).not.toContainText("每期建议");
   await expect(page.locator("body")).not.toContainText("本周期留存");
   await expect(page.locator("body")).not.toContainText("尚需留存");
   await expect(page.locator("body")).not.toContainText("周期结算");
@@ -61,6 +67,22 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
   await expect(progress).toHaveAttribute("max", "100000");
 
   await expect(page.locator(".analysis-chart-section")).toHaveCount(3);
+  const compactChartDisclosures = page.locator(".analysis-chart-disclosure");
+  if (testInfo.project.name === "mobile-chrome") {
+    await expect(compactChartDisclosures).toHaveCount(2);
+    await expect(compactChartDisclosures.nth(0)).not.toHaveAttribute("open", "");
+    await expect(compactChartDisclosures.nth(1)).not.toHaveAttribute("open", "");
+    for (const disclosure of await compactChartDisclosures.all()) {
+      const summary = disclosure.locator(":scope > summary");
+      await summary.focus();
+      await expect(summary).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(disclosure).toHaveAttribute("open", "");
+    }
+  } else {
+    await expect(compactChartDisclosures).toHaveCount(0);
+  }
+
   await expect(page.locator(".analysis-chart .recharts-wrapper")).toHaveCount(3);
   const chartSizes = await page.locator(".analysis-chart .recharts-wrapper").evaluateAll((charts) => charts.map((chart) => {
     const bounds = chart.getBoundingClientRect();
@@ -70,10 +92,10 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
 
   const accessibleCharts = page.locator(".analysis-chart .recharts-surface[role='application']");
   await expect(accessibleCharts).toHaveCount(3);
-  await expect(accessibleCharts.nth(0)).toHaveAccessibleName("当前周期支出");
+  await expect(accessibleCharts.nth(0)).toHaveAccessibleName("本期支出");
   await expect(accessibleCharts.nth(0)).toHaveAccessibleDescription(/已支出/);
-  await expect(accessibleCharts.nth(1)).toHaveAccessibleName("完整周期支出");
-  await expect(accessibleCharts.nth(2)).toHaveAccessibleName("近 30 日支出");
+  await expect(accessibleCharts.nth(1)).toHaveAccessibleName("历史支出");
+  await expect(accessibleCharts.nth(2)).toHaveAccessibleName("每日支出");
 
   const renderedLines = await page.locator("#current-cycle-chart-title")
     .locator("xpath=ancestor::section")
@@ -103,16 +125,34 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
 
   await expect(page.locator(".analysis-chart-key")).toHaveCount(3);
   await expect(page.locator("table caption")).toHaveText([
-    "存钱明细",
     "当前周期累计支出",
     "完整到账周期支出",
     "每日支出",
+    "存钱明细",
   ]);
   const tableToggles = page.locator(".analysis-data-details summary");
   await expect(tableToggles).toHaveCount(4);
-  await tableToggles.nth(1).focus();
+  await tableToggles.nth(0).focus();
+  await expect(tableToggles.nth(0)).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(tableToggles.nth(1).locator("xpath=..//table")).toBeVisible();
+  await expect(tableToggles.nth(0).locator("xpath=..//table")).toBeVisible();
+
+  const orderedSectionIds = [
+    "analysis-outlook-title",
+    "analysis-funds-title",
+    "analysis-basis-title",
+    "current-cycle-chart-title",
+    "completed-cycle-chart-title",
+    "daily-expense-chart-title",
+    "analysis-savings-title",
+  ];
+  const sectionsFollowProductOrder = await page.evaluate((ids) => ids.every((id, index) => {
+    if (index === ids.length - 1) return true;
+    const current = document.getElementById(id);
+    const next = document.getElementById(ids[index + 1]);
+    return Boolean(current && next && current.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), orderedSectionIds);
+  expect(sectionsFollowProductOrder).toBe(true);
 
   await expectNoHorizontalOverflow(page);
   const accessibility = await new AxeBuilder({ page })
