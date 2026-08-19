@@ -158,20 +158,24 @@ GitHub OAuth 是默认生产登录路径，不依赖 Cloudflare Access。`TEAM_D
 
 ### 4. 构建并发布
 
-Cloudflare 生产构建必须设置 `VITE_CLOUD_SYNC_ENABLED=true`，否则应用仍会以纯本机模式运行。使用 Wrangler 直接发布：
+Cloudflare Pages 项目 `jiyibi` 已连接 GitHub 仓库 `pengGgxp/jiyibi`。生产分支为 `main`，构建命令为 `npm run build`，输出目录为 `dist`；`VITE_CLOUD_SYNC_ENABLED=true` 由 `wrangler.jsonc` 管理。推送到 `main` 后会自动构建并发布到 `jyb.str1ct.top`。
+
+Preview 分支自动部署已关闭，避免公开仓库的功能分支或 Pull Request 继承生产 D1/KV binding。需要预览部署时，必须先创建独立的 Preview D1 与 KV，再单独启用对应分支。
+
+D1 迁移不会随前端构建自动执行。发布依赖新表结构的版本时，先应用远程迁移并确认成功，再推送 `main`：
+
+```bash
+npx wrangler d1 migrations apply DB --remote
+git push origin main
+```
+
+Wrangler Direct Upload 仅作为 Git 构建不可用时的应急发布方式：
 
 ```powershell
 $env:VITE_CLOUD_SYNC_ENABLED = "true"
 npm run build
 npx wrangler pages deploy dist --project-name jiyibi
 ```
-
-当前生产项目应只接受审核后的直接部署，不要让公开仓库的 Pull Request 预览继承生产 D1/KV binding。若之后把 Pages 连接到 Git 仓库，必须先为 Preview 环境创建独立的 D1 与 KV，再使用以下构建设置：
-
-- Build command：`npm run build`
-- Build output directory：`dist`
-- Environment variable：`VITE_CLOUD_SYNC_ENABLED=true`
-- Node.js：22
 
 发布后，从设置页发起 GitHub 登录，确认 `/api/callback` 能建立会话，再开启同步。应同时验证新增/编辑/删除、截图上传、多设备冲突、退出会话、断网本机记账以及重新联网后的补同步。
 
