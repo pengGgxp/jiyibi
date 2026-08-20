@@ -93,7 +93,7 @@ describe("income confirmation D1 transaction", () => {
       d1Databases: { DB: crypto.randomUUID() },
     });
     database = await runtime.getD1Database("DB");
-    for (let version = 1; version <= 11; version += 1) {
+    for (let version = 1; version <= 12; version += 1) {
       const prefix = String(version).padStart(4, "0");
       const migration = new URL(
         `../../migrations/${prefix}_${[
@@ -108,6 +108,7 @@ describe("income confirmation D1 transaction", () => {
           "savings_goal",
           "savings_goal_compatibility_fix",
           "balance_adjustments",
+          "periodic_expense",
         ][version - 1]}.sql`,
         import.meta.url,
       );

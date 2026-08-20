@@ -8,6 +8,7 @@ import type {
   ProcessedImage,
   RecoveryAllocation,
 } from "../domain/types";
+import { CURRENT_DETECTION_RULE_VERSION } from "../domain/types";
 import {
   API_SCHEMA_VERSION,
   SYNC_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ import {
   applyRemoteChanges,
   assertSyncAccount,
   clearIncomeForecast,
+  closeReimbursement,
   confirmTreatmentWithAllocations,
   createDefaultSettings,
   createEntry,
@@ -714,6 +716,7 @@ describe("LedgerDatabase", () => {
       new Date("2026-07-30T13:02:00.000Z"),
     );
     expect(amountChanged.confirmationStatus).toBe("not_needed");
+    expect(amountChanged.detectionRuleVersion).toBe(CURRENT_DETECTION_RULE_VERSION);
     expect(amountChanged.promptedRevision).toBeUndefined();
     expect(evaluateExceptionPrompt(amountChanged, [amountChanged], undefined).shouldPrompt).toBe(true);
   });
@@ -722,6 +725,7 @@ describe("LedgerDatabase", () => {
     await setInitialBalance(5_000, database);
     const created = await createEntry(draft(), database);
     expect(created.amountMinor).toBe(-1234);
+    expect(created.detectionRuleVersion).toBe(CURRENT_DETECTION_RULE_VERSION);
 
     await updateEntry(created.id, draft({ kind: "income", amount: "20", note: "退款" }), database);
 
@@ -730,6 +734,8 @@ describe("LedgerDatabase", () => {
       balanceMinor: 7_000,
       monthIncomeMinor: 2_000,
       monthExpenseMinor: 0,
+      monthCashInMinor: 2_000,
+      monthCashOutMinor: 0,
     });
   });
 
@@ -1096,6 +1102,191 @@ describe("LedgerDatabase", () => {
     await expect(database.recoveryAllocations.count()).resolves.toBe(2);
   });
 
+  it("upgrades a v7 ledger without reclassifying or re-queuing historical entries", async () => {
+    const name = `jiyibi-v7-upgrade-${crypto.randomUUID()}`;
+    const legacy = new Dexie(name);
+    legacy.version(7).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      recoveryAllocations: "id, refundEntryId, expenseEntryId, deletedAt, createdAt",
+      savingsEvents: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, linkedExpenseEntryId, cycleStartDateKey, &[kind+cycleStartDateKey]",
+      balanceAdjustments: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    });
+    await legacy.open();
+    const historical: LedgerEntry = {
+      id: "historical-large-expense",
+      amountMinor: -100_000,
+      note: "历史支出",
+      occurredAt: "2026-07-30T04:00:00.000Z",
+      localDateKey: "2026-07-30",
+      localMonthKey: "2026-07",
+      timezoneOffsetMinutes: -480,
+      treatment: "ordinary_expense",
+      confirmationStatus: "not_needed",
+      createdAt: "2026-07-30T04:00:00.000Z",
+      updatedAt: "2026-07-30T04:00:00.000Z",
+    };
+    await legacy.table("entries").add(historical);
+    await legacy.table("settings").add({
+      ...createDefaultSettings(new Date("2026-07-30T04:00:00.000Z")),
+      initialBalanceLockedAt: historical.createdAt,
+    });
+    legacy.close();
+
+    const upgraded = new LedgerDatabase(name);
+    try {
+      await upgraded.open();
+      expect(upgraded.verno).toBe(INDEXED_DB_VERSION);
+      await expect(upgraded.entries.get(historical.id)).resolves.toEqual(historical);
+      await expect(upgraded.syncOutbox.count()).resolves.toBe(0);
+    } finally {
+      upgraded.close();
+      await upgraded.delete();
+    }
+  });
+
+  it.each([
+    "ordinary_expense",
+    "periodic_expense",
+    "one_time_expense",
+  ] as const)("closes a partial reimbursement as %s without removing allocations", async (
+    finalTreatment,
+  ) => {
+    const expense = await createEntry(draft({ amount: "1000.00", note: "垫付" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    const refund = await createEntry(draft({
+      kind: "income",
+      amount: "800.00",
+      note: "报销到账",
+    }), database);
+    const linked = await confirmTreatmentWithAllocations(
+      refund.id,
+      "refund_reimbursement",
+      [{ expenseEntryId: expense.id, amountMinor: 80_000 }],
+      {},
+      database,
+    );
+
+    const closed = await closeReimbursement(expense.id, finalTreatment, database);
+    expect(closed).toMatchObject({
+      treatment: finalTreatment,
+      confirmationStatus: "confirmed",
+      detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
+    });
+    const repeated = await closeReimbursement(
+      expense.id,
+      finalTreatment,
+      database,
+      new Date("2026-07-30T15:00:00.000Z"),
+    );
+    expect(repeated.updatedAt).toBe(closed.updatedAt);
+    const allocation = await database.recoveryAllocations.get(linked.allocations[0].id);
+    expect(allocation).toMatchObject({ amountMinor: 80_000 });
+    expect(allocation).not.toHaveProperty("deletedAt");
+    await expect(getLedgerSummary("2026-07", database)).resolves.toMatchObject({
+      balanceMinor: -20_000,
+      monthIncomeMinor: 0,
+      monthExpenseMinor: 20_000,
+      monthCashInMinor: 80_000,
+      monthCashOutMinor: 100_000,
+    });
+  });
+
+  it("rolls back reimbursement closing when its sync mutation fails", async () => {
+    const expense = await createEntry(draft({ amount: "1000.00", note: "垫付" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+    const put = vi.spyOn(database.syncOutbox, "put").mockRejectedValueOnce(new Error("quota"));
+
+    await expect(closeReimbursement(expense.id, "periodic_expense", database))
+      .rejects.toThrow("quota");
+    expect(await database.entries.get(expense.id)).toMatchObject({
+      treatment: "reimbursable_expense",
+    });
+    await expect(database.syncOutbox.count()).resolves.toBe(0);
+    put.mockRestore();
+  });
+
+  it("rejects closing a reimbursement with a missing allocation endpoint", async () => {
+    const expense = await createEntry(draft({ amount: "1000.00", note: "垫付" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    const nowIso = new Date("2026-07-30T14:00:00.000Z").toISOString();
+    await database.recoveryAllocations.put({
+      id: "missing-refund-allocation",
+      refundEntryId: "missing-refund",
+      expenseEntryId: expense.id,
+      amountMinor: 50_000,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+
+    await expect(closeReimbursement(expense.id, "ordinary_expense", database))
+      .rejects.toMatchObject({ code: "not-found" });
+    expect(await database.entries.get(expense.id)).toMatchObject({
+      treatment: "reimbursable_expense",
+    });
+  });
+
+  it("rejects closing a reimbursement with a deleted allocation endpoint", async () => {
+    const expense = await createEntry(draft({ amount: "1000.00", note: "垫付" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    const refund = await createEntry(draft({
+      kind: "income",
+      amount: "800.00",
+      note: "报销到账",
+    }), database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 50_000,
+    }, database);
+    const deletedAt = "2026-07-30T14:00:00.000Z";
+    await database.entries.update(refund.id, { deletedAt, updatedAt: deletedAt });
+
+    await expect(closeReimbursement(expense.id, "periodic_expense", database))
+      .rejects.toMatchObject({ code: "deleted" });
+    expect(await database.entries.get(expense.id)).toMatchObject({
+      treatment: "reimbursable_expense",
+    });
+    expect(await database.recoveryAllocations.get(allocation.id)).not.toHaveProperty("deletedAt");
+  });
+
+  it("rejects closing a reimbursement with an over-allocated split", async () => {
+    const expense = await createEntry(draft({ amount: "1000.00", note: "垫付" }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    const refund = await createEntry(draft({
+      kind: "income",
+      amount: "1200.00",
+      note: "报销到账",
+    }), database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const nowIso = "2026-07-30T14:00:00.000Z";
+    await database.recoveryAllocations.put({
+      id: "over-allocated-split",
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 100_001,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await linkSyncAccount(session(), true, database);
+    await database.syncOutbox.clear();
+
+    await expect(closeReimbursement(expense.id, "one_time_expense", database))
+      .rejects.toMatchObject({ code: "over-allocated" });
+    expect(await database.entries.get(expense.id)).toMatchObject({
+      treatment: "reimbursable_expense",
+    });
+    await expect(database.syncOutbox.count()).resolves.toBe(0);
+  });
+
   it("rolls back treatment and every allocation when one split exceeds its expense", async () => {
     const first = await createEntry(draft({ amount: "20.00", note: "first" }), database);
     const second = await createEntry(draft({ amount: "10.00", note: "second" }), database);
@@ -1293,6 +1484,103 @@ describe("LedgerDatabase", () => {
     expect(
       (await database.syncOutbox.get(`recoveryAllocation:${allocation.id}`))?.payload,
     ).not.toHaveProperty("deletedAt");
+  });
+
+  it.each(["expense-first", "refund-first"] as const)(
+    "restores a cascade-deleted allocation after both endpoints are undone (%s)",
+    async (undoOrder) => {
+      const expense = await createEntry(draft({ amount: "20.00", note: "垫付" }), database);
+      const refund = await createEntry(draft({
+        kind: "income",
+        amount: "10.00",
+        note: "报销到账",
+      }), database);
+      await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+      await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+      const allocation = await upsertRecoveryAllocation({
+        refundEntryId: refund.id,
+        expenseEntryId: expense.id,
+        amountMinor: 500,
+      }, database);
+      const expenseDeletedAt = new Date("2026-07-30T14:00:00.000Z");
+      const refundDeletedAt = new Date("2026-07-30T14:01:00.000Z");
+      await softDeleteEntry(expense.id, database, expenseDeletedAt);
+      await softDeleteEntry(refund.id, database, refundDeletedAt);
+
+      expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+        deletedAt: expenseDeletedAt.toISOString(),
+        updatedAt: refundDeletedAt.toISOString(),
+      });
+
+      const firstId = undoOrder === "expense-first" ? expense.id : refund.id;
+      const secondId = undoOrder === "expense-first" ? refund.id : expense.id;
+      await undoDeleteEntry(firstId, database, new Date("2026-07-30T14:02:00.000Z"));
+      expect(await database.recoveryAllocations.get(allocation.id)).toHaveProperty("deletedAt");
+      await undoDeleteEntry(secondId, database, new Date("2026-07-30T14:03:00.000Z"));
+      expect(await database.recoveryAllocations.get(allocation.id)).not.toHaveProperty("deletedAt");
+    },
+  );
+
+  it("does not restore an allocation the user deleted independently", async () => {
+    const expense = await createEntry(draft({ amount: "20.00", note: "垫付" }), database);
+    const refund = await createEntry(draft({
+      kind: "income",
+      amount: "10.00",
+      note: "报销到账",
+    }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    const independentlyDeletedAt = new Date("2026-07-30T13:59:00.000Z");
+    await softDeleteRecoveryAllocation(allocation.id, database, independentlyDeletedAt);
+    await softDeleteEntry(expense.id, database, new Date("2026-07-30T14:00:00.000Z"));
+    await softDeleteEntry(refund.id, database, new Date("2026-07-30T14:01:00.000Z"));
+
+    await undoDeleteEntry(refund.id, database, new Date("2026-07-30T14:02:00.000Z"));
+    await undoDeleteEntry(expense.id, database, new Date("2026-07-30T14:03:00.000Z"));
+    expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+      deletedAt: independentlyDeletedAt.toISOString(),
+      updatedAt: independentlyDeletedAt.toISOString(),
+    });
+  });
+
+  it("rolls back entry and allocation restoration when its outbox write fails", async () => {
+    const expense = await createEntry(draft({ amount: "20.00", note: "垫付" }), database);
+    const refund = await createEntry(draft({
+      kind: "income",
+      amount: "10.00",
+      note: "报销到账",
+    }), database);
+    await updateEntryTreatment(expense.id, "reimbursable_expense", {}, database);
+    await updateEntryTreatment(refund.id, "refund_reimbursement", {}, database);
+    const allocation = await upsertRecoveryAllocation({
+      refundEntryId: refund.id,
+      expenseEntryId: expense.id,
+      amountMinor: 500,
+    }, database);
+    await linkSyncAccount(session(), true, database);
+    const deletedAt = new Date("2026-07-30T14:00:00.000Z");
+    await softDeleteEntry(expense.id, database, deletedAt);
+    await database.syncOutbox.clear();
+    const put = vi.spyOn(database.syncOutbox, "put").mockRejectedValueOnce(new Error("quota"));
+
+    await expect(undoDeleteEntry(
+      expense.id,
+      database,
+      new Date("2026-07-30T14:01:00.000Z"),
+    )).rejects.toThrow("quota");
+    expect(await database.entries.get(expense.id)).toMatchObject({
+      deletedAt: deletedAt.toISOString(),
+    });
+    expect(await database.recoveryAllocations.get(allocation.id)).toMatchObject({
+      deletedAt: deletedAt.toISOString(),
+    });
+    await expect(database.syncOutbox.count()).resolves.toBe(0);
+    put.mockRestore();
   });
 
   it("applies and resolves recovery allocation conflicts", async () => {

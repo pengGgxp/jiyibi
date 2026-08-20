@@ -2,14 +2,16 @@ import {
   CURRENT_DETECTION_RULE_VERSION,
   type EntryTreatment,
   type LedgerEntry,
+  type RecoveryAllocation,
   type SpendingAnalysis,
 } from "./types";
 import { normalizeLedgerEntry } from "./entry-treatment";
+import { calculateSpendingStatisticsWindow } from "./stats";
 
-/** Calibrated high-signal thresholds for synthetic representative ledgers. */
-export const EXCEPTION_SHARE_OF_WINDOW = 0.25;
-export const EXCEPTION_DAILY_MULTIPLIER = 5;
-export const EXCEPTION_ABSOLUTE_MINOR = 50_000;
+/** Expense prompts start at CNY 200 or three completed-day averages. */
+export const EXCEPTION_DAILY_MULTIPLIER = 3;
+export const EXCEPTION_ABSOLUTE_MINOR = 20_000;
+export const INCOME_EXCEPTION_ABSOLUTE_MINOR = 50_000;
 export const REFUND_MATCH_TOLERANCE_MINOR = 100;
 export const REFUND_LOOKBACK_DAYS = 60;
 
@@ -31,21 +33,61 @@ function sameRevisionAlreadyPrompted(entry: LedgerEntry): boolean {
     && (entry.confirmationStatus === "pending" || entry.confirmationStatus === "confirmed");
 }
 
+export function expensePromptThresholdMinor(
+  analysis: Pick<SpendingAnalysis, "window"> | undefined,
+): number {
+  if (analysis && (
+    !Number.isSafeInteger(analysis.window.totalExpenseMinor)
+    || analysis.window.totalExpenseMinor < 0
+    || !Number.isSafeInteger(analysis.window.observedDays)
+    || analysis.window.observedDays < 0
+    || !Number.isSafeInteger(analysis.window.daysNeeded)
+    || analysis.window.daysNeeded <= 0
+  )) {
+    throw new RangeError("expense confirmation baseline is invalid");
+  }
+  if (
+    !analysis
+    || analysis.window.observedDays < analysis.window.daysNeeded
+    || analysis.window.observedDays <= 0
+  ) {
+    return EXCEPTION_ABSOLUTE_MINOR;
+  }
+  const numerator = BigInt(analysis.window.totalExpenseMinor)
+    * BigInt(EXCEPTION_DAILY_MULTIPLIER);
+  const denominator = BigInt(analysis.window.observedDays);
+  const dailyThreshold = (numerator + denominator - 1n) / denominator;
+  if (dailyThreshold > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError("expense confirmation threshold exceeds the safe integer range");
+  }
+  return Math.max(EXCEPTION_ABSOLUTE_MINOR, Number(dailyThreshold));
+}
+
 /**
  * High-signal check after a successful save. Conservative defaults:
- * large share of recent baseline, large absolute amount, or near-match refund candidate.
+ * three completed-day averages, a CNY 200 floor, or a near-match refund candidate.
  * Never auto-classifies treatment.
  */
 export function evaluateExceptionPrompt(
   entry: LedgerEntry,
   allEntries: readonly LedgerEntry[],
   analysis: SpendingAnalysis | undefined,
+  allocations: readonly RecoveryAllocation[] = [],
+  now = new Date(),
 ): ExceptionPromptDecision {
   const normalized = normalizeLedgerEntry(entry);
   const kind: ExceptionPromptKind = normalized.amountMinor < 0 ? "expense" : "income";
   const reasons: string[] = [];
 
   if (normalized.deletedAt) {
+    return {
+      shouldPrompt: false,
+      kind,
+      reasons,
+      detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
+    };
+  }
+  if (normalized.detectionRuleVersion !== CURRENT_DETECTION_RULE_VERSION) {
     return {
       shouldPrompt: false,
       kind,
@@ -85,19 +127,14 @@ export function evaluateExceptionPrompt(
   const amount = absMinor(normalized);
 
   if (kind === "expense") {
-    const windowTotal = analysis?.window.totalExpenseMinor ?? 0;
-    const average = analysis?.window.averageDailyExpenseMinor ?? 0;
-    const shareThreshold = windowTotal > 0
-      ? Math.floor(windowTotal * EXCEPTION_SHARE_OF_WINDOW)
-      : 0;
-    const dailyThreshold = average > 0
-      ? average * EXCEPTION_DAILY_MULTIPLIER
-      : 0;
-    const threshold = Math.max(
-      shareThreshold,
-      dailyThreshold,
-      EXCEPTION_ABSOLUTE_MINOR,
-    );
+    const thresholdSource = analysis ?? {
+      window: calculateSpendingStatisticsWindow(
+        allEntries.filter((candidate) => candidate.id !== normalized.id),
+        allocations,
+        now,
+      ),
+    };
+    const threshold = expensePromptThresholdMinor(thresholdSource);
     if (amount >= threshold) {
       reasons.push("large_expense");
     }
@@ -113,14 +150,15 @@ export function evaluateExceptionPrompt(
         const scale = analysis.currentCycle.estimatedRemainingExpenseMinor;
         if (scale !== undefined && analysis.window.observedDays > 0) {
           // If removing this expense would cut remaining spend enough to cross the goal, prompt.
-          const reduction = scale - Math.floor(
-            (scale * adjustedTotal) / analysis.window.totalExpenseMinor,
-          );
+          const projectedWithoutEntry = (
+            BigInt(scale) * BigInt(adjustedTotal)
+          ) / BigInt(analysis.window.totalExpenseMinor);
+          const reduction = BigInt(scale) - projectedWithoutEntry;
           const diff = analysis.currentCycle.balanceGoalDifferenceMinor;
           if (
             diff !== undefined
             && analysis.currentCycle.affordability === "shortfall"
-            && diff + BigInt(reduction) >= 0n
+            && diff + reduction >= 0n
           ) {
             reasons.push("flips_affordability");
           }
@@ -141,7 +179,7 @@ export function evaluateExceptionPrompt(
       return Math.abs(absMinor(other) - amount) <= REFUND_MATCH_TOLERANCE_MINOR;
     });
     if (match) reasons.push("possible_refund");
-    if (amount >= EXCEPTION_ABSOLUTE_MINOR) reasons.push("large_income");
+    if (amount >= INCOME_EXCEPTION_ABSOLUTE_MINOR) reasons.push("large_income");
   }
 
   return {
@@ -160,8 +198,13 @@ export function expenseTreatmentOptions(): Array<{
   return [
     {
       value: "ordinary_expense",
-      label: "日常支出",
+      label: "按日常算",
       detail: "计入日常花法，用来估算以后够不够花。",
+    },
+    {
+      value: "periodic_expense",
+      label: "周期账单",
+      detail: "计入个人支出，但不用于推算日常花法。",
     },
     {
       value: "one_time_expense",
@@ -170,7 +213,7 @@ export function expenseTreatmentOptions(): Array<{
     },
     {
       value: "reimbursable_expense",
-      label: "之后会报销",
+      label: "之后报销",
       detail: "先减少当前余额；报销到账前不计入日常花法。",
     },
     {

@@ -557,6 +557,20 @@ main:focus {
   gap: 0.55rem;
 }
 
+fieldset.treatment-confirm-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.treatment-confirm-options legend {
+  margin-bottom: 0.55rem;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
 .treatment-confirm-option {
   display: flex;
   gap: 0.7rem;
@@ -595,6 +609,26 @@ main:focus {
   color: var(--muted-strong);
   font-size: 0.72rem;
   line-height: 1.45;
+}
+
+.treatment-confirm-ordinary {
+  justify-self: start;
+  min-height: 2.75rem;
+  padding-inline: 0.25rem;
+}
+
+.reimbursement-close {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.reimbursement-close-amount {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 1rem;
+  font-weight: 780;
+  font-variant-numeric: tabular-nums;
 }
 
 .recovery-allocation-list {
@@ -2158,6 +2192,13 @@ button.summary-savings-warning {
   margin-top: 0.2rem;
   color: var(--muted);
   font-size: 0.7rem;
+}
+
+.record-reimbursement-action {
+  min-height: 2.75rem;
+  margin-top: 0.2rem;
+  padding-inline: 0;
+  font-size: 0.72rem;
 }
 
 .record-row > strong {

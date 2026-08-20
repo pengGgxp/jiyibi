@@ -26,6 +26,7 @@ const MIGRATION_NAMES = [
   "savings_goal",
   "savings_goal_compatibility_fix",
   "balance_adjustments",
+  "periodic_expense",
 ] as const;
 
 type SettingsMutation = Extract<SyncMutation, { entityType: "settings" }>;
@@ -33,7 +34,7 @@ type AdjustmentMutation = Extract<SyncMutation, { entityType: "balanceAdjustment
 
 async function applyMigrations(
   database: D1Database,
-  through = 11,
+  through = 12,
   from = 1,
 ): Promise<void> {
   for (let version = from; version <= through; version += 1) {
@@ -50,7 +51,7 @@ async function applyMigrations(
   }
 }
 
-async function createDatabase(through = 11): Promise<{
+async function createDatabase(through = 12): Promise<{
   runtime: Miniflare;
   database: D1Database;
 }> {
@@ -150,6 +151,8 @@ describe("balance adjustment D1 sync", () => {
       .resolves.toMatchObject({ status: "applied", version: 1 });
     await expect(applyMutation(database, USER_ID, GENERATION, mutation, 8))
       .resolves.toMatchObject({ status: "duplicate", version: 1 });
+    await expect(assertLegacyClientCompatible(database, USER_ID, GENERATION, 8))
+      .resolves.toBeUndefined();
 
     await database.prepare(
       `UPDATE sync_changes SET payload_json = '{}'

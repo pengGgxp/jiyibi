@@ -1,6 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { addTextEntry, dismissOfflineReady, openLedger } from "./helpers";
+import {
+  addTextEntry,
+  dismissOfflineReady,
+  ensureServiceWorkerControl,
+  openLedger,
+} from "./helpers";
 
 test("初始余额锁定后通过审计调整，编辑和删除仍准确重算", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop-chrome", "完整变更流只需在桌面项目执行一次");
@@ -82,7 +87,7 @@ test("大额交易统一进入待处理，稍后操作在当天刷新后仍隐�
   await settings.getByRole("button", { name: "关闭设置" }).click();
 
   await addTextEntry(page, { amount: "800.00", note: "一次性设备" });
-  const prompt = page.getByRole("dialog", { name: "这笔支出会明显影响估算" });
+  const prompt = page.getByRole("dialog", { name: "这笔怎么算" });
   const totalBalance = page.locator(".summary-savings-grid div")
     .filter({ hasText: "总余额" })
     .locator("dd");
@@ -126,14 +131,14 @@ test("大额交易统一进入待处理，稍后操作在当天刷新后仍隐�
   await page.getByRole("link", { name: "记账" }).click();
 
   const record = page.getByRole("article").filter({ hasText: "一次性设备" });
-  await expect(record).toContainText("支出 · 一次性");
+  await expect(record).toContainText("支出 · 仅这一次");
   await expect(totalBalance).toHaveText("-¥1,600.00");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await dismissOfflineReady(page);
   await expect(prompt).toHaveCount(0);
   await expect(page.getByRole("article").filter({ hasText: "一次性设备" }))
-    .toContainText("支出 · 一次性");
+    .toContainText("支出 · 仅这一次");
   await expect(page.getByRole("article").filter({ hasText: "稍后设备" }))
     .toContainText("支出 · 待确认");
   await expect(pendingStrip).toHaveCount(0);
@@ -354,40 +359,44 @@ test("支出穿透存款时预填实际缺口，账户转账不会误提示", as
   const settings = page.getByRole("dialog", { name: "设置" });
   await settings.locator("#initial-balance").fill("1000.00");
   await settings.getByRole("button", { name: "保存余额" }).click();
-  await settings.locator("#initial-savings").fill("800.00");
+  await settings.locator("#initial-savings").fill("850.00");
   await settings.getByRole("button", { name: "保存存款" }).click();
   await settings.getByRole("switch", { name: /启用发薪日/ }).check();
   await settings.locator("#payday-day").fill("28");
   await settings.getByRole("button", { name: "保存发薪日" }).click();
   await settings.getByRole("button", { name: "关闭设置" }).click();
 
-  await addTextEntry(page, { amount: "250.00", note: "动用测试" });
+  await addTextEntry(page, { amount: "190.00", note: "动用测试" });
   const savingsPrompt = page.getByRole("dialog", { name: "确认取用" });
   await expect(savingsPrompt).toBeVisible();
-  await expect(savingsPrompt.getByLabel("使用存款")).toHaveValue("50.00");
+  await expect(savingsPrompt.getByLabel("使用存款")).toHaveValue("40.00");
   await savingsPrompt.getByRole("button", { name: "确认取用", exact: true }).click();
   await expect(savingsPrompt).toBeHidden();
-  await expect(page.locator(".summary-panel")).toContainText("已存¥750.00");
+  await expect(page.locator(".summary-panel")).toContainText("已存¥810.00");
 
   await addTextEntry(page, { amount: "800.00", note: "账户调拨" });
-  const treatment = page.getByRole("dialog", { name: "这笔支出会明显影响估算" });
+  const treatment = page.getByRole("dialog", { name: "这笔怎么算" });
   await expect(treatment).toBeVisible();
-  await treatment.getByRole("radio", { name: /自己的账户间转账/ }).check();
-  await treatment.getByRole("button", { name: "确认", exact: true }).click();
+  await treatment.getByRole("button", { name: "按日常算" }).click();
   await expect(treatment).toBeHidden();
+  await page.getByRole("button", { name: "编辑账户调拨" }).click();
+  const transferEditor = page.getByRole("dialog", { name: "编辑记录" });
+  await transferEditor.getByLabel("分析处理方式").selectOption("account_transfer");
+  await transferEditor.getByRole("button", { name: "保存修改" }).click();
+  await expect(transferEditor).toBeHidden();
   await expect(savingsPrompt).toHaveCount(0);
   await expect(page.getByRole("article").filter({ hasText: "账户调拨" }))
-    .toContainText("账户间转账");
+    .toContainText("账户转账");
 
   await page.getByRole("button", { name: "编辑动用测试" }).click();
   const editor = page.getByRole("dialog", { name: "编辑记录" });
-  await editor.getByLabel("金额").fill("300.00");
+  await editor.getByLabel("金额").fill("199.00");
   await editor.getByRole("button", { name: "保存修改" }).click();
   await expect(savingsPrompt).toBeVisible();
-  await expect(savingsPrompt.getByLabel("使用存款")).toHaveValue("50.00");
+  await expect(savingsPrompt.getByLabel("使用存款")).toHaveValue("9.00");
   await savingsPrompt.getByRole("button", { name: "确认取用", exact: true }).click();
   await expect(savingsPrompt).toBeHidden();
-  await expect(page.locator(".summary-panel")).toContainText("已存¥700.00");
+  await expect(page.locator(".summary-panel")).toContainText("已存¥801.00");
 });
 
 test("退款可稍后从待处理原子关联多笔支出", async ({ page }, testInfo) => {
@@ -401,10 +410,17 @@ test("退款可稍后从待处理原子关联多笔支出", async ({ page }, tes
   await settings.getByRole("button", { name: "关闭设置" }).click();
 
   await addTextEntry(page, { amount: "300.00", note: "设备配件" });
+  const expenseTreatment = page.getByRole("dialog", { name: "这笔怎么算" });
+  await expenseTreatment.getByRole("radio", { name: /之后报销/ }).check();
+  await expenseTreatment.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(expenseTreatment).toBeHidden();
   await addTextEntry(page, { amount: "250.00", note: "差旅支出" });
+  await expenseTreatment.getByRole("radio", { name: /之后报销/ }).check();
+  await expenseTreatment.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(expenseTreatment).toBeHidden();
   await addTextEntry(page, { amount: "500.00", note: "报销到账", kind: "income" });
 
-  const treatment = page.getByRole("dialog", { name: "确认这笔资金的来源" });
+  const treatment = page.getByRole("dialog", { name: "确认资金来源" });
   await expect(treatment).toBeVisible();
   await treatment.getByRole("radio", { name: /退款或报销/ }).check();
   await treatment.getByRole("button", { name: "确认", exact: true }).click();
@@ -412,6 +428,12 @@ test("退款可稍后从待处理原子关联多笔支出", async ({ page }, tes
   const allocation = page.getByRole("dialog", { name: "关联支出" });
   await expect(allocation).toContainText("设备配件");
   await expect(allocation).toContainText("差旅支出");
+  const allocationGroup = allocation.getByRole("group", { name: "选择原支出" });
+  await expect(allocationGroup).toBeFocused();
+  await allocation.getByRole("button", { name: "返回" }).click();
+  await expect(treatment.getByRole("radio", { name: /退款或报销/ })).toBeFocused();
+  await treatment.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(allocationGroup).toBeFocused();
   await allocation.getByRole("button", { name: "稍后关联" }).click();
   await expect(allocation).toBeHidden();
 
@@ -436,7 +458,25 @@ test("退款可稍后从待处理原子关联多笔支出", async ({ page }, tes
   await expect(allocation).toBeHidden();
   await expect(pendingStrip).toHaveCount(0);
   await expect(page.getByRole("article").filter({ hasText: "报销到账" }))
-    .toContainText("收入 · 退款");
+    .toContainText("收入 · 退款报销");
+
+  const deviceRecord = page.getByRole("article").filter({ hasText: "设备配件" });
+  const travelRecord = page.getByRole("article").filter({ hasText: "差旅支出" });
+  await expect(deviceRecord).toContainText("待报 ¥25.00");
+  await expect(travelRecord).toContainText("待报 ¥25.00");
+
+  await deviceRecord.getByRole("button", { name: "结束报销" }).click();
+  const closeReimbursement = page.getByRole("dialog", { name: "结束报销" });
+  await expect(closeReimbursement).toContainText("未报 ¥25.00");
+  await closeReimbursement.getByRole("radio", { name: /按日常算/ }).check();
+  await closeReimbursement.getByRole("button", { name: "确认结束" }).click();
+  await expect(deviceRecord).toContainText("自付 ¥25.00");
+  await expect(deviceRecord.getByRole("button", { name: "编辑设备配件" })).toBeFocused();
+
+  await travelRecord.getByRole("button", { name: "结束报销" }).click();
+  await closeReimbursement.getByRole("radio", { name: /周期账单/ }).check();
+  await closeReimbursement.getByRole("button", { name: "确认结束" }).click();
+  await expect(travelRecord).toContainText("周期账单 · 自付 ¥25.00");
 
   const persisted = await page.evaluate(async () => {
     interface StoredEntry {
@@ -464,15 +504,19 @@ test("退款可稍后从待处理原子关联多笔支出", async ({ page }, tes
       .filter((item) => !item.deletedAt);
     database.close();
     const refund = entries.find((entry) => entry.note === "报销到账");
+    const device = entries.find((entry) => entry.note === "设备配件");
+    const travel = entries.find((entry) => entry.note === "差旅支出");
     return {
       treatment: refund?.treatment,
       confirmationStatus: refund?.confirmationStatus,
+      closedTreatments: [device?.treatment, travel?.treatment],
       allocationAmounts: allocations.map((item) => item.amountMinor).sort((left, right) => left - right),
     };
   });
   expect(persisted).toEqual({
     treatment: "refund_reimbursement",
     confirmationStatus: "confirmed",
+    closedTreatments: ["ordinary_expense", "periodic_expense"],
     allocationAmounts: [22_500, 27_500],
   });
 });
@@ -518,19 +562,7 @@ test("预缓存后离线重载仍可新增并持久化", async ({ page, context 
   await openLedger(page);
   await addTextEntry(page, { amount: "16.00", note: "在线记录" });
 
-  await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller) {
-      await new Promise<void>((resolve, reject) => {
-        const timer = window.setTimeout(() => reject(new Error("Service Worker 未接管页面")), 10_000);
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-          window.clearTimeout(timer);
-          resolve();
-        }, { once: true });
-        void registration.update();
-      });
-    }
-  });
+  await ensureServiceWorkerControl(page);
 
   await context.setOffline(true);
   try {

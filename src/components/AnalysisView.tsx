@@ -137,7 +137,7 @@ function ChartKey({
   kind,
   children,
 }: {
-  kind: "actual" | "predicted" | "expense";
+  kind: "actual" | "predicted" | "expense" | "outflow";
   children: ReactNode;
 }) {
   return (
@@ -242,7 +242,9 @@ function AnalysisBasis({ analysis }: { analysis: SpendingAnalysis }) {
       <details>
         <summary>
           <span>日常 {displayAmount(analysis.includedExpenseMinor)}</span>
-          <span>排除 {displayAmount(analysis.excludedExpenseMinor)}</span>
+          <span>周期 {displayAmount(analysis.periodicExpenseMinor)}</span>
+          <span>一次 {displayAmount(analysis.oneTimeExpenseMinor)}</span>
+          <span>待报 {displayAmount(analysis.pendingReimbursementMinor)}</span>
           <span>待确认 {analysis.pendingConfirmationCount}</span>
         </summary>
         <div className="analysis-basis-detail">
@@ -255,6 +257,18 @@ function AnalysisBasis({ analysis }: { analysis: SpendingAnalysis }) {
         </div>
       </details>
     </section>
+  );
+}
+
+function CashflowDetails({ summary }: { summary?: LedgerSummary }) {
+  return (
+    <details className="analysis-cashflow">
+      <summary>实际现金流</summary>
+      <dl>
+        <div><dt>流入</dt><dd>{displayAmount(summary?.monthCashInMinor)}</dd></div>
+        <div><dt>流出</dt><dd>{displayAmount(summary?.monthCashOutMinor)}</dd></div>
+      </dl>
+    </details>
   );
 }
 
@@ -302,8 +316,8 @@ function StatePanel({
 function CurrentCycleTable({ analysis }: { analysis: SpendingAnalysis }) {
   return (
     <table>
-      <caption>当前周期累计支出</caption>
-      <thead><tr><th scope="col">日期</th><th scope="col">实际支出</th><th scope="col">预测支出</th></tr></thead>
+      <caption>本期流出</caption>
+      <thead><tr><th scope="col">日期</th><th scope="col">实际流出</th><th scope="col">日常预测</th></tr></thead>
       <tbody>
         {analysis.currentCycleSeries.length ? analysis.currentCycleSeries.map((point) => (
           <tr key={point.dateKey}>
@@ -320,8 +334,8 @@ function CurrentCycleTable({ analysis }: { analysis: SpendingAnalysis }) {
 function CompletedCyclesTable({ analysis }: { analysis: SpendingAnalysis }) {
   return (
     <table>
-      <caption>完整到账周期支出</caption>
-      <thead><tr><th scope="col">周期</th><th scope="col">天数</th><th scope="col">实际支出</th></tr></thead>
+      <caption>周期流出</caption>
+      <thead><tr><th scope="col">周期</th><th scope="col">天数</th><th scope="col">实际流出</th></tr></thead>
       <tbody>
         {analysis.completedCycles.length ? analysis.completedCycles.map((cycle) => (
           <tr key={cycle.cycleStartDateKey}>
@@ -513,7 +527,7 @@ export function AnalysisView({
               <section className="analysis-outlook" aria-labelledby="analysis-outlook-title">
                 <div className="analysis-outlook-heading">
                   <h3 id="analysis-outlook-title">结论</h3>
-                  <p className="analysis-method"><Info aria-hidden="true" /> 按已记录的日常支出估算。</p>
+                  <p className="analysis-method"><Info aria-hidden="true" /> 只算日常；不含周期、一次、待报。</p>
                 </div>
                 <div className="analysis-verdict-grid">
                   <article className={`analysis-verdict analysis-verdict--${analysis.currentCycle.affordability ?? "pending"}`}>
@@ -568,20 +582,21 @@ export function AnalysisView({
                 <dl className="analysis-metrics analysis-supporting-metrics">
                   <Metric label="总余额" value={summary ? displayAmount(summary.balanceMinor) : "—"} />
                   <Metric label="已存" value={displayAmount(analysis.retainedSavings?.totalRetainedMinor ?? 0n)} />
-                  <Metric label="本期支出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} />
+                  <Metric label="本期流出" value={displayAmount(analysis.currentCycle.actualExpenseMinor)} />
                   <Metric label="本月收入" value={summary ? displayAmount(summary.monthIncomeMinor) : "—"} tone="positive" />
                   <Metric label="本月支出" value={summary ? displayAmount(summary.monthExpenseMinor) : "—"} tone="negative" />
                   <Metric label="近日均" value={displayAmount(analysis.window.averageDailyExpenseMinor)} detail={`${analysis.window.observedDays} 个完整日`} />
                 </dl>
+                <CashflowDetails summary={summary} />
               </section>
 
               <AnalysisBasis analysis={analysis} />
 
               <ChartFrame
                 id="current-cycle-chart"
-                title="本期支出"
-                description={`已支出 ${displayAmount(analysis.currentCycle.actualExpenseMinor)}。`}
-                keys={<><ChartKey kind="actual">实际支出</ChartKey><ChartKey kind="predicted">预测支出</ChartKey></>}
+                title="本期流出"
+                description={`已流出 ${displayAmount(analysis.currentCycle.actualExpenseMinor)}；虚线只预测日常。`}
+                keys={<><ChartKey kind="actual">实际流出</ChartKey><ChartKey kind="predicted">日常预测</ChartKey></>}
                 table={<CurrentCycleTable analysis={analysis} />}
               >
                 {analysis.currentCycleSeries.length ? (
@@ -591,20 +606,20 @@ export function AnalysisView({
                       <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} minTickGap={18} />
                       <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                       <Tooltip formatter={(value) => tooltipAmount(value)} labelFormatter={(label) => `日期 ${label}`} />
-                      <Line type="monotone" dataKey="actualCumulativeMinor" name="实际支出" stroke="var(--focus)" strokeWidth={2.5} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
-                      <Line type="monotone" dataKey="projectedCumulativeMinor" name="预测支出" stroke="var(--expense)" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls={false} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="actualCumulativeMinor" name="实际流出" stroke="var(--focus)" strokeWidth={2.5} dot={{ r: 3 }} connectNulls={false} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="projectedCumulativeMinor" name="日常预测" stroke="var(--expense)" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls={false} isAnimationActive={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : <p className="analysis-chart-empty">当前周期暂无支出。</p>}
               </ChartFrame>
 
               <div className="analysis-chart-grid">
-                <SecondaryChart compact={compactCharts} label="历史支出">
+                <SecondaryChart compact={compactCharts} label="周期流出">
                   <ChartFrame
                     id="completed-cycle-chart"
-                    title="历史支出"
+                    title="周期流出"
                     description={analysis.completedCycles.length ? `最近 ${analysis.completedCycles.length} 个完整周期。` : undefined}
-                    keys={<ChartKey kind="expense">实际支出</ChartKey>}
+                    keys={<ChartKey kind="outflow">实际流出</ChartKey>}
                     table={<CompletedCyclesTable analysis={analysis} />}
                   >
                     {analysis.completedCycles.length ? (
@@ -614,7 +629,7 @@ export function AnalysisView({
                           <XAxis dataKey="dateLabel" tickLine={false} axisLine={false} interval="preserveStartEnd" angle={-18} textAnchor="end" height={42} />
                           <YAxis tickFormatter={axisAmount} tickLine={false} axisLine={false} width={56} />
                           <Tooltip formatter={(value) => tooltipAmount(value)} />
-                          <Bar dataKey="expenseMinor" name="实际支出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+                          <Bar dataKey="expenseMinor" name="实际流出" fill="var(--focus)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
                         </BarChart>
                       </ResponsiveContainer>
                     ) : <p className="analysis-chart-empty">暂无完整周期数据。</p>}
@@ -625,7 +640,7 @@ export function AnalysisView({
                   <ChartFrame
                     id="daily-expense-chart"
                     title="每日支出"
-                    description={analysis.dailyExpenses.length ? `${analysis.window.observedDays} 个完整日共支出 ${displayAmount(analysis.window.totalExpenseMinor)}。` : undefined}
+                    description={analysis.dailyExpenses.length ? `${analysis.window.observedDays} 个完整日共 ${displayAmount(analysis.window.totalExpenseMinor)}；仅含日常。` : undefined}
                     keys={<ChartKey kind="expense">每日支出</ChartKey>}
                     table={<DailyExpensesTable analysis={analysis} />}
                   >

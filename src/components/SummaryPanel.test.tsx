@@ -10,7 +10,13 @@ import type {
 } from "../domain";
 import { SummaryPanel } from "./SummaryPanel";
 
-const summary: LedgerSummary = { balanceMinor: 80_000, monthIncomeMinor: 100_000, monthExpenseMinor: 20_000 };
+const summary: LedgerSummary = {
+  balanceMinor: 80_000,
+  monthIncomeMinor: 100_000,
+  monthExpenseMinor: 20_000,
+  monthCashInMinor: 100_000,
+  monthCashOutMinor: 20_000,
+};
 const plan: PayCyclePlan = { paydayDay: 10 };
 const retained: RetainedSavingsSummary = {
   openingRetainedMinor: 20_000n,
@@ -50,6 +56,9 @@ function analysis(outcome: ForecastOutcome = "surplus", confidence: SpendingAnal
     },
     includedExpenseMinor: 30_000,
     excludedExpenseMinor: 0,
+    periodicExpenseMinor: 0,
+    oneTimeExpenseMinor: 0,
+    pendingReimbursementMinor: 0,
     pendingConfirmationCount: 0,
     retainedSavings: retained,
     savingsGoal: {

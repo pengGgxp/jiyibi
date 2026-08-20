@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   EXCEPTION_ABSOLUTE_MINOR,
+  INCOME_EXCEPTION_ABSOLUTE_MINOR,
   evaluateExceptionPrompt,
+  expensePromptThresholdMinor,
 } from "./exception-prompt";
 import { testEntry, TEST_LEDGER_NOW, TEST_LEDGER_PLAN } from "./test-ledgers";
 import { calculateSpendingAnalysis } from "./stats";
@@ -92,6 +94,14 @@ describe("evaluateExceptionPrompt", () => {
     expect(decision.shouldPrompt).toBe(false);
   });
 
+  it("does not apply the new threshold to a legacy row", () => {
+    const legacy = testEntry("2026-08-10", -80_000, {
+      id: "legacy",
+      detectionRuleVersion: 1,
+    });
+    expect(evaluateExceptionPrompt(legacy, [legacy], undefined).shouldPrompt).toBe(false);
+  });
+
   it.each([
     [EXCEPTION_ABSOLUTE_MINOR - 1, false],
     [EXCEPTION_ABSOLUTE_MINOR, true],
@@ -103,64 +113,81 @@ describe("evaluateExceptionPrompt", () => {
   });
 
   it.each([
-    [49_999, false],
-    [50_000, true],
-    [50_001, true],
-  ])("uses the inclusive 25-percent window-share threshold: %i", (amount, expected) => {
-    const expense = testEntry("2026-08-10", -amount, { id: `share-${amount}` });
-    const analysis = thresholdAnalysis({
-      window: {
-        endDateKey: "2026-08-09",
-        observedDays: 20,
-        daysNeeded: 14,
-        totalExpenseMinor: 200_000,
-        averageDailyExpenseMinor: 1_000,
-      },
-    });
-    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
-    expect(decision.reasons.includes("large_expense")).toBe(expected);
-  });
-
-  it.each([
-    [74_999, false],
-    [75_000, true],
-    [75_001, true],
-  ])("uses the inclusive five-times-daily threshold: %i", (amount, expected) => {
-    const expense = testEntry("2026-08-10", -amount, { id: `daily-${amount}` });
-    const analysis = thresholdAnalysis({
-      window: {
-        endDateKey: "2026-08-09",
-        observedDays: 5,
-        daysNeeded: 14,
-        totalExpenseMinor: 100_000,
-        averageDailyExpenseMinor: 15_000,
-      },
-    });
-    const decision = evaluateExceptionPrompt(expense, [expense], analysis);
-    expect(decision.reasons.includes("large_expense")).toBe(expected);
-  });
-
-  it.each([
-    [199_999, false],
-    [200_000, true],
-    [200_001, true],
-  ])("uses the largest of share, daily and absolute thresholds: %i", (amount, expected) => {
+    [29_999, false],
+    [30_000, true],
+    [30_001, true],
+  ])("uses three completed-day averages after 14 days: %i", (amount, expected) => {
     const expense = testEntry("2026-08-10", -amount, { id: `expense-${amount}` });
     const analysis = thresholdAnalysis({
       window: {
         endDateKey: "2026-08-09",
         observedDays: 20,
         daysNeeded: 14,
-        totalExpenseMinor: 800_000,
-        averageDailyExpenseMinor: 30_000,
+        totalExpenseMinor: 200_000,
+        averageDailyExpenseMinor: 10_000,
       },
     });
     const decision = evaluateExceptionPrompt(expense, [expense], analysis);
     expect(decision.reasons.includes("large_expense")).toBe(expected);
   });
 
+  it.each([
+    [29_999, false],
+    [30_000, true],
+  ])("derives the dynamic threshold without a pay-cycle plan: %i", (amount, expected) => {
+    const history = Array.from({ length: 14 }, (_, index) => (
+      testEntry(addLocalDays("2026-07-27", index), -10_000, { id: `history-${index}` })
+    ));
+    const expense = testEntry("2026-08-10", -amount, { id: `expense-${amount}` });
+    const decision = evaluateExceptionPrompt(
+      expense,
+      [...history, expense],
+      undefined,
+      [],
+      TEST_LEDGER_NOW,
+    );
+    expect(decision.reasons.includes("large_expense")).toBe(expected);
+  });
+
+  it.each([
+    [INCOME_EXCEPTION_ABSOLUTE_MINOR - 1, false],
+    [INCOME_EXCEPTION_ABSOLUTE_MINOR, true],
+  ])("keeps the inclusive CNY 500 income threshold: %i", (amount, expected) => {
+    const income = testEntry("2026-08-10", amount, { id: `income-${amount}` });
+    expect(evaluateExceptionPrompt(income, [income], undefined).reasons.includes("large_income"))
+      .toBe(expected);
+  });
+
+  it("uses the absolute threshold before 14 completed days", () => {
+    const expense = testEntry("2026-08-10", -20_000, { id: "sparse" });
+    const analysis = thresholdAnalysis({
+      window: {
+        endDateKey: "2026-08-09",
+        observedDays: 13,
+        daysNeeded: 14,
+        totalExpenseMinor: 1_300_000,
+        averageDailyExpenseMinor: 100_000,
+      },
+    });
+    expect(evaluateExceptionPrompt(expense, [expense], analysis).reasons)
+      .toContain("large_expense");
+  });
+
+  it("rounds a fractional dynamic threshold up to the next cent", () => {
+    const analysis = thresholdAnalysis({
+      window: {
+        endDateKey: "2026-08-09",
+        observedDays: 20,
+        daysNeeded: 14,
+        totalExpenseMinor: 200_001,
+        averageDailyExpenseMinor: 10_000,
+      },
+    });
+    expect(expensePromptThresholdMinor(analysis)).toBe(30_001);
+  });
+
   it("prompts when excluding the expense would reverse a shortfall", () => {
-    const expense = testEntry("2026-08-10", -20_000, { id: "flip" });
+    const expense = testEntry("2026-08-10", -19_999, { id: "flip" });
     const base = thresholdAnalysis();
     const analysis: SpendingAnalysis = {
       ...base,

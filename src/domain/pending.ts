@@ -3,7 +3,6 @@ import {
   affectsBookBalance,
   isRecoverableExpenseTreatment,
 } from "./entry-treatment";
-import { evaluateExceptionPrompt } from "./exception-prompt";
 import type {
   IncomeForecast,
   LedgerEntry,
@@ -109,10 +108,10 @@ export function derivePendingItems(input: PendingItemsInput): PendingItem[] {
       entry.confirmationStatus === "not_needed" &&
       !entry.attachmentId
     ) continue;
-    if (
-      entry.confirmationStatus !== "pending"
-      && !evaluateExceptionPrompt(entry, activeEntries, input.analysis).shouldPrompt
-    ) continue;
+    // Detection happens immediately after a successful create/edit. Only the
+    // persisted pending state belongs in the durable queue; never re-run a new
+    // heuristic over historical rows while deriving UI state.
+    if (entry.confirmationStatus !== "pending") continue;
     items.push({
       id: `treatment:${entry.id}`,
       kind: "entry_treatment",

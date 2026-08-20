@@ -94,8 +94,14 @@ export function EditEntryDialog({
 
   if (!entry) return null;
 
-  const treatmentOptions = (kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions())
-    .filter((option) => treatmentMatchesAmount(option.value, kind === "expense" ? -1 : 1));
+  const baseTreatmentOptions = kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions();
+  const transferOption = incomeTreatmentOptions().find((option) => option.value === "account_transfer");
+  const treatmentOptions = [
+    ...baseTreatmentOptions,
+    ...(kind === "expense" && transferOption ? [transferOption] : []),
+  ].filter((option, index, options) =>
+    treatmentMatchesAmount(option.value, kind === "expense" ? -1 : 1)
+    && options.findIndex((candidate) => candidate.value === option.value) === index);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -163,7 +169,9 @@ export function EditEntryDialog({
                 onChange={(event) => setTreatment(event.target.value as EntryTreatment)}
               >
                 {treatmentOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>
+                    {option.value === "account_transfer" ? "账户间转账" : option.label}
+                  </option>
                 ))}
               </select>
               <small className="field-help">

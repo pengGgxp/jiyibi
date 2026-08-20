@@ -27,6 +27,7 @@ export interface CloudSyncState {
 
 export type EntryTreatment =
   | "ordinary_expense"
+  | "periodic_expense"
   | "one_time_expense"
   | "reimbursable_expense"
   | "ordinary_income"
@@ -224,7 +225,7 @@ export type SyncEntityType =
   | "recoveryAllocation"
   | "savingsEvent"
   | "balanceAdjustment";
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 interface SyncMutationBase {
   id: string;

@@ -4,21 +4,27 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import type { LedgerEntry } from "../domain";
 import { TreatmentConfirmationDialog } from "./TreatmentConfirmationDialog";
 
-const modalState = vi.hoisted(() => ({ onClose: undefined as (() => void) | undefined }));
+const modalState = vi.hoisted(() => ({
+  onClose: undefined as (() => void) | undefined,
+  closeDisabled: false,
+}));
 
 vi.mock("./Modal", () => ({
   Modal: ({
     title,
     description,
+    closeDisabled = false,
     onClose,
     children,
   }: {
     title: string;
     description?: string;
+    closeDisabled?: boolean;
     onClose(): void;
     children: ReactNode;
   }) => {
     modalState.onClose = onClose;
+    modalState.closeDisabled = closeDisabled;
     return (
       <section aria-label={title}>
         {description ? <p>{description}</p> : null}
@@ -68,6 +74,7 @@ afterEach(async () => {
     for (const root of roots.splice(0)) root.unmount();
   });
   modalState.onClose = undefined;
+  modalState.closeDisabled = false;
   document.body.replaceChildren();
 });
 
@@ -109,12 +116,20 @@ describe("TreatmentConfirmationDialog", () => {
   it("shows expense choices and confirms the selected treatment", async () => {
     const { host, onConfirm } = await renderDialog();
     const labels = [...host.querySelectorAll("strong")].map((node) => node.textContent);
-    expect(labels).toEqual(["日常支出", "仅这一次", "之后会报销", "自己的账户间转账"]);
-    expect(host.querySelector<HTMLInputElement>('input[value="ordinary_expense"]')?.checked).toBe(true);
+    expect(labels).toEqual(["周期账单", "仅这一次", "之后报销"]);
+    expect(host.querySelector("fieldset legend")?.textContent).toBe("特殊支出类型");
+    expect(host.querySelector('input[value="ordinary_expense"]')).toBeNull();
+    expect(host.textContent).not.toContain("账户间转账");
 
-    await click(host.querySelector('input[value="one_time_expense"]'));
+    await click(host.querySelector('input[value="periodic_expense"]'));
     await click([...host.querySelectorAll("button")].find((button) => button.textContent === "确认") ?? null);
-    expect(onConfirm).toHaveBeenCalledWith("one_time_expense");
+    expect(onConfirm).toHaveBeenCalledWith("periodic_expense");
+  });
+
+  it("keeps ordinary expense as a quiet exit action", async () => {
+    const { host, onConfirm } = await renderDialog();
+    await click([...host.querySelectorAll("button")].find((button) => button.textContent === "按日常算") ?? null);
+    expect(onConfirm).toHaveBeenCalledWith("ordinary_expense");
   });
 
   it("shows income choices and restores an existing treatment", async () => {
@@ -123,7 +138,8 @@ describe("TreatmentConfirmationDialog", () => {
       entry: entry({ amountMinor: 12_345, treatment: "refund_reimbursement" }),
     });
     const labels = [...host.querySelectorAll("strong")].map((node) => node.textContent);
-    expect(labels).toEqual(["收入", "退款或报销", "自己的账户间转账"]);
+    expect(labels).toEqual(["收入", "退款或报销"]);
+    expect(host.textContent).not.toContain("账户间转账");
     expect(host.querySelector<HTMLInputElement>('input[value="refund_reimbursement"]')?.checked)
       .toBe(true);
   });
@@ -138,7 +154,7 @@ describe("TreatmentConfirmationDialog", () => {
   });
 
   it("disables controls while saving and exposes errors", async () => {
-    const { host, onConfirm } = await renderDialog({ busy: true, error: "处理方式没有保存" });
+    const { host, onConfirm, onDefer } = await renderDialog({ busy: true, error: "处理方式没有保存" });
     expect(host.querySelector('[role="alert"]')?.textContent).toBe("处理方式没有保存");
     expect([...host.querySelectorAll("input, button")].every((control) => (
       (control as HTMLInputElement | HTMLButtonElement).disabled
@@ -147,6 +163,9 @@ describe("TreatmentConfirmationDialog", () => {
 
     await click([...host.querySelectorAll("button")].find((button) => button.textContent === "保存中…") ?? null);
     expect(onConfirm).not.toHaveBeenCalled();
+    expect(modalState.closeDisabled).toBe(true);
+    modalState.onClose?.();
+    expect(onDefer).not.toHaveBeenCalled();
   });
 
   it("renders nothing without an entry", async () => {

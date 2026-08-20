@@ -31,7 +31,7 @@ import {
 export const BACKUP_FORMAT = "jiyibi-encrypted-backup" as const;
 export const BACKUP_ENVELOPE_VERSION = 1 as const;
 export const BACKUP_PAYLOAD_FORMAT = "jiyibi-ledger" as const;
-export const BACKUP_PAYLOAD_SCHEMA_VERSION = 6 as const;
+export const BACKUP_PAYLOAD_SCHEMA_VERSION = 7 as const;
 export const PBKDF2_ITERATIONS = 310_000;
 export const MAX_BACKUP_SOURCE_BYTES = 96 * 1024 * 1024;
 export const MAX_BACKUP_ENTRIES = 25_000;
@@ -107,7 +107,7 @@ interface BackupPayloadV2 {
   attachments: SerializedAttachment[];
 }
 
-interface BackupPayloadV6 {
+interface BackupPayloadV7 {
   format: typeof BACKUP_PAYLOAD_FORMAT;
   schemaVersion: typeof BACKUP_PAYLOAD_SCHEMA_VERSION;
   exportedAt: string;
@@ -563,7 +563,11 @@ function validateLegacySettings(value: unknown): value is LegacyAppSettings {
   );
 }
 
-function validateEntry(value: unknown, requireAnalysisFields: boolean): value is LedgerEntry {
+function validateEntry(
+  value: unknown,
+  requireAnalysisFields: boolean,
+  allowPeriodicExpense: boolean,
+): value is LedgerEntry {
   const structurallyValid = (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -582,6 +586,7 @@ function validateEntry(value: unknown, requireAnalysisFields: boolean): value is
     Math.abs(Number(value.timezoneOffsetMinutes)) <= 14 * 60 &&
     (value.attachmentId === undefined ||
       (typeof value.attachmentId === "string" && SYNC_ID_PATTERN.test(value.attachmentId))) &&
+    (allowPeriodicExpense || value.treatment !== "periodic_expense") &&
     (!requireAnalysisFields || (
       isEntryTreatment(value.treatment) &&
       treatmentMatchesAmount(value.treatment, Number(value.amountMinor)) &&
@@ -853,7 +858,7 @@ function validateBalanceAdjustments(values: unknown[]): BalanceAdjustment[] {
   return rows;
 }
 
-function parsePayload(value: unknown, now = new Date()): BackupPayloadV6 {
+function parsePayload(value: unknown, now = new Date()): BackupPayloadV7 {
   if (!isRecord(value) || value.format !== BACKUP_PAYLOAD_FORMAT) {
     throw new BackupError("备份内容格式无效", "invalid-payload");
   }
@@ -863,6 +868,7 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV6 {
     || schemaVersion === 3
     || schemaVersion === 4
     || schemaVersion === 5
+    || schemaVersion === 6
     || schemaVersion === BACKUP_PAYLOAD_SCHEMA_VERSION;
   if (!supportedSchema) {
     throw new BackupError("该账目数据版本高于当前应用支持的版本", "unsupported-version");
@@ -896,7 +902,11 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV6 {
     throw new BackupError(`备份截图不能超过 ${MAX_BACKUP_ATTACHMENTS} 张`, "limit-exceeded");
   }
   const requireAnalysisFields = schemaVersion >= 3;
-  if (!value.entries.every((entry) => validateEntry(entry, requireAnalysisFields))) {
+  if (!value.entries.every((entry) => validateEntry(
+    entry,
+    requireAnalysisFields,
+    schemaVersion >= BACKUP_PAYLOAD_SCHEMA_VERSION,
+  ))) {
     throw new BackupError("备份中的账目或设置无效", "invalid-payload");
   }
 
@@ -1018,7 +1028,7 @@ function parsePayload(value: unknown, now = new Date()): BackupPayloadV6 {
   };
 }
 
-async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV6> {
+async function serializeDatabase(database: LedgerDatabase, now: Date): Promise<BackupPayloadV7> {
   const snapshot = await database.transaction(
     "r",
     [

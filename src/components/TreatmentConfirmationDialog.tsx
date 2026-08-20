@@ -1,5 +1,5 @@
 import { ArrowLeft, Link2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   activeRecoveryAmount,
   amountMinorToInput,
@@ -85,26 +85,34 @@ export function TreatmentConfirmationDialog({
   onDefer,
 }: TreatmentConfirmationDialogProps) {
   const options = useMemo(
-    () => kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions(),
+    () => (kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions())
+      .filter((option) => option.value !== "account_transfer")
+      .filter((option) => kind !== "expense" || option.value !== "ordinary_expense"),
     [kind],
   );
   const defaultTreatment = kind === "expense" ? "ordinary_expense" : "ordinary_income";
-  const [selected, setSelected] = useState<EntryTreatment>(defaultTreatment);
+  const [selected, setSelected] = useState<EntryTreatment | undefined>(
+    kind === "expense" ? undefined : defaultTreatment,
+  );
   const [step, setStep] = useState<"treatment" | "allocation">("treatment");
   const [allocationInputs, setAllocationInputs] = useState<Record<string, string>>({});
   const [allocationError, setAllocationError] = useState<string>();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const previousStepRef = useRef(step);
   const candidates = useMemo(
     () => entry ? recoveryCandidates(entry, entries, allocations) : [],
     [allocations, entries, entry],
   );
 
   useEffect(() => {
-    setSelected(entry?.treatment && options.some((option) => option.value === entry.treatment)
-      ? entry.treatment
-      : defaultTreatment);
+    setSelected(
+      entry?.treatment && options.some((option) => option.value === entry.treatment)
+        ? entry.treatment
+        : kind === "expense" ? undefined : defaultTreatment,
+    );
     setStep("treatment");
     setAllocationError(undefined);
-  }, [entry?.id, entry?.treatment, defaultTreatment, options]);
+  }, [entry?.id, entry?.treatment, defaultTreatment, kind, options]);
 
   useEffect(() => {
     if (!entry) return;
@@ -120,18 +128,38 @@ export function TreatmentConfirmationDialog({
     setAllocationInputs(next);
   }, [candidates, entry]);
 
+  useEffect(() => {
+    if (!entry || previousStepRef.current === step) return;
+    previousStepRef.current = step;
+    const frame = window.requestAnimationFrame(() => {
+      if (step === "allocation") {
+        contentRef.current?.querySelector<HTMLElement>(".recovery-allocation-list")?.focus();
+        return;
+      }
+      const selectedTreatment = contentRef.current?.querySelector<HTMLInputElement>(
+        'input[name="treatment"]:checked',
+      );
+      const firstTreatment = contentRef.current?.querySelector<HTMLInputElement>(
+        'input[name="treatment"]',
+      );
+      (selectedTreatment ?? firstTreatment)?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [entry, step]);
+
   if (!entry) return null;
 
   const title = step === "allocation"
     ? "关联支出"
-    : kind === "expense" ? "这笔支出会明显影响估算" : "确认这笔资金的来源";
+    : kind === "expense" ? "这笔怎么算" : "确认资金来源";
   const description = kind === "expense"
-    ? "账目已经保存。请选择它是否代表平时的花法。"
+    ? "账目已保存。特殊支出不会用于推算日常花法。"
     : step === "allocation"
-      ? "把退款分摊到原支出，日常花法会按实际承担金额重算。"
-      : "账目已经保存。这个选择只影响余额解释和统计口径。";
+      ? "关联后，原支出会按实际承担金额重算。"
+      : "账目已保存。选择只影响统计口径。";
 
   const confirmSelection = () => {
+    if (!selected) return;
     if (selected === "refund_reimbursement" && candidates.length > 0 && step === "treatment") {
       setStep("allocation");
       return;
@@ -173,13 +201,23 @@ export function TreatmentConfirmationDialog({
   };
 
   return (
-    <Modal open title={title} description={description} onClose={() => void onDefer()}>
-      <div className="treatment-confirm">
+    <Modal
+      open
+      title={title}
+      description={description}
+      closeDisabled={busy}
+      onClose={() => {
+        if (!busy) void onDefer();
+      }}
+    >
+      <div ref={contentRef} className="treatment-confirm">
         <p className="treatment-confirm-amount">
           {entry.amountMinor < 0 ? "支出" : "收入"} {formatCny(Math.abs(entry.amountMinor))}
           {entry.note ? <span> · {entry.note}</span> : null}
         </p>
-        {step === "treatment" ? <div className="treatment-confirm-options" role="radiogroup" aria-label="处理方式">
+        {step === "treatment" ? <>
+          <fieldset className="treatment-confirm-options">
+          <legend className="sr-only">{kind === "expense" ? "特殊支出类型" : "处理方式"}</legend>
           {options.map((option, index) => (
             <label
               key={option.value}
@@ -195,13 +233,24 @@ export function TreatmentConfirmationDialog({
                 onChange={() => setSelected(option.value)}
               />
               <span>
-                <strong>{option.label}</strong>
+                <strong>{option.value === "reimbursable_expense" ? "之后报销" : option.label}</strong>
                 <small>{option.detail}</small>
               </span>
             </label>
           ))}
-        </div> : (
-          <fieldset className="recovery-allocation-list">
+          </fieldset>
+          {kind === "expense" ? (
+            <button
+              type="button"
+              className="text-button treatment-confirm-ordinary"
+              disabled={busy}
+              onClick={() => void onConfirm("ordinary_expense")}
+            >
+              按日常算
+            </button>
+          ) : null}
+        </> : (
+          <fieldset className="recovery-allocation-list" tabIndex={-1}>
             <legend>选择原支出</legend>
             {candidates.map((candidate) => {
               const selectedCandidate = allocationInputs[candidate.entry.id] !== undefined;
@@ -268,7 +317,7 @@ export function TreatmentConfirmationDialog({
           <button
             type="button"
             className="primary-button"
-            disabled={busy}
+            disabled={busy || (step === "treatment" && !selected)}
             onClick={step === "allocation" ? saveAllocations : confirmSelection}
           >
             {busy ? "保存中…" : step === "allocation" ? <><Link2 aria-hidden="true" /> 关联</> : "确认"}

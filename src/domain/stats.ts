@@ -12,8 +12,10 @@ import {
   affectsBookBalance,
   affectsCashflow,
   isDailySpendCandidate,
+  netPersonalExpenseMinor,
   normalizeLedgerEntry,
   ordinaryExpenseNetAnalysisMinor,
+  unrecoveredExpenseMinor,
 } from "./entry-treatment";
 import type {
   AppSettings,
@@ -34,6 +36,7 @@ import type {
   CycleSavingsProgress,
   RetainedSavingsSummary,
   SpendingAnalysis,
+  SpendingStatisticsWindow,
   SavingsAnalysisOptions,
   SavingsEvent,
   SavingsHistoryPoint,
@@ -709,6 +712,49 @@ function buildDailyExpenses(
   return points;
 }
 
+/**
+ * Build the completed-day ordinary-spend window without requiring a pay-cycle
+ * plan. Exception detection uses this when forecasting has not been enabled.
+ */
+export function calculateSpendingStatisticsWindow(
+  entries: readonly LedgerEntry[],
+  allocations: readonly RecoveryAllocation[] = [],
+  now = new Date(),
+): SpendingStatisticsWindow {
+  const todayDateKey = currentLocalDateKey(now);
+  const yesterdayDateKey = addLocalDays(todayDateKey, -1);
+  const prepared = prepareAnalysisEntries(
+    entries,
+    todayDateKey,
+    yesterdayDateKey,
+    allocations,
+  );
+  const windowStartCandidate = addLocalDays(yesterdayDateKey, -29);
+  const startDateKey = prepared.earliestCompletedEntryDateKey === undefined
+    ? undefined
+    : prepared.earliestCompletedEntryDateKey > windowStartCandidate
+      ? prepared.earliestCompletedEntryDateKey
+      : windowStartCandidate;
+  const observedDays = startDateKey === undefined
+    ? 0
+    : localCalendarDayDifference(startDateKey, yesterdayDateKey) + 1;
+  const totalExpenseMinor = startDateKey === undefined
+    ? 0
+    : expenseInRange(prepared.expenseByDate, startDateKey, yesterdayDateKey);
+  const averageDailyExpenseMinor = observedDays > 0
+    ? scaledExpense(totalExpenseMinor, 1, observedDays)
+    : undefined;
+
+  return {
+    ...(startDateKey ? { startDateKey } : {}),
+    endDateKey: yesterdayDateKey,
+    observedDays,
+    daysNeeded: MINIMUM_FORECAST_DAYS,
+    totalExpenseMinor,
+    ...(averageDailyExpenseMinor !== undefined ? { averageDailyExpenseMinor } : {}),
+  };
+}
+
 function completedPayCycles(
   expenseByDate: ReadonlyMap<string, number>,
   paydayDay: number,
@@ -809,10 +855,13 @@ export function calculateLedgerSummary(
   settings: Pick<AppSettings, "initialBalanceMinor">,
   monthKey: string,
   balanceAdjustments: readonly BalanceAdjustment[] = [],
+  allocations: readonly RecoveryAllocation[] = [],
 ): LedgerSummary {
   let balanceMinor = settings.initialBalanceMinor;
   let monthIncomeMinor = 0;
   let monthExpenseMinor = 0;
+  let monthCashInMinor = 0;
+  let monthCashOutMinor = 0;
 
   for (const adjustment of balanceAdjustments) {
     if (!adjustment.deletedAt) {
@@ -827,15 +876,30 @@ export function calculateLedgerSummary(
       balanceMinor = safeAdd(balanceMinor, entry.amountMinor);
     }
     if (entry.localMonthKey !== monthKey) continue;
-    if (!affectsCashflow(entry)) continue;
-    if (entry.amountMinor > 0) {
+    if (affectsCashflow(entry)) {
+      if (entry.amountMinor > 0) {
+        monthCashInMinor = safeAdd(monthCashInMinor, entry.amountMinor);
+      } else {
+        monthCashOutMinor = safeAdd(monthCashOutMinor, Math.abs(entry.amountMinor));
+      }
+    }
+    if (entry.treatment === "ordinary_income" && entry.amountMinor > 0) {
       monthIncomeMinor = safeAdd(monthIncomeMinor, entry.amountMinor);
-    } else {
-      monthExpenseMinor = safeAdd(monthExpenseMinor, Math.abs(entry.amountMinor));
+    } else if (entry.amountMinor < 0) {
+      monthExpenseMinor = safeAdd(
+        monthExpenseMinor,
+        netPersonalExpenseMinor(entry, allocations),
+      );
     }
   }
 
-  return { balanceMinor, monthIncomeMinor, monthExpenseMinor };
+  return {
+    balanceMinor,
+    monthIncomeMinor,
+    monthExpenseMinor,
+    monthCashInMinor,
+    monthCashOutMinor,
+  };
 }
 
 export function payCyclePlanFromSettings(
@@ -953,6 +1017,10 @@ export function calculateSpendingAnalysis(
   );
   // Gross external outflows for cycle actuals / completed-cycle charts.
   const grossExpenseByDate = prepareGrossExpenseByDate(entries, todayDateKey);
+  const grossObservationStartDateKey = [...grossExpenseByDate.keys()].reduce<string | undefined>(
+    (earliest, dateKey) => earliest === undefined || dateKey < earliest ? dateKey : earliest,
+    undefined,
+  );
   const windowStartCandidate = addLocalDays(yesterdayDateKey, -29);
   const statisticsStartDateKey = prepared.earliestCompletedEntryDateKey === undefined
     ? undefined
@@ -1089,6 +1157,9 @@ export function calculateSpendingAnalysis(
     incomeForecast.targetPaydayDateKey >= todayDateKey;
 
   let excludedExpenseMinor = 0;
+  let periodicExpenseMinor = 0;
+  let oneTimeExpenseMinor = 0;
+  let pendingReimbursementMinor = 0;
   let pendingConfirmationCount = 0;
   for (const raw of entries) {
     const entry = normalizeLedgerEntry(raw);
@@ -1100,6 +1171,22 @@ export function calculateSpendingAnalysis(
     if (!affectsCashflow(entry) || entry.amountMinor >= 0) continue;
     if (isDailySpendCandidate(entry)) continue;
     excludedExpenseMinor = safeAdd(excludedExpenseMinor, Math.abs(entry.amountMinor));
+    if (entry.treatment === "periodic_expense") {
+      periodicExpenseMinor = safeAdd(
+        periodicExpenseMinor,
+        netPersonalExpenseMinor(entry, allocations),
+      );
+    } else if (entry.treatment === "one_time_expense") {
+      oneTimeExpenseMinor = safeAdd(
+        oneTimeExpenseMinor,
+        netPersonalExpenseMinor(entry, allocations),
+      );
+    } else if (entry.treatment === "reimbursable_expense") {
+      pendingReimbursementMinor = safeAdd(
+        pendingReimbursementMinor,
+        unrecoveredExpenseMinor(entry, allocations),
+      );
+    }
   }
 
   const currentCycle: SpendingAnalysis["currentCycle"] = {
@@ -1185,6 +1272,9 @@ export function calculateSpendingAnalysis(
     window: statisticsWindow,
     includedExpenseMinor: statisticsTotalExpenseMinor,
     excludedExpenseMinor,
+    periodicExpenseMinor,
+    oneTimeExpenseMinor,
+    pendingReimbursementMinor,
     pendingConfirmationCount,
     ...(plan.cycleEndBalanceGoalMinor !== undefined
       ? { cycleEndBalanceGoalMinor: plan.cycleEndBalanceGoalMinor }
@@ -1217,7 +1307,7 @@ export function calculateSpendingAnalysis(
       grossExpenseByDate,
       plan.paydayDay,
       currentRange.cycleStartDateKey,
-      prepared.earliestCompletedEntryDateKey,
+      grossObservationStartDateKey,
       hasSavingsInput ? savingsEvents : [],
     ),
   };

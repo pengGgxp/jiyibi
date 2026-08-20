@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 import {
   dismissOfflineReady,
+  ensureServiceWorkerControl,
   expectNoHorizontalOverflow,
   openLedger,
   seedAnalysisLedger,
@@ -92,9 +93,9 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
 
   const accessibleCharts = page.locator(".analysis-chart .recharts-surface[role='application']");
   await expect(accessibleCharts).toHaveCount(3);
-  await expect(accessibleCharts.nth(0)).toHaveAccessibleName("本期支出");
-  await expect(accessibleCharts.nth(0)).toHaveAccessibleDescription(/已支出/);
-  await expect(accessibleCharts.nth(1)).toHaveAccessibleName("历史支出");
+  await expect(accessibleCharts.nth(0)).toHaveAccessibleName("本期流出");
+  await expect(accessibleCharts.nth(0)).toHaveAccessibleDescription(/已流出.*只预测日常/);
+  await expect(accessibleCharts.nth(1)).toHaveAccessibleName("周期流出");
   await expect(accessibleCharts.nth(2)).toHaveAccessibleName("每日支出");
 
   const renderedLines = await page.locator("#current-cycle-chart-title")
@@ -125,8 +126,8 @@ test("稳定样本显示目标、单一收入和三张可访问图表", async ({
 
   await expect(page.locator(".analysis-chart-key")).toHaveCount(3);
   await expect(page.locator("table caption")).toHaveText([
-    "当前周期累计支出",
-    "完整到账周期支出",
+    "本期流出",
+    "周期流出",
     "每日支出",
     "存钱明细",
   ]);
@@ -180,19 +181,7 @@ test("分析代码预缓存后可离线重载", async ({ page, context }, testIn
   await page.getByRole("link", { name: "分析", exact: true }).click();
   await expect(page.locator(".analysis-chart-section")).toHaveCount(3);
 
-  await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller) {
-      await new Promise<void>((resolve, reject) => {
-        const timer = window.setTimeout(() => reject(new Error("Service Worker 未接管页面")), 10_000);
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-          window.clearTimeout(timer);
-          resolve();
-        }, { once: true });
-        void registration.update();
-      });
-    }
-  });
+  await ensureServiceWorkerControl(page);
 
   await context.setOffline(true);
   try {

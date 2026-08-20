@@ -70,6 +70,9 @@ function analysis(confidence: SpendingAnalysis["confidence"] = "ready"): Spendin
     },
     includedExpenseMinor: 300_000,
     excludedExpenseMinor: 0,
+    periodicExpenseMinor: 0,
+    oneTimeExpenseMinor: 0,
+    pendingReimbursementMinor: 0,
     pendingConfirmationCount: 0,
     retainedSavings: {
       openingRetainedMinor: 100_000n,
@@ -148,7 +151,13 @@ async function renderView(result?: SpendingAnalysis, appSettings: AppSettings = 
     <AnalysisView
       analysis={result}
       savingsEvents={savingsEvents}
-      summary={{ balanceMinor: 600_000, monthIncomeMinor: 800_000, monthExpenseMinor: 240_000 }}
+      summary={{
+        balanceMinor: 600_000,
+        monthIncomeMinor: 800_000,
+        monthExpenseMinor: 240_000,
+        monthCashInMinor: 880_000,
+        monthCashOutMinor: 320_000,
+      }}
       settings={appSettings}
       entryCount={entryCount}
       onOpenSettings={onOpenSettings}
@@ -182,12 +191,12 @@ describe("AnalysisView", () => {
   it("renders exactly three useful charts with non-color legends and tables", async () => {
     const { host } = await renderView(analysis());
     expect(host.querySelectorAll(".analysis-chart-section")).toHaveLength(3);
-    expect(host.querySelectorAll('[data-chart-series="实际支出"]')).toHaveLength(2);
-    expect(host.querySelector('[data-chart-series="预测支出"]')?.getAttribute("data-line-style")).toBe("dashed");
+    expect(host.querySelectorAll('[data-chart-series="实际流出"]')).toHaveLength(2);
+    expect(host.querySelector('[data-chart-series="日常预测"]')?.getAttribute("data-line-style")).toBe("dashed");
     expect(host.querySelector('[data-chart-series="每日支出"]')).not.toBeNull();
     expect(Array.from(host.querySelectorAll("caption")).map((item) => item.textContent)).toEqual([
-      "当前周期累计支出",
-      "完整到账周期支出",
+      "本期流出",
+      "周期流出",
       "每日支出",
       "存钱明细",
     ]);
@@ -228,13 +237,20 @@ describe("AnalysisView", () => {
     result.currentCycle.affordability = "shortfall";
     result.currentCycle.daysUntilPayday = 2;
     result.excludedExpenseMinor = 80_000;
+    result.periodicExpenseMinor = 30_000;
+    result.oneTimeExpenseMinor = 40_000;
+    result.pendingReimbursementMinor = 10_000;
     result.pendingConfirmationCount = 2;
     const { host } = await renderView(result);
 
     expect(host.textContent).toContain("资金推导");
+    expect(host.textContent).toContain("只算日常；不含周期、一次、待报。");
     expect(host.textContent).toContain("可花余额¥5,000.00预计支出¥1,200.00差额−¥21.01");
     expect(host.textContent).toContain("每天少花 ¥10.51");
-    expect(host.textContent).toContain("日常 ¥3,000.00排除 ¥800.00待确认 2");
+    expect(host.textContent).toContain("日常 ¥3,000.00周期 ¥300.00一次 ¥400.00待报 ¥100.00待确认 2");
+    expect(host.textContent).toContain("实际现金流");
+    expect(host.textContent).toContain("流入¥8,800.00流出¥3,200.00");
+    expect(host.textContent).toContain("虚线只预测日常");
 
     const headings = Array.from(host.querySelectorAll("h3")).map((item) => item.textContent?.trim());
     expect(headings.indexOf("结论")).toBeLessThan(headings.indexOf("资金推导"));

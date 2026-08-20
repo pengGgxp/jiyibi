@@ -65,6 +65,7 @@ interface ChangeRow {
   entry_timezone_offset_minutes?: number | null;
   entry_attachment_id?: string | null;
   entry_treatment?: string | null;
+  entry_analysis_treatment?: string | null;
   entry_confirmation_status?: string | null;
   entry_detection_rule_version?: number | null;
   entry_prompted_revision?: string | null;
@@ -148,6 +149,7 @@ const ENTRY_PROJECTION_COLUMNS = `
   current_entry.timezone_offset_minutes AS entry_timezone_offset_minutes,
   current_entry.attachment_id AS entry_attachment_id,
   current_entry.treatment AS entry_treatment,
+  current_entry.analysis_treatment AS entry_analysis_treatment,
   current_entry.confirmation_status AS entry_confirmation_status,
   current_entry.detection_rule_version AS entry_detection_rule_version,
   current_entry.prompted_revision AS entry_prompted_revision,
@@ -271,7 +273,11 @@ function entryPayloadFromRow(
   };
   if (row.entry_attachment_id) payload.attachmentId = row.entry_attachment_id;
   if (protocolVersion >= 5) {
-    payload.treatment = row.entry_treatment as LedgerEntryPayload["treatment"];
+    payload.treatment = (
+      protocolVersion >= 9
+        ? row.entry_analysis_treatment ?? row.entry_treatment
+        : row.entry_treatment
+    ) as LedgerEntryPayload["treatment"];
     payload.confirmationStatus =
       row.entry_confirmation_status as LedgerEntryPayload["confirmationStatus"];
     if (row.entry_detection_rule_version !== null &&
@@ -774,6 +780,12 @@ export function minimizeDeletedEntry(entry: LedgerEntryPayload): LedgerEntryPayl
   };
 }
 
+function legacyTreatmentShadow(
+  treatment: NonNullable<LedgerEntryPayload["treatment"]>,
+): Exclude<NonNullable<LedgerEntryPayload["treatment"]>, "periodic_expense"> {
+  return treatment === "periodic_expense" ? "one_time_expense" : treatment;
+}
+
 async function writeEntry(
   db: D1Database,
   userId: string,
@@ -786,6 +798,7 @@ async function writeEntry(
   const mutationHash = await syncMutationHash(mutation);
   const treatment = entry.treatment ??
     (entry.amountMinor < 0 ? "ordinary_expense" : "ordinary_income");
+  const treatmentShadow = legacyTreatmentShadow(treatment);
   const confirmationStatus = entry.confirmationStatus ?? "not_needed";
   const values = [
     entry.amountMinor,
@@ -795,6 +808,7 @@ async function writeEntry(
     entry.localMonthKey,
     entry.timezoneOffsetMinutes,
     entry.attachmentId ?? null,
+    treatmentShadow,
     treatment,
     confirmationStatus,
     entry.detectionRuleVersion ?? null,
@@ -809,10 +823,10 @@ async function writeEntry(
          `INSERT INTO ledger_entries (
            user_id, account_generation, id, amount_minor, note, occurred_at, local_date_key,
            local_month_key, timezone_offset_minutes, attachment_id, treatment,
-           confirmation_status, detection_rule_version, prompted_revision, created_at,
+           analysis_treatment, confirmation_status, detection_rule_version, prompted_revision, created_at,
            updated_at, deleted_at, version, last_mutation_id,
            last_mutation_hash, server_updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
          ON CONFLICT(user_id, id) DO NOTHING
          RETURNING version`,
       )
@@ -824,7 +838,7 @@ async function writeEntry(
       `UPDATE ledger_entries SET
          amount_minor = ?, note = ?, occurred_at = ?, local_date_key = ?,
          local_month_key = ?, timezone_offset_minutes = ?, attachment_id = ?,
-         treatment = ?, confirmation_status = ?, detection_rule_version = ?,
+         treatment = ?, analysis_treatment = ?, confirmation_status = ?, detection_rule_version = ?,
          prompted_revision = ?, created_at = ?, updated_at = ?, deleted_at = ?,
          version = version + 1,
          last_mutation_id = ?, last_mutation_hash = ?, server_updated_at = ?
@@ -1447,6 +1461,7 @@ interface IncomeConfirmationRow {
   entry_timezone_offset_minutes?: number | null;
   entry_attachment_id?: string | null;
   entry_treatment?: string | null;
+  entry_analysis_treatment?: string | null;
   entry_confirmation_status?: string | null;
   entry_detection_rule_version?: number | null;
   entry_prompted_revision?: string | null;
@@ -1474,6 +1489,7 @@ async function findIncomeConfirmation(
             current_entry.timezone_offset_minutes AS entry_timezone_offset_minutes,
             current_entry.attachment_id AS entry_attachment_id,
             current_entry.treatment AS entry_treatment,
+            current_entry.analysis_treatment AS entry_analysis_treatment,
             current_entry.confirmation_status AS entry_confirmation_status,
             current_entry.detection_rule_version AS entry_detection_rule_version,
             current_entry.prompted_revision AS entry_prompted_revision,
@@ -1593,11 +1609,11 @@ async function applyIncomeConfirmationMutation(
       `INSERT INTO ledger_entries (
          user_id, account_generation, id, amount_minor, note, occurred_at,
          local_date_key, local_month_key, timezone_offset_minutes, attachment_id,
-         treatment, confirmation_status, detection_rule_version, prompted_revision,
+         treatment, analysis_treatment, confirmation_status, detection_rule_version, prompted_revision,
          created_at, updated_at, deleted_at, version, last_mutation_id,
          last_mutation_hash, server_updated_at
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, ?
        FROM income_confirmations
        WHERE user_id = ? AND account_generation = ? AND forecast_id = ?
          AND confirmation_id = ?`,
@@ -1611,6 +1627,7 @@ async function applyIncomeConfirmationMutation(
       entry.localDateKey,
       entry.localMonthKey,
       entry.timezoneOffsetMinutes,
+      legacyTreatmentShadow(entry.treatment ?? "ordinary_income"),
       entry.treatment ?? "ordinary_income",
       entry.confirmationStatus ?? "not_needed",
       entry.detectionRuleVersion ?? null,
@@ -1870,10 +1887,11 @@ export async function assertLegacyClientCompatible(
   generation: number,
   protocolVersion: SyncProtocolVersion,
 ): Promise<void> {
-  if (protocolVersion >= 8) return;
+  if (protocolVersion >= 9) return;
   const checksV5Semantics = protocolVersion < 5;
   const checksV6Semantics = protocolVersion < 6;
   const checksV7Semantics = protocolVersion < 7;
+  const checksV8Semantics = protocolVersion < 8;
   const row = await db
     .prepare(
       `SELECT CASE WHEN EXISTS (
@@ -1923,7 +1941,13 @@ export async function assertLegacyClientCompatible(
         ) OR EXISTS (
           SELECT 1 FROM balance_adjustments
           WHERE user_id = ? AND account_generation = ?
+            AND ? = 1
             AND deleted_at IS NULL
+        ) OR EXISTS (
+          SELECT 1 FROM ledger_entries
+          WHERE user_id = ? AND account_generation = ?
+            AND deleted_at IS NULL
+            AND analysis_treatment = 'periodic_expense'
         ) THEN 1 ELSE 0 END AS requires_upgrade`,
     )
     .bind(
@@ -1945,6 +1969,9 @@ export async function assertLegacyClientCompatible(
       userId,
       generation,
       checksV7Semantics ? 1 : 0,
+      userId,
+      generation,
+      checksV8Semantics ? 1 : 0,
       userId,
       generation,
     )

@@ -4,10 +4,12 @@ import {
   assertRecoveryAllocationValid,
   defaultTreatmentFromAmount,
   isDailySpendCandidate,
+  netPersonalExpenseMinor,
   normalizeLedgerEntry,
   ordinaryExpenseNetAnalysisMinor,
   RecoveryAllocationError,
   treatmentMatchesAmount,
+  unrecoveredExpenseMinor,
 } from "./entry-treatment";
 import type { LedgerEntry, RecoveryAllocation } from "./types";
 
@@ -48,6 +50,7 @@ describe("entry treatment defaults", () => {
 
   it("rejects treatment that conflicts with amount sign", () => {
     expect(treatmentMatchesAmount("ordinary_expense", -100)).toBe(true);
+    expect(treatmentMatchesAmount("periodic_expense", -100)).toBe(true);
     expect(treatmentMatchesAmount("ordinary_expense", 100)).toBe(false);
     expect(treatmentMatchesAmount("ordinary_income", 100)).toBe(true);
     expect(treatmentMatchesAmount("refund_reimbursement", -100)).toBe(false);
@@ -67,6 +70,10 @@ describe("entry treatment defaults", () => {
 
   it("only ordinary expenses are daily-spend candidates", () => {
     expect(isDailySpendCandidate(entry({ amountMinor: -100 }))).toBe(true);
+    expect(isDailySpendCandidate(entry({
+      amountMinor: -100,
+      treatment: "periodic_expense",
+    }))).toBe(false);
     expect(isDailySpendCandidate(entry({
       amountMinor: -100,
       treatment: "one_time_expense",
@@ -145,9 +152,36 @@ describe("recovery allocations", () => {
     expect(ordinaryExpenseNetAnalysisMinor(expense, [
       allocation({ amountMinor: 800 }),
     ])).toBe(0);
+    expect(ordinaryExpenseNetAnalysisMinor(expense, [
+      allocation({ id: "first", refundEntryId: "refund-1", amountMinor: 300 }),
+      allocation({ id: "second", refundEntryId: "refund-2", amountMinor: 200 }),
+    ])).toBe(300);
     expect(ordinaryExpenseNetAnalysisMinor(
       entry({ amountMinor: -100, treatment: "one_time_expense" }),
       [allocation({ amountMinor: 50, expenseEntryId: "entry-1" })],
     )).toBe(0);
+  });
+
+  it("separates a waiting reimbursement from the final personal expense", () => {
+    const pending = entry({
+      id: "expense-1",
+      amountMinor: -1_000,
+      treatment: "reimbursable_expense",
+    });
+    const allocations = [allocation({ amountMinor: 800 })];
+    expect(unrecoveredExpenseMinor(pending, allocations)).toBe(200);
+    expect(netPersonalExpenseMinor(pending, allocations)).toBe(0);
+    expect(netPersonalExpenseMinor(
+      { ...pending, treatment: "ordinary_expense" },
+      allocations,
+    )).toBe(200);
+    expect(netPersonalExpenseMinor(
+      { ...pending, treatment: "periodic_expense" },
+      allocations,
+    )).toBe(200);
+    expect(netPersonalExpenseMinor(
+      { ...pending, treatment: "one_time_expense" },
+      allocations,
+    )).toBe(200);
   });
 });

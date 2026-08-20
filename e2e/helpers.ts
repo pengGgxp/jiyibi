@@ -11,6 +11,16 @@ export async function dismissOfflineReady(page: Page): Promise<void> {
   if (await notice.isVisible()) await notice.click();
 }
 
+export async function ensureServiceWorkerControl(page: Page): Promise<void> {
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  const controlled = await page.evaluate(() => navigator.serviceWorker.controller !== null);
+  if (!controlled) {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await dismissOfflineReady(page);
+  }
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+}
+
 export async function addTextEntry(
   page: Page,
   options: { amount: string; note: string; kind?: "expense" | "income" },

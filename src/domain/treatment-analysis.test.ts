@@ -59,6 +59,38 @@ describe("treatment-aware balance and daily spend (P4)", () => {
     // The due forecast keeps this ending cycle attached to the previous payday,
     // so all gross outflows in that cycle remain visible in actual cashflow.
     expect(analysis.currentCycle.actualExpenseMinor).toBe(50_300);
+    expect(analysis.oneTimeExpenseMinor).toBe(50_000);
+  });
+
+  it("counts periodic bills as personal expense and cash outflow but not daily spend", () => {
+    const periodic = testEntry("2026-07-20", -50_000, {
+      id: "rent",
+      treatment: "periodic_expense",
+      confirmationStatus: "confirmed",
+    });
+    const ordinary = testEntry("2026-07-12", -10_000, { id: "food" });
+    const entries = [ordinary, periodic];
+    const summary = calculateLedgerSummary(
+      entries,
+      { initialBalanceMinor: 100_000 },
+      "2026-07",
+    );
+    expect(summary).toMatchObject({
+      balanceMinor: 40_000,
+      monthExpenseMinor: 60_000,
+      monthCashOutMinor: 60_000,
+    });
+
+    const analysis = calculateSpendingAnalysis(
+      entries,
+      summary.balanceMinor,
+      TEST_LEDGER_PLAN,
+      forecast(),
+      TEST_LEDGER_NOW,
+    );
+    expect(analysis.window.totalExpenseMinor).toBe(10_000);
+    expect(analysis.periodicExpenseMinor).toBe(50_000);
+    expect(analysis.excludedExpenseMinor).toBe(50_000);
   });
 
   it("reduces ordinary expense baseline by recovery allocations only", () => {
@@ -112,5 +144,80 @@ describe("treatment-aware balance and daily spend (P4)", () => {
     expect(analysis.window.startDateKey).toBe("2026-08-09");
     expect(analysis.window.totalExpenseMinor).toBe(200);
     expect(analysis.confidence).toBe("insufficient");
+  });
+
+  it("keeps partial reimbursement out of income and attributes the final remainder", () => {
+    const advance = testEntry("2026-07-12", -100_000, {
+      id: "advance",
+      treatment: "reimbursable_expense",
+      confirmationStatus: "confirmed",
+    });
+    const refund = testEntry("2026-08-01", 80_000, {
+      id: "refund",
+      treatment: "refund_reimbursement",
+      confirmationStatus: "confirmed",
+    });
+    const allocations: RecoveryAllocation[] = [{
+      id: "alloc",
+      refundEntryId: refund.id,
+      expenseEntryId: advance.id,
+      amountMinor: 80_000,
+      createdAt: refund.createdAt,
+      updatedAt: refund.updatedAt,
+    }];
+
+    const pendingJuly = calculateLedgerSummary(
+      [advance, refund],
+      { initialBalanceMinor: 200_000 },
+      "2026-07",
+      [],
+      allocations,
+    );
+    const august = calculateLedgerSummary(
+      [advance, refund],
+      { initialBalanceMinor: 200_000 },
+      "2026-08",
+      [],
+      allocations,
+    );
+    expect(pendingJuly).toMatchObject({
+      balanceMinor: 180_000,
+      monthIncomeMinor: 0,
+      monthExpenseMinor: 0,
+      monthCashInMinor: 0,
+      monthCashOutMinor: 100_000,
+    });
+    expect(august).toMatchObject({
+      monthIncomeMinor: 0,
+      monthExpenseMinor: 0,
+      monthCashInMinor: 80_000,
+      monthCashOutMinor: 0,
+    });
+
+    for (const treatment of [
+      "ordinary_expense",
+      "periodic_expense",
+      "one_time_expense",
+    ] as const) {
+      const closed = { ...advance, treatment };
+      const summary = calculateLedgerSummary(
+        [closed, refund],
+        { initialBalanceMinor: 200_000 },
+        "2026-07",
+        [],
+        allocations,
+      );
+      expect(summary.monthExpenseMinor).toBe(20_000);
+      const analysis = calculateSpendingAnalysis(
+        [closed, refund],
+        summary.balanceMinor,
+        TEST_LEDGER_PLAN,
+        forecast(),
+        TEST_LEDGER_NOW,
+        allocations,
+      );
+      expect(analysis.window.totalExpenseMinor)
+        .toBe(treatment === "ordinary_expense" ? 20_000 : 0);
+    }
   });
 });

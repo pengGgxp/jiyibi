@@ -3,6 +3,7 @@ export type EntryKind = "expense" | "income";
 /** Analysis semantics for a ledger entry — not a spend category. */
 export type EntryTreatment =
   | "ordinary_expense"
+  | "periodic_expense"
   | "one_time_expense"
   | "reimbursable_expense"
   | "ordinary_income"
@@ -12,7 +13,7 @@ export type EntryTreatment =
 export type ConfirmationStatus = "not_needed" | "pending" | "confirmed";
 
 /** Bump when exception-detection heuristics change. */
-export const CURRENT_DETECTION_RULE_VERSION = 1 as const;
+export const CURRENT_DETECTION_RULE_VERSION = 2 as const;
 
 export interface LedgerEntry {
   id: string;
@@ -278,8 +279,14 @@ export interface EntryDraft {
 
 export interface LedgerSummary {
   balanceMinor: number;
+  /** Personal income only; refunds/reimbursements are excluded. */
   monthIncomeMinor: number;
+  /** Net amount personally borne, attributed to the original expense month. */
   monthExpenseMinor: number;
+  /** External cash received, including refunds/reimbursements. */
+  monthCashInMinor: number;
+  /** External cash paid, including reimbursable advances. */
+  monthCashOutMinor: number;
 }
 
 export interface PayCycleStatus extends PayCyclePlan {
@@ -403,6 +410,12 @@ export interface SpendingAnalysis {
   includedExpenseMinor: number;
   /** Gross outflows present in the window but excluded from daily-spend (one-time, reimbursable, etc.). */
   excludedExpenseMinor: number;
+  /** Net personal periodic bills in the statistics window. */
+  periodicExpenseMinor: number;
+  /** Net personal one-time expenses in the statistics window. */
+  oneTimeExpenseMinor: number;
+  /** Amount still awaiting reimbursement in the statistics window. */
+  pendingReimbursementMinor: number;
   /** Entries still waiting on treatment confirmation. */
   pendingConfirmationCount: number;
   /** @deprecated Legacy absolute-floor output retained for old consumers. */

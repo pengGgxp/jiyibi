@@ -10,8 +10,8 @@ import type {
 } from "../domain/types";
 
 export const API_SCHEMA_VERSION = 1 as const;
-export const SYNC_SCHEMA_VERSION = 8 as const;
-export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | typeof SYNC_SCHEMA_VERSION;
+export const SYNC_SCHEMA_VERSION = 9 as const;
+export type SyncProtocolVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | typeof SYNC_SCHEMA_VERSION;
 
 export type SyncEntityType =
   | "entry"

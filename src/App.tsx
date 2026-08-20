@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type MouseEvent } from "react";
 import {
+  closeReimbursement,
   createEntry,
   confirmTreatmentWithAllocations,
   purgeDeletedEntries,
@@ -134,6 +135,7 @@ export default function App() {
     entry: LedgerEntry;
     kind: ExceptionPromptKind;
     detectionRuleVersion?: number;
+    pendingPersisted: boolean;
   }>();
   const [treatmentBusy, setTreatmentBusy] = useState(false);
   const [treatmentError, setTreatmentError] = useState<string>();
@@ -212,10 +214,16 @@ export default function App() {
   }, [hasLedgerFacts]);
 
   const maybePromptTreatment = async (entry: LedgerEntry): Promise<boolean> => {
-    const decision = evaluateExceptionPrompt(entry, ledger.entries, ledger.analysis);
+    const decision = evaluateExceptionPrompt(
+      entry,
+      ledger.entries,
+      ledger.analysis,
+      ledger.recoveryAllocations,
+    );
     if (!decision.shouldPrompt) return false;
     setTreatmentError(undefined);
     let pendingEntry = entry;
+    let pendingPersisted = true;
     try {
       pendingEntry = await updateEntryTreatment(
         entry.id,
@@ -227,12 +235,14 @@ export default function App() {
       );
       cloud.requestSync();
     } catch {
-      // The confirmation layer still lets the user retry the atomic final write.
+      pendingPersisted = false;
+      setTreatmentError("待处理未保存，请直接确认或重试稍后");
     }
     setTreatmentPrompt({
       entry: pendingEntry,
       kind: decision.kind,
       detectionRuleVersion: decision.detectionRuleVersion,
+      pendingPersisted,
     });
     return true;
   };
@@ -348,8 +358,31 @@ export default function App() {
     }
   };
 
-  const deferTreatment = () => {
-    if (!treatmentPrompt) return;
+  const deferTreatment = async () => {
+    if (!treatmentPrompt || treatmentBusy) return;
+    if (!treatmentPrompt.pendingPersisted) {
+      setTreatmentBusy(true);
+      setTreatmentError(undefined);
+      try {
+        const pendingEntry = await updateEntryTreatment(
+          treatmentPrompt.entry.id,
+          treatmentPrompt.entry.treatment,
+          {
+            confirmationStatus: "pending",
+            detectionRuleVersion: treatmentPrompt.detectionRuleVersion,
+          },
+        );
+        cloud.requestSync();
+        setTreatmentPrompt((current) => current?.entry.id === pendingEntry.id
+          ? { ...current, entry: pendingEntry, pendingPersisted: true }
+          : current);
+      } catch {
+        setTreatmentError("待处理仍未保存，请直接确认或重试");
+        return;
+      } finally {
+        setTreatmentBusy(false);
+      }
+    }
     setTreatmentError(undefined);
     snoozePending(`treatment:${treatmentPrompt.entry.id}`);
     setTreatmentPrompt(undefined);
@@ -362,6 +395,7 @@ export default function App() {
       entry,
       kind: entry.amountMinor < 0 ? "expense" : "income",
       detectionRuleVersion: entry.detectionRuleVersion,
+      pendingPersisted: true,
     });
   };
 
@@ -443,7 +477,7 @@ export default function App() {
       return;
     }
     setTreatmentError(undefined);
-    setTreatmentPrompt({ entry: item.refund, kind: "income" });
+    setTreatmentPrompt({ entry: item.refund, kind: "income", pendingPersisted: true });
   };
 
   const offerAdjustmentUndo = (adjustment?: BalanceAdjustment) => {
@@ -559,10 +593,16 @@ export default function App() {
               <RecordList
                 entries={ledger.entries}
                 balanceAdjustments={ledger.balanceAdjustments}
+                recoveryAllocations={ledger.recoveryAllocations}
                 loading={ledger.loading}
                 loadAttachment={cloud.loadAttachment}
                 onEdit={setEditingEntry}
                 onDelete={(entry) => void deleteEntry(entry)}
+                onCloseReimbursement={async (entryId, treatment) => {
+                  await closeReimbursement(entryId, treatment);
+                  cloud.requestSync();
+                  showNotice({ kind: "success", message: "报销已结束，分析已重算" });
+                }}
                 onStartEntry={focusComposer}
               />
             )}
@@ -598,6 +638,11 @@ export default function App() {
         onSave={saveEdit}
         onTreatmentChange={async (id, treatment) => {
           await confirmTreatmentWithAllocations(id, treatment, []);
+          if (treatment === "account_transfer") {
+            setTreatmentPrompt((current) => current?.entry.id === id ? undefined : current);
+            setSavingsPrompt((current) => current?.entry.id === id ? undefined : current);
+            setSavingsDialogMode(undefined);
+          }
           cloud.requestSync();
           showNotice({ kind: "success", message: "处理方式已更新，分析已重算" });
         }}

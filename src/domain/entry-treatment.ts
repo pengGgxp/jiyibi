@@ -7,6 +7,7 @@ import type {
 
 const ENTRY_TREATMENTS: ReadonlySet<EntryTreatment> = new Set([
   "ordinary_expense",
+  "periodic_expense",
   "one_time_expense",
   "reimbursable_expense",
   "ordinary_income",
@@ -40,6 +41,7 @@ export function treatmentMatchesAmount(
   if (treatment === "account_transfer") return amountMinor !== 0;
   if (
     treatment === "ordinary_expense"
+    || treatment === "periodic_expense"
     || treatment === "one_time_expense"
     || treatment === "reimbursable_expense"
   ) {
@@ -97,6 +99,7 @@ export function isRefundTreatment(treatment: EntryTreatment): boolean {
 export function isRecoverableExpenseTreatment(treatment: EntryTreatment): boolean {
   return (
     treatment === "ordinary_expense"
+    || treatment === "periodic_expense"
     || treatment === "one_time_expense"
     || treatment === "reimbursable_expense"
   );
@@ -135,7 +138,14 @@ export function activeRecoveryAmount(
   for (const allocation of allocations) {
     if (allocation.deletedAt) continue;
     if (!predicate(allocation)) continue;
-    total += allocation.amountMinor;
+    if (!Number.isSafeInteger(allocation.amountMinor) || allocation.amountMinor <= 0) {
+      throw new RangeError("recovery allocation must use positive safe integer minor units");
+    }
+    const next = total + allocation.amountMinor;
+    if (!Number.isSafeInteger(next)) {
+      throw new RangeError("recovery allocation total exceeds the safe integer range");
+    }
+    total = next;
   }
   return total;
 }
@@ -193,10 +203,42 @@ export function ordinaryExpenseNetAnalysisMinor(
   allocations: readonly RecoveryAllocation[],
 ): number {
   if (!isDailySpendCandidate(expense)) return 0;
+  return netPersonalExpenseMinor(expense, allocations);
+}
+
+/** Amount of an expense that has not been covered by active recovery allocations. */
+export function unrecoveredExpenseMinor(
+  expense: Pick<LedgerEntry, "id" | "amountMinor" | "deletedAt">,
+  allocations: readonly RecoveryAllocation[],
+): number {
+  if (expense.deletedAt || expense.amountMinor >= 0) return 0;
   const recovered = activeRecoveryAmount(
     allocations,
     (allocation) => allocation.expenseEntryId === expense.id,
   );
-  const net = Math.abs(expense.amountMinor) - recovered;
-  return net > 0 ? net : 0;
+  const net = BigInt(-expense.amountMinor) - BigInt(recovered);
+  if (net <= 0n) return 0;
+  if (net > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError("recovery amount exceeds the safe integer range");
+  }
+  return Number(net);
+}
+
+/**
+ * Net expense personally borne after recovery. A still-open reimbursable
+ * advance remains zero until the user closes it into a final treatment.
+ */
+export function netPersonalExpenseMinor(
+  expense: Pick<LedgerEntry, "id" | "amountMinor" | "treatment" | "deletedAt">,
+  allocations: readonly RecoveryAllocation[],
+): number {
+  if (expense.deletedAt || expense.amountMinor >= 0) return 0;
+  if (
+    expense.treatment !== "ordinary_expense"
+    && expense.treatment !== "periodic_expense"
+    && expense.treatment !== "one_time_expense"
+  ) {
+    return 0;
+  }
+  return unrecoveredExpenseMinor(expense, allocations);
 }

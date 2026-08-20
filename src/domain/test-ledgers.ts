@@ -1,4 +1,5 @@
 import { addLocalDays } from "./date";
+import { CURRENT_DETECTION_RULE_VERSION } from "./types";
 import type { LedgerEntry, PayCyclePlan } from "./types";
 
 /** Shared pay-cycle plan for representative test ledgers. */
@@ -25,6 +26,7 @@ export function testEntry(
     timezoneOffsetMinutes: overrides.timezoneOffsetMinutes ?? -480,
     treatment: amountMinor < 0 ? "ordinary_expense" : "ordinary_income",
     confirmationStatus: "not_needed",
+    detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
     createdAt: overrides.createdAt ?? `${localDateKey}T04:00:00.000Z`,
     updatedAt: overrides.updatedAt ?? `${localDateKey}T04:00:00.000Z`,
     ...overrides,

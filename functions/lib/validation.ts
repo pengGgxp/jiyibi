@@ -66,6 +66,7 @@ function hasConsistentLocalDate(entry: LedgerEntryPayload): boolean {
 
 const ENTRY_TREATMENTS = new Set([
   "ordinary_expense",
+  "periodic_expense",
   "one_time_expense",
   "reimbursable_expense",
   "ordinary_income",
@@ -81,6 +82,7 @@ function treatmentMatchesAmount(treatment: unknown, amountMinor: number): boolea
   if (treatment === "account_transfer") return amountMinor !== 0;
   if (
     treatment === "ordinary_expense" ||
+    treatment === "periodic_expense" ||
     treatment === "one_time_expense" ||
     treatment === "reimbursable_expense"
   ) {
@@ -141,6 +143,7 @@ function validateEntryPayload(
       (entry.treatment === undefined ||
         entry.confirmationStatus === undefined ||
         !ENTRY_TREATMENTS.has(entry.treatment) ||
+        (entry.treatment === "periodic_expense" && protocolVersion < 9) ||
         !treatmentMatchesAmount(entry.treatment, entry.amountMinor) ||
         !CONFIRMATION_STATUSES.has(entry.confirmationStatus) ||
         (entry.detectionRuleVersion !== undefined &&
@@ -729,7 +732,8 @@ export function validateSyncRequest(value: unknown): SyncRequestBody {
     (value.schemaVersion !== 1 && value.schemaVersion !== 2 &&
       value.schemaVersion !== 3 && value.schemaVersion !== 4 &&
       value.schemaVersion !== 5 && value.schemaVersion !== 6 &&
-      value.schemaVersion !== 7 && value.schemaVersion !== 8)
+      value.schemaVersion !== 7 && value.schemaVersion !== 8 &&
+      value.schemaVersion !== 9)
   ) {
     throw new ApiError(400, "invalid_sync_request", "Sync request is invalid");
   }

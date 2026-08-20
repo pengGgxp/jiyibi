@@ -37,6 +37,7 @@ import type {
   SavingsEventKind,
   SavingsGoal,
 } from "../domain/types";
+import { CURRENT_DETECTION_RULE_VERSION } from "../domain/types";
 import { MAX_NOTE_LENGTH, validateEntryDraft } from "../domain/validation";
 import { createId } from "../lib/id";
 import {
@@ -51,8 +52,8 @@ import {
 
 export const DATABASE_NAME = "jiyibi";
 export const DATABASE_SCHEMA_VERSION = 1 as const;
-/** v3: cloud sync. v4: treatment/recovery. v5: savings. v6: goal. v7: balance audit. */
-export const INDEXED_DB_VERSION = 7 as const;
+/** v3: sync. v4: treatment. v5: savings. v6: goal. v7: balance audit. v8: periodic. */
+export const INDEXED_DB_VERSION = 8 as const;
 export const INDEXED_DB_SYNC_VERSION = 3 as const;
 
 const SYNC_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -502,7 +503,7 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
-    this.version(INDEXED_DB_VERSION).stores({
+    this.version(7).stores({
       entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
       attachments: "id, entryId, createdAt",
       settings: "id",
@@ -573,6 +574,18 @@ export class LedgerDatabase extends Dexie {
         });
       }
     });
+    this.version(INDEXED_DB_VERSION).stores({
+      entries: "id, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt, treatment, confirmationStatus",
+      attachments: "id, entryId, createdAt",
+      settings: "id",
+      recoveryAllocations: "id, refundEntryId, expenseEntryId, deletedAt, createdAt",
+      savingsEvents: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, linkedExpenseEntryId, cycleStartDateKey, &[kind+cycleStartDateKey]",
+      balanceAdjustments: "id, kind, occurredAt, localDateKey, localMonthKey, deletedAt, createdAt",
+      syncState: "id, accountId",
+      entitySyncState: "id, [entityType+entityId], status",
+      syncOutbox: "entityKey, &id, [entityType+entityId], createdAt",
+      syncConflicts: "id, [entityType+entityId], createdAt",
+    });
     this.on("populate", (transaction) =>
       transaction.table<AppSettings>("settings").add(createDefaultSettings()),
     );
@@ -639,6 +652,7 @@ function treatmentMatchesAmountSafe(
   if (treatment === "account_transfer") return amountMinor !== 0;
   if (
     treatment === "ordinary_expense"
+    || treatment === "periodic_expense"
     || treatment === "one_time_expense"
     || treatment === "reimbursable_expense"
   ) {
@@ -681,6 +695,99 @@ export async function updateEntryTreatment(
         confirmationStatus: options.confirmationStatus ?? "confirmed",
         detectionRuleVersion: options.detectionRuleVersion ?? existing.detectionRuleVersion,
         promptedRevision: options.markPrompted ? nowIso : existing.promptedRevision,
+        updatedAt: nowIso,
+      };
+      await database.entries.put(updated);
+      await queueSyncMutation("entry", updated.id, updated, database, nowIso);
+      return updated;
+    },
+  );
+}
+
+export type ClosedReimbursementTreatment = Extract<
+  EntryTreatment,
+  "ordinary_expense" | "periodic_expense" | "one_time_expense"
+>;
+
+/**
+ * Finalize the user's personally borne remainder without rewriting recovery
+ * allocations. The surviving allocation rows keep the reimbursed portion out
+ * of personal-expense statistics.
+ */
+export async function closeReimbursement(
+  expenseEntryId: string,
+  finalTreatment: ClosedReimbursementTreatment,
+  database = ledgerDb,
+  now = new Date(),
+): Promise<LedgerEntry> {
+  return database.transaction(
+    "rw",
+    [
+      database.entries,
+      database.recoveryAllocations,
+      database.syncState,
+      database.entitySyncState,
+      database.syncOutbox,
+      database.syncConflicts,
+    ],
+    async () => {
+      if (
+        finalTreatment !== "ordinary_expense"
+        && finalTreatment !== "periodic_expense"
+        && finalTreatment !== "one_time_expense"
+      ) {
+        throw new LedgerDataError("报销结束方式无效", "invalid-settings");
+      }
+      const existing = await database.entries.get(expenseEntryId);
+      if (!existing) throw new LedgerDataError("找不到这条记录", "not-found");
+      if (existing.deletedAt) {
+        throw new LedgerDataError("已删除的记录不能结束报销", "already-deleted");
+      }
+      const normalized = normalizeLedgerEntry(existing);
+      if (normalized.amountMinor >= 0 || !treatmentMatchesAmountSafe(
+        finalTreatment,
+        normalized.amountMinor,
+      )) {
+        throw new LedgerDataError("只有支出可以结束报销", "invalid-settings");
+      }
+      const isAlreadyClosed = normalized.treatment === finalTreatment
+        && normalized.confirmationStatus === "confirmed";
+      if (!isAlreadyClosed && normalized.treatment !== "reimbursable_expense") {
+        throw new LedgerDataError("这笔支出不在等待报销", "invalid-settings");
+      }
+
+      // Validate every live split while the endpoints and classification are
+      // locked in the same transaction. Corrupt or over-allocated rows must
+      // not be hidden by closing the reimbursement.
+      const allAllocations = await database.recoveryAllocations.toArray();
+      const activeAllocations = allAllocations.filter((allocation) => !allocation.deletedAt);
+      const expenseAllocations = activeAllocations.filter(
+        (allocation) => allocation.expenseEntryId === expenseEntryId,
+      );
+      for (const allocation of expenseAllocations) {
+        const [refundEndpoint, expenseEndpoint] = await Promise.all([
+          database.entries.get(allocation.refundEntryId),
+          database.entries.get(allocation.expenseEntryId),
+        ]);
+        if (!refundEndpoint || !expenseEndpoint) {
+          throw new RecoveryAllocationError("恢复分摊关联的账目不存在", "not-found");
+        }
+        assertRecoveryAllocationValid(allocation.amountMinor, {
+          refund: normalizeLedgerEntry(refundEndpoint),
+          expense: normalizeLedgerEntry(expenseEndpoint),
+          existing: activeAllocations,
+          ignoreAllocationId: allocation.id,
+        });
+      }
+      if (isAlreadyClosed) return normalized;
+
+      const nowIso = now.toISOString();
+      const updated: LedgerEntry = {
+        ...normalized,
+        treatment: finalTreatment,
+        confirmationStatus: "confirmed",
+        detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
+        promptedRevision: nowIso,
         updatedAt: nowIso,
       };
       await database.entries.put(updated);
@@ -2838,6 +2945,7 @@ export async function recordActualIncome(
             timezoneOffsetMinutes: occurred.timezoneOffsetMinutes,
             treatment: "ordinary_income",
             confirmationStatus: "confirmed",
+            detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
             createdAt: nowIso,
             updatedAt: nowIso,
           };
@@ -2978,6 +3086,7 @@ export async function createEntry(
     attachmentId: attachment?.id,
     treatment: defaultTreatmentFromAmount(valid.amountMinor),
     confirmationStatus: "not_needed",
+    detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -3012,7 +3121,10 @@ export async function createSavingsFundedExpense(
   now = new Date(),
   treatment: Extract<
     EntryTreatment,
-    "ordinary_expense" | "one_time_expense" | "reimbursable_expense"
+    | "ordinary_expense"
+    | "periodic_expense"
+    | "one_time_expense"
+    | "reimbursable_expense"
   > = "one_time_expense",
 ): Promise<SavingsFundedExpenseResult> {
   assertSavingsAmount(savingsAmountMinor);
@@ -3040,6 +3152,7 @@ export async function createSavingsFundedExpense(
     attachmentId: attachment?.id,
     treatment,
     confirmationStatus: "confirmed",
+    detectionRuleVersion: CURRENT_DETECTION_RULE_VERSION,
     createdAt: nowIso,
     updatedAt: nowIso,
   };
@@ -3157,6 +3270,9 @@ export async function updateEntry(
       attachmentId,
       treatment,
       confirmationStatus,
+      detectionRuleVersion: materialTreatmentChange
+        ? CURRENT_DETECTION_RULE_VERSION
+        : existing.detectionRuleVersion,
       promptedRevision: materialTreatmentChange
         ? undefined
         : existing.promptedRevision
@@ -3283,7 +3399,31 @@ export async function softDeleteEntry(
         .filter((row) => row.refundEntryId === entryId || row.expenseEntryId === entryId)
         .toArray();
       for (const row of related) {
-        if (row.deletedAt) continue;
+        if (row.deletedAt) {
+          const otherEntryId = row.refundEntryId === entryId
+            ? row.expenseEntryId
+            : row.refundEntryId;
+          const otherEndpoint = otherEntryId === entryId
+            ? undefined
+            : await database.entries.get(otherEntryId);
+          if (otherEndpoint?.deletedAt !== row.deletedAt) continue;
+
+          // Preserve both cascade deletion times. This lets either endpoint be
+          // restored first without reviving a split the user deleted directly.
+          const tombstone: RecoveryAllocation = {
+            ...row,
+            updatedAt: timestamp,
+          };
+          await database.recoveryAllocations.put(tombstone);
+          await queueSyncMutation(
+            "recoveryAllocation",
+            tombstone.id,
+            tombstone,
+            database,
+            timestamp,
+          );
+          continue;
+        }
         const tombstone: RecoveryAllocation = {
           ...row,
           deletedAt: timestamp,
@@ -3389,31 +3529,32 @@ export async function undoDeleteEntry(
         .filter((row) => row.refundEntryId === entryId || row.expenseEntryId === entryId)
         .toArray();
       for (const row of related) {
-        if (row.deletedAt !== entryDeletedAt) continue;
+        if (row.deletedAt !== entryDeletedAt && row.updatedAt !== entryDeletedAt) continue;
         const refund = await database.entries.get(row.refundEntryId);
         const expense = await database.entries.get(row.expenseEntryId);
         if (!refund || !expense || refund.deletedAt || expense.deletedAt) continue;
+        const others = await database.recoveryAllocations.toArray();
         try {
-          const others = await database.recoveryAllocations.toArray();
           assertRecoveryAllocationValid(row.amountMinor, {
             refund: normalizeLedgerEntry(refund),
             expense: normalizeLedgerEntry(expense),
             existing: others,
             ignoreAllocationId: row.id,
           });
-          const live: RecoveryAllocation = { ...row, updatedAt: nowIso };
-          delete live.deletedAt;
-          await database.recoveryAllocations.put(live);
-          await queueSyncMutation(
-            "recoveryAllocation",
-            live.id,
-            live,
-            database,
-            nowIso,
-          );
-        } catch {
-          // Leave soft-deleted; user must re-link. Do not silently truncate.
+        } catch (reason) {
+          if (reason instanceof RecoveryAllocationError) continue;
+          throw reason;
         }
+        const live: RecoveryAllocation = { ...row, updatedAt: nowIso };
+        delete live.deletedAt;
+        await database.recoveryAllocations.put(live);
+        await queueSyncMutation(
+          "recoveryAllocation",
+          live.id,
+          live,
+          database,
+          nowIso,
+        );
       }
 
       for (const release of linkedReleases) {
@@ -3569,21 +3710,29 @@ export async function getLedgerSummary(
   database = ledgerDb,
 ): Promise<LedgerSummary> {
   await getSettings(database);
-  const [entries, settings, balanceAdjustments] = await database.transaction(
+  const [entries, settings, balanceAdjustments, allocations] = await database.transaction(
     "r",
     database.entries,
     database.settings,
     database.balanceAdjustments,
+    database.recoveryAllocations,
     async () => Promise.all([
       database.entries.toArray(),
       database.settings.get("primary"),
       database.balanceAdjustments.toArray(),
+      database.recoveryAllocations.toArray(),
     ]),
   );
   if (!settings) {
     throw new LedgerDataError("找不到应用设置", "invalid-settings");
   }
-  return calculateLedgerSummary(entries, settings, monthKey, balanceAdjustments);
+  return calculateLedgerSummary(
+    entries,
+    settings,
+    monthKey,
+    balanceAdjustments,
+    allocations,
+  );
 }
 
 function currentLocalPayload(

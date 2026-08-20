@@ -76,6 +76,26 @@ describe("pending item derivation", () => {
     })).toEqual([]);
   });
 
+  it("queues only persisted pending treatments instead of re-detecting history", () => {
+    const legacy = entry("legacy", -30_000);
+    const current = entry("current", -30_000, {
+      detectionRuleVersion: 2,
+    });
+    const pending = entry("pending", -30_000, {
+      confirmationStatus: "pending",
+      detectionRuleVersion: 2,
+    });
+    const items = derivePendingItems({
+      entries: [legacy, current, pending],
+      allocations: [],
+      retainedMinor: 0n,
+      balanceMinor: 100_000,
+      todayDateKey: "2026-08-19",
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: "treatment:pending" });
+  });
+
   it("snoozes only the matching item for the current local day", () => {
     const item = derivePendingItems({
       entries: [entry("pending", -2_000, { confirmationStatus: "pending" })],

@@ -87,6 +87,8 @@ describe("entry validation and statistics", () => {
       balanceMinor: 11_600,
       monthIncomeMinor: 10_000,
       monthExpenseMinor: 2_500,
+      monthCashInMinor: 10_000,
+      monthCashOutMinor: 2_500,
     });
   });
 
@@ -126,6 +128,8 @@ describe("entry validation and statistics", () => {
       balanceMinor: 4_500,
       monthIncomeMinor: 0,
       monthExpenseMinor: 100,
+      monthCashInMinor: 0,
+      monthCashOutMinor: 100,
     });
   });
 });

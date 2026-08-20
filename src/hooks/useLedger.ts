@@ -114,6 +114,7 @@ export function useLedger(): LedgerState {
       snapshot.settings,
       localDateKey.slice(0, 7),
       snapshot.balanceAdjustments,
+      snapshot.allocations,
     );
   }, [localDateKey, snapshot]);
 

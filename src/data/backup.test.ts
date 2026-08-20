@@ -295,17 +295,48 @@ describe("encrypted backups", () => {
       expenseEntryId: expense.id,
       amountMinor: 6_000,
     }, source, new Date("2026-07-30T09:02:00.000Z"));
+    const rent = await createEntry({
+      ...draft(),
+      kind: "expense",
+      amount: "500.00",
+      note: "房租",
+      image: undefined,
+    }, source, new Date("2026-07-30T09:03:00.000Z"));
+    await updateEntryTreatment(rent.id, "periodic_expense", {
+      confirmationStatus: "confirmed",
+    }, source, new Date("2026-07-30T09:04:00.000Z"));
 
     const backup = await createEncryptedBackup("treatment-password", source);
     const prepared = await decryptBackup(backup, "treatment-password");
     expect(prepared.replacement.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: expense.id, treatment: "reimbursable_expense" }),
       expect.objectContaining({ id: refund.id, treatment: "refund_reimbursement" }),
+      expect.objectContaining({ id: rent.id, treatment: "periodic_expense" }),
     ]));
     expect(prepared.replacement.recoveryAllocations).toEqual([allocation]);
 
     await restorePreparedBackup(prepared, target);
     expect(await target.recoveryAllocations.toArray()).toEqual([allocation]);
+  });
+
+  it("does not accept periodic treatment under a pre-v7 payload version", async () => {
+    const expense = await createEntry({
+      ...draft(),
+      kind: "expense",
+      amount: "500.00",
+      note: "房租",
+      image: undefined,
+    }, source);
+    await updateEntryTreatment(expense.id, "periodic_expense", {}, source);
+    const backup = await createEncryptedBackup("periodic-version", source);
+    const rewritten = await rewriteEncryptedPayload(
+      backup,
+      "periodic-version",
+      (payload) => { payload.schemaVersion = 6; },
+    );
+    await expect(decryptBackup(rewritten, "periodic-version")).rejects.toMatchObject({
+      code: "invalid-payload",
+    });
   });
 
   it("round trips a savings goal and retained-money events in payload v5", async () => {

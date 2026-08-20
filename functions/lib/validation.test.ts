@@ -455,6 +455,24 @@ describe("validateSyncRequest", () => {
     expect(() => validateSyncRequest(request)).toThrowError("Entry payload is invalid");
   });
 
+  it("accepts periodic expenses only in version nine", () => {
+    const request = validRequest() as {
+      schemaVersion: number;
+      mutations: Array<{ payload: Record<string, unknown> }>;
+    };
+    request.schemaVersion = 9;
+    request.mutations[0].payload.treatment = "periodic_expense";
+    request.mutations[0].payload.confirmationStatus = "confirmed";
+
+    expect(validateSyncRequest(request).mutations[0].payload).toMatchObject({
+      treatment: "periodic_expense",
+    });
+
+    const legacy = structuredClone(request);
+    legacy.schemaVersion = 8;
+    expect(() => validateSyncRequest(legacy)).toThrowError("Entry payload is invalid");
+  });
+
   it("accepts strict version-five recovery allocation mutations only", () => {
     const request = validRequest() as { schemaVersion: number; mutations: unknown[] };
     request.schemaVersion = 5;

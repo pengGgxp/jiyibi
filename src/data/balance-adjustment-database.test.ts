@@ -93,6 +93,8 @@ describe("balance audit data layer", () => {
       balanceMinor: 8_000,
       monthIncomeMinor: 0,
       monthExpenseMinor: 1_000,
+      monthCashInMinor: 0,
+      monthCashOutMinor: 1_000,
     });
 
     await softDeleteBalanceAdjustment(
