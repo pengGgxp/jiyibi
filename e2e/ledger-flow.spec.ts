@@ -351,7 +351,7 @@ test("部分取用和关联支出删除撤销会联动更新", async ({ page }, 
   await expect(summary.locator(".balance-value")).toHaveText("¥550.00");
 });
 
-test("支出穿透存款时预填实际缺口，账户转账不会误提示", async ({ page }, testInfo) => {
+test("支出穿透存款时预填实际缺口，详情不提供账户转账", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile-chrome", "穿透确认流只需在移动端执行一次");
   await openLedger(page);
 
@@ -374,22 +374,11 @@ test("支出穿透存款时预填实际缺口，账户转账不会误提示", as
   await expect(savingsPrompt).toBeHidden();
   await expect(page.locator(".summary-panel")).toContainText("已存¥810.00");
 
-  await addTextEntry(page, { amount: "800.00", note: "账户调拨" });
-  const treatment = page.getByRole("dialog", { name: "这笔怎么算" });
-  await expect(treatment).toBeVisible();
-  await treatment.getByRole("button", { name: "按日常算" }).click();
-  await expect(treatment).toBeHidden();
-  await page.getByRole("button", { name: "编辑账户调拨" }).click();
-  const transferEditor = page.getByRole("dialog", { name: "编辑记录" });
-  await transferEditor.getByLabel("分析处理方式").selectOption("account_transfer");
-  await transferEditor.getByRole("button", { name: "保存修改" }).click();
-  await expect(transferEditor).toBeHidden();
-  await expect(savingsPrompt).toHaveCount(0);
-  await expect(page.getByRole("article").filter({ hasText: "账户调拨" }))
-    .toContainText("账户转账");
-
   await page.getByRole("button", { name: "编辑动用测试" }).click();
   const editor = page.getByRole("dialog", { name: "编辑记录" });
+  await expect(editor.getByLabel("分析处理方式").locator('option[value="account_transfer"]'))
+    .toHaveCount(0);
+  await expect(editor).not.toContainText("账户间转账");
   await editor.getByLabel("金额").fill("199.00");
   await editor.getByRole("button", { name: "保存修改" }).click();
   await expect(savingsPrompt).toBeVisible();

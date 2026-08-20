@@ -4,6 +4,8 @@ import {
   INCOME_EXCEPTION_ABSOLUTE_MINOR,
   evaluateExceptionPrompt,
   expensePromptThresholdMinor,
+  expenseTreatmentOptions,
+  incomeTreatmentOptions,
 } from "./exception-prompt";
 import { testEntry, TEST_LEDGER_NOW, TEST_LEDGER_PLAN } from "./test-ledgers";
 import { calculateSpendingAnalysis } from "./stats";
@@ -46,6 +48,13 @@ function thresholdAnalysis(overrides: Partial<SpendingAnalysis> = {}): SpendingA
 }
 
 describe("evaluateExceptionPrompt", () => {
+  it("does not offer account transfers as a treatment", () => {
+    expect(expenseTreatmentOptions().map((option) => option.value))
+      .not.toContain("account_transfer");
+    expect(incomeTreatmentOptions().map((option) => option.value))
+      .not.toContain("account_transfer");
+  });
+
   it("does not prompt ordinary small expenses", () => {
     const history = Array.from({ length: 20 }, (_, index) => (
       testEntry(addLocalDays("2026-07-20", index), -1_000)

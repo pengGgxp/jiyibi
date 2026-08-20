@@ -94,14 +94,10 @@ export function EditEntryDialog({
 
   if (!entry) return null;
 
-  const baseTreatmentOptions = kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions();
-  const transferOption = incomeTreatmentOptions().find((option) => option.value === "account_transfer");
-  const treatmentOptions = [
-    ...baseTreatmentOptions,
-    ...(kind === "expense" && transferOption ? [transferOption] : []),
-  ].filter((option, index, options) =>
-    treatmentMatchesAmount(option.value, kind === "expense" ? -1 : 1)
-    && options.findIndex((candidate) => candidate.value === option.value) === index);
+  const treatmentOptions = (kind === "expense" ? expenseTreatmentOptions() : incomeTreatmentOptions())
+    .filter((option) => option.value !== "account_transfer"
+      && treatmentMatchesAmount(option.value, kind === "expense" ? -1 : 1));
+  const hasLegacyTransferTreatment = treatment === "account_transfer";
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -168,14 +164,19 @@ export function EditEntryDialog({
                 value={treatment}
                 onChange={(event) => setTreatment(event.target.value as EntryTreatment)}
               >
+                {hasLegacyTransferTreatment ? (
+                  <option value="account_transfer" disabled>旧记录</option>
+                ) : null}
                 {treatmentOptions.map((option) => (
                   <option key={option.value} value={option.value}>
-                    {option.value === "account_transfer" ? "账户间转账" : option.label}
+                    {option.label}
                   </option>
                 ))}
               </select>
               <small className="field-help">
-                {treatmentOptions.find((option) => option.value === treatment)?.detail}
+                {hasLegacyTransferTreatment
+                  ? "可保留旧记录，或改为新的处理方式。"
+                  : treatmentOptions.find((option) => option.value === treatment)?.detail}
               </small>
             </label>
           </>

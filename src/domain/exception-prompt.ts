@@ -216,11 +216,6 @@ export function expenseTreatmentOptions(): Array<{
       label: "之后报销",
       detail: "先减少当前余额；报销到账前不计入日常花法。",
     },
-    {
-      value: "account_transfer",
-      label: "自己的账户间转账",
-      detail: "确认后不改变全部个人可用资金，也不进现金流。",
-    },
   ];
 }
 
@@ -239,11 +234,6 @@ export function incomeTreatmentOptions(): Array<{
       value: "refund_reimbursement",
       label: "退款或报销",
       detail: "增加余额；可在之后关联原始支出以调整日常花法。",
-    },
-    {
-      value: "account_transfer",
-      label: "自己的账户间转账",
-      detail: "确认后不改变全部个人可用资金，也不进现金流。",
     },
   ];
 }
